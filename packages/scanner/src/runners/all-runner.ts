@@ -131,21 +131,32 @@ async function main() {
   let scanCount = 0;
   const seenOpps = new Map<string, number>();
   const DEDUP_WINDOW_MS = 5 * 60_000;
+  // Sports scan is expensive (5 API calls per scan, 500/month quota).
+  // Only scan sports every N ticks (default: every 10 ticks = ~10 min at 60s interval).
+  const SPORTS_SCAN_EVERY_N_TICKS = Number(process.env.SPORTS_SCAN_EVERY_N_TICKS ?? 10);
+  let lastSportsScan = 0;
 
   async function tick() {
     scanCount++;
     const start = Date.now();
     try {
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, sportsAlerts] = await Promise.all([
+      // Throttle sports scan to preserve Odds API quota (500/month)
+      const shouldScanSports = (scanCount - lastSportsScan) >= SPORTS_SCAN_EVERY_N_TICKS;
+      const sportsAlerts = shouldScanSports
+        ? await sportsArb.scan().catch(e => { console.warn(`sports failed: ${e.message}`); return [] as SportsArbAlert[]; })
+        : [];
+      if (shouldScanSports) lastSportsScan = scanCount;
+
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
         solanaArb.scan().catch(e => { console.warn(`solana failed: ${e.message}`); return [] as SolanaArbAlert[]; }),
         predictionArb.scan().catch(e => { console.warn(`prediction failed: ${e.message}`); return [] as PredictionArbAlert[]; }),
-        sportsArb.scan().catch(e => { console.warn(`sports failed: ${e.message}`); return [] as SportsArbAlert[]; }),
       ]);
 
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} sports=${sportsAlerts.length} | ${Date.now() - start}ms`);
+      const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
