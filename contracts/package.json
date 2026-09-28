@@ -1,0 +1,25 @@
+{
+  "name": "@edge/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentVault smart contract — Solidity source + deployment scripts",
+  "scripts": {
+    "compile": "tsx scripts/compile.ts",
+    "preflight": "tsx scripts/preflight.ts",
+    "deploy:base":     "tsx scripts/deploy.ts --chain base",
+    "deploy:arbitrum": "tsx scripts/deploy.ts --chain arbitrum",
+    "deploy:bsc":      "tsx scripts/deploy.ts --chain bsc",
+    "verify":          "tsx scripts/verify.ts"
+  },
+  "dependencies": {
+    "@edge/types": "workspace:*",
+    "@edge/config": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "viem": "^2.21.0",
+    "solc": "^0.8.27"
+  }
+}

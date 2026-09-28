@@ -1,0 +1,32 @@
+{
+  "name": "edge-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Unified arbitrage engine — DEX/CEX/perps/prediction/sports/MEV. Continuous monitoring + atomic execution.",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@12.6.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "scanner:funding": "pnpm --filter @edge/scanner start:funding",
+    "scanner:dexcex": "pnpm --filter @edge/scanner start:dexcex",
+    "scanner:prediction": "pnpm --filter @edge/scanner start:prediction",
+    "alerts:test": "pnpm --filter @edge/alerts test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1",
+    "solc": "^0.8.37"
+  }
+}

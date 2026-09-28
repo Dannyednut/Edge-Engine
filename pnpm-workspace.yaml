@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  - 'contracts'
+
+allowBuilds:
+  esbuild: set this to true or false
+
+onlyBuiltDependencies:
+  - esbuild

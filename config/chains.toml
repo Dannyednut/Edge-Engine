@@ -1,0 +1,65 @@
+# Edge-Engine chain config
+# Secrets (RPC API keys) are interpolated from environment variables.
+# Format: ${VAR_NAME} — substituted at load time by @edge/config.
+
+[ethereum]
+rpc_http       = "https://0xrpc.io/eth"
+rpc_ws         = "wss://0xrpc.io/eth/ws"
+explorer       = "https://etherscan.io"
+flashloan_provider = "aave-v3"
+native_token   = "ETH"
+gas_estimate_usd = 4.50
+
+[arbitrum]
+rpc_http       = "https://arb1.arbitrum.io/rpc"
+rpc_ws         = "wss://arb1.arbitrum.io/ws"
+explorer       = "https://arbiscan.io"
+flashloan_provider = "aave-v3"
+native_token   = "ETH"
+gas_estimate_usd = 0.10
+
+[base]
+rpc_http       = "https://mainnet.base.org"
+rpc_ws         = "wss://mainnet.base.org/wss"
+explorer       = "https://basescan.org"
+flashloan_provider = "aave-v3"
+native_token   = "ETH"
+gas_estimate_usd = 0.08
+
+[optimism]
+rpc_http       = "https://mainnet.optimism.io"
+rpc_ws         = "wss://mainnet.optimism.io/ws"
+explorer       = "https://optimistic.etherscan.io"
+flashloan_provider = "aave-v3"
+native_token   = "ETH"
+gas_estimate_usd = 0.05
+
+[polygon]
+rpc_http       = "https://polygon-bor-rpc.publicnode.com"
+rpc_ws         = "wss://polygon-bor-rpc.publicnode.com"
+explorer       = "https://polygonscan.com"
+flashloan_provider = "aave-v3"
+native_token   = "MATIC"
+gas_estimate_usd = 0.02
+
+[bsc]
+rpc_http       = "https://bsc-rpc.publicnode.com"
+rpc_ws         = "wss://bsc-rpc.publicnode.com"
+explorer       = "https://bscscan.com"
+flashloan_provider = "aave-v3"
+native_token   = "BNB"
+gas_estimate_usd = 0.20
+
+[zksync]
+rpc_http       = "https://mainnet.era.zksync.io"
+rpc_ws         = "wss://mainnet.era.zksync.io/ws"
+explorer       = "https://explorer.zksync.io"
+flashloan_provider = "aave-v3"
+native_token   = "ETH"
+gas_estimate_usd = 0.05
+
+[solana]
+rpc_http       = "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+explorer       = "https://solscan.io"
+native_token   = "SOL"
+gas_estimate_usd = 0.0001
