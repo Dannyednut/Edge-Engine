@@ -94,6 +94,7 @@ async function main() {
     vooiVenueSet: ['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate'],
     autoExecute: AUTO_EXECUTE,
     maxNotionalUsd: 5000,
+    minHlFundingApr: 0.02,
   });
 
   console.log(`  Strategies: [${perpFundingStrat.id}, ${cexHlStrat.id}]`);
