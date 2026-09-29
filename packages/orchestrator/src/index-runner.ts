@@ -1,19 +1,29 @@
 /**
- * Orchestrator entry point — spawns all 6 department agents + monitors them.
+ * Orchestrator entry point — the MANAGER (me) + 5 worker agents.
  *
- * Usage: pnpm --filter @edge/orchestrator start
+ * Architecture (corrected per principal feedback):
+ *   - I (the orchestrator / main agent) am the MANAGER. I do research myself
+ *     (web search, read papers, evaluate tools, think about strategy). This
+ *     is NOT a code loop — it is me actually working.
+ *   - When I discover something worth building, I assign a TASK to EngineeringAgent.
+ *   - When I find a new edge to monitor, I assign a TASK to MonitoringAgent.
+ *   - When I decide on capital allocation, I assign a TASK to EconomicsAgent.
+ *   - The 5 sub-agents are my WORKERS. They do not initiate. I do.
  *
- * In production (on principal's server): runs 24/7, spawns all agents.
- * In sandbox: can be run standalone to verify the architecture compiles
- * and the message bus works. Long-running agents won't survive sandbox
- * process kills — each agent can also be run individually via its npm script.
+ * The 5 worker agents:
+ *   1. EngineeringAgent   — builds modules when I assign tasks
+ *   2. MonitoringAgent    — scans known edges when I assign tasks
+ *   3. ExecutionAgent     — executes trades when I assign tasks
+ *   4. EconomicsAgent     — manages capital when I assign tasks
+ *   5. OperationsAgent    — handles infra when I assign tasks
+ *
+ * Research is NOT a separate agent. Research is MY job. I am the manager.
  */
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { Orchestrator, MessageBus } from './index.js';
-import { ResearchAgent } from './agents/research-agent.js';
 import { EngineeringAgent } from './agents/engineering-agent.js';
 import { MonitoringAgent } from './agents/monitoring-agent.js';
 import { ExecutionAgent } from './agents/execution-agent.js';
@@ -37,13 +47,13 @@ try {
 
 async function main() {
   console.log('═══════════════════════════════════════════════════');
-  console.log('  Edge-Engine Orchestrator — 6 Department Agents');
+  console.log('  Edge-Engine — Manager + 5 Worker Agents');
+  console.log('  (I am the manager. I research. I dispatch. They execute.)');
   console.log('═══════════════════════════════════════════════════\n');
 
   const messageBus = new MessageBus({ dbPath: 'data/agent-messages.sqlite' });
 
   const agents = [
-    new ResearchAgent(messageBus),
     new EngineeringAgent(messageBus),
     new MonitoringAgent(messageBus, process.env.SHARPE_API_KEY, process.env.VOOI_API_TOKEN),
     new ExecutionAgent(messageBus),
@@ -70,14 +80,14 @@ async function main() {
   // Print status every 60s
   setInterval(() => {
     const status = orchestrator.getStatus();
-    console.log('\n[orchestrator] agent status:');
+    console.log('\n[manager] worker status:');
     for (const s of status) {
       console.log(`  ${s.agentId.padEnd(15)} ${s.status.padEnd(10)} ${s.currentTask ? 'task: ' + s.currentTask : ''}`);
     }
   }, 60_000);
 
-  // Keep the process alive
-  console.log('\n[orchestrator] running. Press Ctrl+C to stop.');
+  console.log('\n[manager] running. I research, I dispatch, workers execute. Press Ctrl+C to stop.');
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
+
