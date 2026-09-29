@@ -266,6 +266,40 @@ importers:
         specifier: ^2.21.0
         version: 2.56.9(typescript@5.9.3)
 
+  packages/orchestrator:
+    dependencies:
+      '@edge/alerts':
+        specifier: workspace:*
+        version: link:../alerts
+      '@edge/config':
+        specifier: workspace:*
+        version: link:../config
+      '@edge/pnl':
+        specifier: workspace:*
+        version: link:../pnl
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../risk
+      '@edge/scanner':
+        specifier: workspace:*
+        version: link:../scanner
+      '@edge/sharpe-client':
+        specifier: workspace:*
+        version: link:../sharpe-client
+      '@edge/types':
+        specifier: workspace:*
+        version: link:../types
+      '@edge/vooi-client':
+        specifier: workspace:*
+        version: link:../vooi-client
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   packages/pnl:
     dependencies:
       '@edge/types':

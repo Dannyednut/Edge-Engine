@@ -1,0 +1,39 @@
+{
+  "name": "@edge/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/index-runner.ts",
+    "start:research": "tsx src/agents/research-agent.ts",
+    "start:engineering": "tsx src/agents/engineering-agent.ts",
+    "start:monitoring": "tsx src/agents/monitoring-agent.ts",
+    "start:execution": "tsx src/agents/execution-agent.ts",
+    "start:economics": "tsx src/agents/economics-agent.ts",
+    "start:operations": "tsx src/agents/operations-agent.ts"
+  },
+  "dependencies": {
+    "@edge/types": "workspace:*",
+    "@edge/config": "workspace:*",
+    "@edge/alerts": "workspace:*",
+    "@edge/pnl": "workspace:*",
+    "@edge/risk": "workspace:*",
+    "@edge/scanner": "workspace:*",
+    "@edge/sharpe-client": "workspace:*",
+    "@edge/vooi-client": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0"
+  }
+}
