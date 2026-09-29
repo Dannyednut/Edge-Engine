@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test.ts"
+    "test": "tsx src/test.ts",
+    "listen": "tsx src/listener.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*"
