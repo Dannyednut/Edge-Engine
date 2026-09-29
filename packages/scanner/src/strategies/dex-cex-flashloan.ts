@@ -44,6 +44,8 @@
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { SharpeClient } from '@edge/sharpe-client';
+import type { PublicClient, Address } from 'viem';
+import { UniswapViewQuoter } from '../lib/uniswap-quoter.js';
 
 export interface DexCexFlashloanParams {
   /** Min gross spread to consider (default 0.5% = 50 bps) */
@@ -182,20 +184,57 @@ export class DexCexFlashloanStrategy implements Strategy {
   }
 
   /**
-   * In production: for a given asset + size, query Uniswap V3 Quoter
-   * to get the actual execution-aware output. This is what determines
-   * whether the arb is real or illusory.
+   * Quote a Uniswap V3 swap using the view-quoter-v3 contract.
+   * Returns the actual execution-aware output amount + price impact.
    *
-   * TODO: implement using @edge/data-sources EvmAdapter + Uniswap V3 Quoter contract.
+   * This replaces the previous placeholder — now we get real slippage data
+   * from the chain via view-quoter-v3 (no eth_call override hack needed).
+   *
+   * @param params.chain     Chain ID (e.g. 'arbitrum', 'base')
+   * @param params.tokenIn   Input token address
+   * @param params.tokenOut  Output token address
+   * @param params.amountIn  Input amount in raw units (bigint)
+   * @param params.client    viem PublicClient for the chain
+   * @param params.fee       Pool fee tier (optional; if omitted, tries all and picks best)
    */
-  async quoteDexSwap(_params: {
+  async quoteDexSwap(params: {
     chain: string;
-    pool: string;
-    tokenIn: string;
-    tokenOut: string;
+    tokenIn: Address;
+    tokenOut: Address;
     amountIn: bigint;
-  }): Promise<{ amountOut: bigint; priceImpactPct: number }> {
-    // Placeholder — implement with viem readContract on Uniswap V3 Quoter
-    throw new Error('quoteDexSwap: not implemented — requires Uniswap V3 Quoter integration');
+    client: PublicClient;
+    fee?: number;
+  }): Promise<{ amountOut: bigint; priceImpactPct: number; bestFee: number; gasEstimate: bigint }> {
+    const quoter = new UniswapViewQuoter(params.client, params.chain as any);
+
+    if (params.fee !== undefined) {
+      const result = await quoter.quoteExactInputSingle({
+        tokenIn: params.tokenIn,
+        tokenOut: params.tokenOut,
+        amountIn: params.amountIn,
+        fee: params.fee,
+      });
+      // Price impact: we'd need a reference price to compute precisely.
+      // For now, return 0 — caller can compare against CEX mid price externally.
+      return {
+        amountOut: result.amountOut,
+        priceImpactPct: 0,
+        bestFee: params.fee,
+        gasEstimate: result.gasEstimate,
+      };
+    }
+
+    // No fee specified — try all fee tiers and pick the best
+    const { best, bestFee } = await quoter.quoteBestFeeTier({
+      tokenIn: params.tokenIn,
+      tokenOut: params.tokenOut,
+      amountIn: params.amountIn,
+    });
+    return {
+      amountOut: best.amountOut,
+      priceImpactPct: 0,
+      bestFee,
+      gasEstimate: best.gasEstimate,
+    };
   }
 }

@@ -29,7 +29,8 @@
     "@edge/risk": "workspace:*",
     "@edge/sharpe-client": "workspace:*",
     "@edge/vooi-client": "workspace:*",
-    "@edge/pumpapi-client": "workspace:*"
+    "@edge/pumpapi-client": "workspace:*",
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

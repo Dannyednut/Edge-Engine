@@ -9,7 +9,6 @@
  * via TelegramAlerter.
  */
 
-import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import type { InboxEntry } from './listener.ts';
 

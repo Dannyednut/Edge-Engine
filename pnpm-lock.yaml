@@ -331,6 +331,9 @@ importers:
       '@edge/vooi-client':
         specifier: workspace:*
         version: link:../vooi-client
+      viem:
+        specifier: ^2.21.0
+        version: 2.56.9(typescript@5.9.3)
     devDependencies:
       tsx:
         specifier: ^4.19.0
