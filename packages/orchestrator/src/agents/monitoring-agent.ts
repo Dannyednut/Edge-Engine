@@ -12,33 +12,43 @@
  */
 
 import { BaseAgent, type Task, type MessageBus } from '../index.js';
+import { SharpeClient } from '@edge/sharpe-client';
+import { VooiClient } from '@edge/vooi-client';
 
 export class MonitoringAgent extends BaseAgent {
   readonly agentId = 'monitoring' as const;
   private scannerRunning = false;
   private listenerRunning = false;
   private lastScanResult?: { ts: number; perpCount: number; cexHlCount: number; predCount: number };
+  private sharpe: SharpeClient;
+  private vooi: VooiClient;
+  private readonly scanIntervalMs = 60_000;  // 60s
 
-  constructor(messageBus: MessageBus) {
+  constructor(messageBus: MessageBus, sharpeApiKey?: string, vooiApiToken?: string) {
     super({ agentId: 'monitoring', messageBus });
+    this.sharpe = new SharpeClient({ apiKey: sharpeApiKey });
+    this.vooi = new VooiClient({ apiToken: vooiApiToken });
   }
 
   protected async run(): Promise<void> {
-    // Start scanner + listener automatically on boot
-    await this.startScanner();
+    // Start listener in background
     await this.startListener();
 
-    // Main loop: monitor scanner/listener health
+    // Main loop: scan known edges every 60s + health checks
     while (this.status === 'alive') {
-      if (!this.scannerRunning) {
-        console.warn('[monitoring] scanner died — restarting...');
-        await this.startScanner();
+      try {
+        await this.scanKnownEdges();
+      } catch (err) {
+        console.error('[monitoring] scan failed:', err);
       }
+
+      // Health check
       if (!this.listenerRunning) {
         console.warn('[monitoring] listener died — restarting...');
         await this.startListener();
       }
-      await sleep(30_000);  // health check every 30s
+
+      await sleep(this.scanIntervalMs);
     }
   }
 
@@ -61,18 +71,58 @@ export class MonitoringAgent extends BaseAgent {
   }
 
   private async startScanner(): Promise<unknown> {
-    console.log('[monitoring] starting scanner...');
+    console.log('[monitoring] scanner embedded (runs in main loop)');
+    this.scannerRunning = true;
+    return { started: true, ts: Date.now() };
+  }
+
+  /**
+   * Scan known edges: Sharpe cross-exchange + VOOI arbitrage scanner.
+   * This is the routine monitoring of already-identified landscapes.
+   * (ResearchAgent handles discovering NEW landscapes — not this.)
+   */
+  private async scanKnownEdges(): Promise<void> {
+    // Pull Sharpe cross-exchange arbs
+    const sharpeResp = await this.sharpe.crossExchangeFunding({
+      minApr: 8,
+      minOiUsd: 100_000,
+      assetClass: 'crypto',
+    });
+
+    // Pull VOOI scanner
+    let vooiCount = 0;
     try {
-      // In production: spawn the scanner as a child process
-      // const child = fork('./packages/scanner/src/runners/all-runner.ts');
-      // For now, just mark as running (the actual scanner runs separately)
-      this.scannerRunning = true;
-      this.sendMessage('orchestrator', 'STATUS', 'scanner started', { running: true });
-      return { started: true, ts: Date.now() };
+      const vooiResp = await this.vooi.scanArbitrage({
+        minOpenInterest: 100_000,
+        notionalUsd: 5000,
+        orderBy: 'fundingSpread1h',
+        orderDirection: 'desc',
+        limit: 20,
+      });
+      vooiCount = vooiResp.total;
     } catch (err) {
-      this.scannerRunning = false;
-      throw err;
+      console.warn('[monitoring] VOOI scan failed:', err);
     }
+
+    this.lastScanResult = {
+      ts: Date.now(),
+      perpCount: sharpeResp.data.length,
+      cexHlCount: 0,  // would be computed by CexHlFundingArbStrategy
+      predCount: 0,   // would be computed by PredictionArbStrategy
+    };
+
+    // Alert on exceptional arbs
+    const exceptional = sharpeResp.data.find(r => (r.netApr ?? 0) > 50);
+    if (exceptional) {
+      this.sendMessage('orchestrator', 'ALERT', 'Exceptional arb detected', {
+        asset: exceptional.coin || exceptional.asset,
+        netApr: exceptional.netApr,
+        long: exceptional.longExchange,
+        short: exceptional.shortExchange,
+      });
+    }
+
+    console.log(`[monitoring] scan: ${sharpeResp.data.length} Sharpe arbs, ${vooiCount} VOOI pairs`);
   }
 
   private async stopScanner(): Promise<unknown> {

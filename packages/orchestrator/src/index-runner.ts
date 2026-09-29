@@ -43,9 +43,9 @@ async function main() {
   const messageBus = new MessageBus({ dbPath: 'data/agent-messages.sqlite' });
 
   const agents = [
-    new ResearchAgent(messageBus, process.env.SHARPE_API_KEY, process.env.VOOI_API_TOKEN),
+    new ResearchAgent(messageBus),
     new EngineeringAgent(messageBus),
-    new MonitoringAgent(messageBus),
+    new MonitoringAgent(messageBus, process.env.SHARPE_API_KEY, process.env.VOOI_API_TOKEN),
     new ExecutionAgent(messageBus),
     new EconomicsAgent(messageBus),
     new OperationsAgent(messageBus),
