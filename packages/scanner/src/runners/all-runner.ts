@@ -26,6 +26,8 @@ import { DexCexFlashloanStrategy, type DexCexArbAlert } from '../strategies/dex-
 import { SolanaMultiAmmArbStrategy, type SolanaArbAlert } from '../strategies/solana-memmecoin-arb.js';
 import { PredictionArbStrategy, type PredictionArbAlert } from '../strategies/prediction-arb.js';
 import { SportsArbStrategy, type SportsArbAlert } from '../strategies/sports-arb.js';
+import { PendleBorosScanner, type BorosArbAlert } from '../strategies/pendle-boros-scanner.js';
+import { TokenizedEquityScanner, type TokenizedEquityAlert } from '../strategies/tokenized-equity-scanner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -124,7 +126,22 @@ async function main() {
     bookmakers: [],
   });
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb]`);
+  // Strategy 7: Pendle Boros funding rate swap arb
+  const pendleBoros = new PendleBorosScanner({
+    minSpreadApr: 0.5,
+    maxSizeUsd: 5000,
+    minNotionalOI: 10_000,
+    platforms: [],
+  });
+
+  // Strategy 8: Tokenized equity arb (monitoring-only on Backpack)
+  const tokenizedEquity = new TokenizedEquityScanner({
+    minActionableSpreadPct: 2.0,
+    minActionableDepthUsd: 500,
+    markets: ['SPCX.US_USDC', 'SNDK.US_USDC'],
+  });
+
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -147,16 +164,18 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts] = await Promise.all([
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
         solanaArb.scan().catch(e => { console.warn(`solana failed: ${e.message}`); return [] as SolanaArbAlert[]; }),
         predictionArb.scan().catch(e => { console.warn(`prediction failed: ${e.message}`); return [] as PredictionArbAlert[]; }),
+        pendleBoros.scan().catch(e => { console.warn(`boros failed: ${e.message}`); return [] as BorosArbAlert[]; }),
+        tokenizedEquity.scan().catch(e => { console.warn(`equity failed: ${e.message}`); return [] as TokenizedEquityAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -290,6 +309,50 @@ async function main() {
             `Est. profit: $${a.estimatedProfitUsd.toFixed(2)} on $500 stake`,
             `Sharp book: ${a.hasSharpBook ? 'YES' : 'NO'}`,
             ...a.outcomes.map(o => `  ${o.label}: ${o.bestPrice} @ ${o.bestBook}`),
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process Boros alerts
+      for (const a of borosAlerts.slice(0, 3)) {
+        const key = `boros|${a.market.marketId}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `boros_${a.market.marketId}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'pendle_boros',
+          title: `[BOROS] ${a.market.platform} ${a.market.underlying} spread ${a.spreadApr.toFixed(1)}%`,
+          body: [
+            `Market: ${a.market.name}`,
+            `Mark APR: ${(a.market.markApr * 100).toFixed(2)}%  Floating: ${(a.market.floatingApr * 100).toFixed(2)}%`,
+            `Spread: ${a.spreadApr.toFixed(2)}%  Direction: ${a.direction}`,
+            `Est. profit: $${a.estimatedProfitUsd.toFixed(2)} on $5000`,
+            `Maturity: ${a.daysToMaturity.toFixed(0)} days  OI: $${a.market.notionalOI.toFixed(0)}`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process tokenized equity alerts (only when actionable)
+      for (const a of equityAlerts.filter(a => a.actionable).slice(0, 2)) {
+        const key = `equity|${a.symbol}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `equity_${a.symbol}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'tokenized_equity',
+          title: `[EQUITY] ${a.symbol} basis ${a.basisPct.toFixed(2)}% — ACTIONABLE`,
+          body: [
+            `Symbol: ${a.symbol}`,
+            `Spot: $${a.spotPrice}  Perp: $${a.perpPrice}`,
+            `Basis: ${a.basisPct.toFixed(2)}%`,
+            `Spot spread: ${a.spotSpreadPct?.toFixed(1)}%  Perp spread: ${a.perpSpreadPct?.toFixed(1)}%`,
+            `Spot depth: $${a.spotDepthUsd?.toFixed(0)}  Perp depth: $${a.perpDepthUsd?.toFixed(0)}`,
           ].join('\n'),
           channels: ['telegram'],
         });
