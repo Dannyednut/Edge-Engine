@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@edge/types": "workspace:*",
-    "@edge/config": "workspace:*"
+    "@edge/config": "workspace:*",
+    "ccxt": "^4.4.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
