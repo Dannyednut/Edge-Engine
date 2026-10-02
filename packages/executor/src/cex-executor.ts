@@ -117,7 +117,7 @@ export class CexExecutor {
   /** Get account balance. */
   async getBalance(): Promise<Record<string, { free: number; used: number; total: number }>> {
     const balance = await this.exchange.fetchBalance();
-    return balance.total as Record<string, { free: number; used: number; total: number }>;
+    return balance.total as unknown as Record<string, { free: number; used: number; total: number }>;
   }
 
   /** Get open positions (for futures/perps). */
@@ -131,7 +131,7 @@ export class CexExecutor {
   /** Get deposit address for a token (for transferring from DEX to CEX). */
   async getDepositAddress(currency: string): Promise<{ address: string; tag?: string }> {
     const addr = await this.exchange.fetchDepositAddress(currency);
-    return { address: addr.address, tag: addr.tag };
+    return { address: String(addr.address), tag: addr.tag ? String(addr.tag) : undefined };
   }
 
   /** Withdraw to a specific address. */
