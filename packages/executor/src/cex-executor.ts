@@ -78,11 +78,13 @@ export class CexExecutor {
     midPrice: number;
   }> {
     const ob = await this.exchange.fetchOrderBook(symbol, limit);
-    const bestBid = ob.bids.length > 0 ? ob.bids[0][0] : 0;
-    const bestAsk = ob.asks.length > 0 ? ob.asks[0][0] : 0;
-    const midPrice = (Number(bestBid) + Number(bestAsk)) / 2;
+    const bestBid = ob.bids.length > 0 ? Number(ob.bids[0][0]) : 0;
+    const bestAsk = ob.asks.length > 0 ? Number(ob.asks[0][0]) : 0;
+    const midPrice = (bestBid + bestAsk) / 2;
     const spread = midPrice > 0 ? (bestAsk - bestBid) / midPrice : 0;
-    return { bids: ob.bids, asks: ob.asks, spread, midPrice };
+    const bids = ob.bids.map(([p, q]) => [Number(p), Number(q)] as [number, number]);
+    const asks = ob.asks.map(([p, q]) => [Number(p), Number(q)] as [number, number]);
+    return { bids, asks, spread, midPrice };
   }
 
   /** Place a market order. */
