@@ -45,7 +45,9 @@ export class CexExecutor {
     if (opts.passphrase) config.password = opts.passphrase;
     if (opts.sandbox) config.sandbox = true;
 
-    this.exchange = new ccxt[opts.exchangeId](config);
+    const ExchangeClass = (ccxt as any)[opts.exchangeId];
+    if (!ExchangeClass) throw new Error(`Unknown exchange: ${opts.exchangeId}`);
+    this.exchange = new ExchangeClass(config);
   }
 
   /** Get ticker (last price, bid, ask, volume). */
@@ -78,7 +80,7 @@ export class CexExecutor {
     const ob = await this.exchange.fetchOrderBook(symbol, limit);
     const bestBid = ob.bids.length > 0 ? ob.bids[0][0] : 0;
     const bestAsk = ob.asks.length > 0 ? ob.asks[0][0] : 0;
-    const midPrice = (bestBid + bestAsk) / 2;
+    const midPrice = (Number(bestBid) + Number(bestAsk)) / 2;
     const spread = midPrice > 0 ? (bestAsk - bestBid) / midPrice : 0;
     return { bids: ob.bids, asks: ob.asks, spread, midPrice };
   }
