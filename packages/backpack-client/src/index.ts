@@ -65,6 +65,29 @@ export interface BackpackMarket {
   filters: Record<string, unknown>;
 }
 
+export interface BackpackOrder {
+  id: string;
+  clientId?: string;
+  symbol: string;
+  side: 'Bid' | 'Ask';
+  orderType: 'Limit' | 'Market';
+  quantity: string;
+  executedQuantity: string;
+  price?: string;
+  timeInForce?: string;
+  status: 'Open' | 'Filled' | 'Cancelled' | 'PartiallyFilled' | 'Rejected';
+  createdAt: number;
+  updatedAt?: number;
+  fills?: Array<{ price: string; quantity: string; fee: string }>;
+}
+
+export interface BackpackBalance {
+  asset: string;
+  available: string;
+  total: string;
+  locked: string;
+}
+
 // ─── Client ────────────────────────────────────────────────────────────
 
 export class BackpackClient {
@@ -143,16 +166,108 @@ export class BackpackClient {
     return bases;
   }
 
-  // ─── Private endpoints (require auth — TODO: implement HMAC signing) ─
+  // ─── Private endpoints (require HMAC-SHA256 auth) ──────────────────
 
-  // async placeOrder(params: { ... }): Promise<Order> {
-  //   // Requires HMAC-SHA256 signed request with API key + secret
-  //   // TODO: implement when we have Backpack API credentials
-  // }
+  /**
+   * Sign a private request with HMAC-SHA256.
+   * Backpack uses Ed25519 or API key signing. The API key signing works as:
+   *   1. Build a signing message: timestamp + instruction + params
+   *   2. HMAC-SHA256 the message with the API secret (base64-decoded)
+   *   3. Send as Base58-encoded signature in X-TBX-SIGNATURE header
+   *
+   * NOTE: Backpack actually uses Ed25519 signing for private endpoints, not
+   * HMAC-SHA256. The API key/secret pair is used to derive an Ed25519 keypair.
+   * For now, this is a placeholder — we need Backpack API credentials to test.
+   */
 
-  // async getBalances(): Promise<Balance[]> {
-  //   // TODO: implement when we have Backpack API credentials
-  // }
+  /** Place an order (spot or perp). Requires API credentials. */
+  async placeOrder(params: {
+    symbol: string;
+    side: 'Bid' | 'Ask';        // Backpack uses Bid/Ask not buy/sell
+    orderType: 'Limit' | 'Market';
+    quantity: string;
+    price?: string;              // required for Limit
+    timeInForce?: 'GTC' | 'IOC' | 'FOK' | 'PO';
+    postOnly?: boolean;
+    reduceOnly?: boolean;
+  }): Promise<BackpackOrder> {
+    return this.privatePost<BackpackOrder>('/order', {
+      symbol: params.symbol,
+      side: params.side,
+      orderType: params.orderType,
+      quantity: params.quantity,
+      ...(params.price ? { price: params.price } : {}),
+      ...(params.timeInForce ? { timeInForce: params.timeInForce } : {}),
+      ...(params.postOnly !== undefined ? { postOnly: params.postOnly } : {}),
+      ...(params.reduceOnly !== undefined ? { reduceOnly: params.reduceOnly } : {}),
+    });
+  }
+
+  /** Cancel an order. */
+  async cancelOrder(orderId: string, symbol: string): Promise<unknown> {
+    return this.privateDelete(`/order?orderId=${orderId}&symbol=${symbol}`);
+  }
+
+  /** Get account balances. */
+  async getBalances(): Promise<BackpackBalance[]> {
+    return this.privateGet<BackpackBalance[]>('/capital');
+  }
+
+  /** Get open orders. */
+  async getOpenOrders(symbol?: string): Promise<BackpackOrder[]> {
+    const params = symbol ? `?symbol=${symbol}` : '';
+    return this.privateGet<BackpackOrder[]>(`/orders${params}`);
+  }
+
+  /** Get order history. */
+  async getOrderHistory(symbol?: string, limit?: number): Promise<BackpackOrder[]> {
+    const params = new URLSearchParams();
+    if (symbol) params.set('symbol', symbol);
+    if (limit) params.set('limit', String(limit));
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return this.privateGet<BackpackOrder[]>(`/orderHistory${query}`);
+  }
+
+  // ─── Internal: signed request helpers ──────────────────────────────
+
+  private async privateGet<T>(path: string): Promise<T> {
+    return this.signedRequest<T>('GET', path, undefined);
+  }
+
+  private async privatePost<T>(path: string, body: unknown): Promise<T> {
+    return this.signedRequest<T>('POST', path, body);
+  }
+
+  private async privateDelete<T>(path: string): Promise<T> {
+    return this.signedRequest<T>('DELETE', path, undefined);
+  }
+
+  /**
+   * Make a signed request to Backpack's private API.
+   * Uses Ed25519 signing with the API key/secret pair.
+   *
+   * NOTE: This is a placeholder implementation. Backpack's actual signing
+   * scheme requires:
+   *   1. Base58-decode the API secret to get the Ed25519 private key
+   *   2. Build the signing message: timestamp + instruction + base64(params)
+   *   3. Sign with Ed25519
+   *   4. Send headers: X-TBX-APIKEY, X-TBX-TIMESTAMP, X-TBX-SIGNATURE, X-TBX-RECV-WINDOW
+   *
+   * We need @noble/ed25519 or tweetnacl for the signing. Will implement
+   * when we have Backpack API credentials to test with.
+   */
+  private async signedRequest<T>(_method: string, _path: string, _body: unknown): Promise<T> {
+    if (!this._apiKey || !this._apiSecret) {
+      throw new Error('BackpackClient: private endpoints require apiKey + apiSecret');
+    }
+
+    // TODO: implement Ed25519 signing when we have credentials
+    // For now, throw with a clear message
+    throw new Error(
+      'BackpackClient: signed requests not yet implemented — needs Ed25519 signing library + API credentials. ' +
+      'Get credentials from backpack.exchange/api-keys'
+    );
+  }
 
   // ─── Internal helpers ───────────────────────────────────────────────
 
