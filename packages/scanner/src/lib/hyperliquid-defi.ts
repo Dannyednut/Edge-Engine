@@ -75,3 +75,46 @@ export const HL_TOKEN_DECIMALS: Record<string, number> = {
   USR:    18,
   USDH:   18,
 };
+
+// ─── HyperSwap V3 Pools (verified via V3 Factory getPool) ─────────────
+export const HYPERSWAP_V3_POOLS: Array<{ pair: string; fee: number; address: string }> = [
+  { pair: 'WHYPE/USDC',  fee: 500,   address: '0x264a1f3b9eb574a3e7be869ac415dc5430dcf571' },
+  { pair: 'WHYPE/USDC',  fee: 3000,  address: '0xe712d505572b3f84c1b4deb99e1beab9dd0e23c9' },
+  { pair: 'WHYPE/USDT0', fee: 100,   address: '0x7f63ac9b82905d870071024fa310cf0ab8a74ad1' },
+  { pair: 'WHYPE/USDT0', fee: 500,   address: '0x337b56d87a6185cd46af3ac2cdf03cbc37070c30' },
+  { pair: 'WHYPE/USDT0', fee: 3000,  address: '0x56abfaf40f5b7464e9cc8cff1af13863d6914508' },
+  { pair: 'WHYPE/USDT0', fee: 10000, address: '0xf40d57783c3359f160d006b9bc7a2e4311fe6a86' },
+  { pair: 'WHYPE/UETH',  fee: 100,   address: '0xa8defb49f8461d71f0dc35e2c0144dc781b4f561' },
+  { pair: 'WHYPE/UETH',  fee: 500,   address: '0x259232456df1520db37231a82e9c7c901ffedb35' },
+  { pair: 'WHYPE/UETH',  fee: 3000,  address: '0x719d7f4388cb0efb6a48f3c3266e443edce6588a' },
+  { pair: 'WHYPE/UETH',  fee: 10000, address: '0x9f5d0f0dd733e60b6ff2425e3f3e632cbad0a81f' },
+  { pair: 'WHYPE/UBTC',  fee: 100,   address: '0xd41b6a5ae88dccb54a58fce3d4a11cd3d6d707b0' },
+  { pair: 'WHYPE/UBTC',  fee: 500,   address: '0xbbcf8523811060e1c112a8459284a48a4b17661f' },
+  { pair: 'WHYPE/UBTC',  fee: 3000,  address: '0x3a36b04bcc1d5e2e303981ef643d2668e00b43e7' },
+  { pair: 'WHYPE/UBTC',  fee: 10000, address: '0xb2eb6d459759936160a57297e4a03e067dbbe5cb' },
+  { pair: 'WHYPE/kHYPE', fee: 100,   address: '0x5cbe810071de393de35e574fb2830e16da794bab' },
+  { pair: 'WHYPE/kHYPE', fee: 500,   address: '0x3fa4005668ae445e9cb88725fba8e8e88e508eb8' },
+  { pair: 'WHYPE/kHYPE', fee: 3000,  address: '0xdf20a6a8a03ab178f7874303598bc0281eb13923' },
+  { pair: 'WHYPE/kHYPE', fee: 10000, address: '0x332ec9391bd388d561ff8837427fc08794b7eb72' },
+  { pair: 'WHYPE/USDe',  fee: 500,   address: '0x546c3c51bcac838bcff9b08f906ce39b7e8789c4' },
+  { pair: 'WHYPE/USDe',  fee: 3000,  address: '0x1c501aff24ddef9abb58d4653f7bd41dbef68496' },
+  { pair: 'WHYPE/USDe',  fee: 10000, address: '0xfeee52beb3f263a307fdf0881ab6aacbbe9bd10e' },
+  { pair: 'USDC/USDT0',  fee: 100,   address: '0x55443b2a8ee28dc35172d9e7d8982b4282415356' },
+  { pair: 'USDC/USDT0',  fee: 500,   address: '0xbb3f50de0be1b66851b33a8a133658a1cf6847a8' },
+  { pair: 'UBTC/UETH',   fee: 100,   address: '0xea023b3e127af63f9bbea4e7908bfab7af7da2c2' },
+  { pair: 'UBTC/UETH',   fee: 500,   address: '0x4430c117ee56e26863f9f0ae7c8e9bd36c9b623a' },
+  { pair: 'UBTC/UETH',   fee: 3000,  address: '0x4c4ed89e17715bc4ebdcd2685f9152f8a0d8201e' },
+  { pair: 'UBTC/UETH',   fee: 10000, address: '0x1dc45adcdff099f4d3d3c92f2b2e97ed15289c65' },
+  { pair: 'UETH/USDe',   fee: 3000,  address: '0xd5d483ad52c20235f2fd2a64e6f00ea4cc90fdf4' },
+];
+
+// ─── V3 Pool helper: compute price from sqrtPriceX96 ──────────────────
+// price = (sqrtPriceX96 / 2^96)^2, adjusted for token decimals
+export function v3PriceToHuman(sqrtPriceX96: bigint, decimals0: number, decimals1: number): number {
+  if (sqrtPriceX96 === 0n) return 0;
+  // Price of token0 in terms of token1 = (sqrtPriceX96 / 2^96)^2 * 10^(decimals0 - decimals1)
+  const sqrtPrice = Number(sqrtPriceX96) / Math.pow(2, 96);
+  const rawPrice = sqrtPrice * sqrtPrice;
+  const decimalAdjustment = Math.pow(10, decimals0 - decimals1);
+  return rawPrice * decimalAdjustment;
+}
