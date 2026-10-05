@@ -14,7 +14,7 @@
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
-import { HYPERSWAP_V2_POOLS, HL_TOKENS, HL_TOKEN_DECIMALS, HYPEREVM_RPC } from '../lib/hyperliquid-defi.js';
+import { HYPERSWAP_V2_POOLS, HL_TOKEN_DECIMALS, HYPEREVM_RPC } from '../lib/hyperliquid-defi.js';
 
 export interface HlAmmArbParams {
   /** Min price spread % between AMM and orderbook (default 0.5%) */
