@@ -1,35 +1,32 @@
 /**
- * HlLstArbScanner — kHYPE/WHYPE LST arbitrage on HyperSwap V3.
+ * HlLstArbScanner — kHYPE/WHYPE LST carry arbitrage on HyperSwap V3.
  *
  * THE EDGE:
  *   kHYPE (Kinetiq liquid staked HYPE) trades at a discount to WHYPE on HyperSwap V3.
  *   Verified live Oct 8 2026: 1 WHYPE = 0.9754 kHYPE → kHYPE at 2.46% discount.
- *   If kHYPE is 1:1 redeemable for HYPE (like stETH for ETH), this is a persistent arb.
  *
- *   The discount exists because:
- *   - kHYPE has withdrawal delay (unstake queue)
- *   - Liquidity is concentrated in V3 pools, not perfectly efficient
- *   - HL DeFi is new, few arb bots are monitoring it
+ * REDEMPTION MECHANISM (verified from Kinetiq FAQ Oct 9 2026):
+ *   Route 1: Queue native withdrawal → burns kHYPE, returns HYPE after 7-9 day delay, less small fee
+ *   Route 2: Swap kHYPE → HYPE on HyperSwap (instant, market price)
+ *   NOT instant redemption. This is a CARRY ARB, not atomic.
  *
- * TRADE STRUCTURE:
+ * TRADE STRUCTURE (carry arb, 7-9 day capital lock):
  *   1. Buy kHYPE on HyperSwap V3 (0.01% fee pool) at 2.46% discount
- *   2. Hold or redeem kHYPE for HYPE (if redemption is available)
- *   3. Sell HYPE on HL orderbook at full price
- *   4. Capture the 2.46% spread minus fees (0.01% AMM fee + gas)
+ *   2. Queue native withdrawal from Kinetiq (7-9 day delay)
+ *   3. Receive HYPE after 7-9 days at ~1:1 rate + staking rewards
+ *   4. Net profit: ~2% on capital per 8-day cycle = ~91% APR annualized
  *
- *   OR: atomic version via HyperLend flashloan:
- *   1. Flashloan WHYPE from HyperLend
- *   2. Swap WHYPE → kHYPE on HyperSwap V3 (buy at discount)
- *   3. Redeem kHYPE → HYPE (if instant redemption available)
- *   4. Wrap HYPE → WHYPE
- *   5. Repay flashloan
- *   6. Profit = 2.46% - 0.04% flashloan fee - 0.01% AMM fee = ~2.41%
+ * WHY THE DISCOUNT EXISTS:
+ *   - kHYPE has 7-9 day withdrawal delay → liquidity discount
+ *   - HL DeFi is new, few arb bots are monitoring it
+ *   - kHYPE exchange rate only goes UP (validator rewards accrue) → no downside risk
  *
  * RISKS:
- *   - kHYPE redemption may have delay (not instant) → not atomic
- *   - kHYPE discount could widen (but that would increase the edge)
- *   - V3 pool liquidity may be insufficient for large trades
- *   - kHYPE smart contract risk (Kinetiq protocol)
+ *   - Kinetiq smart contract risk (validator / slashing risk)
+ *   - kHYPE exchange rate is not guaranteed (but has only increased since launch)
+ *   - Capital locked 7-9 days per cycle
+ *   - HyperSwap V3 pool liquidity may be insufficient for large trades
+ *   - kHYPE discount could widen (increases edge) or narrow (reduces edge)
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
