@@ -23,7 +23,7 @@
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
-import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
+import { VooiClient } from '@edge/vooi-client';
 
 export interface CexLikeDexPriceArbParams {
   /** Min price spread % to fire alert (default 0.5%) */
