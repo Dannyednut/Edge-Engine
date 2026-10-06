@@ -28,6 +28,9 @@ import { PredictionArbStrategy, type PredictionArbAlert } from '../strategies/pr
 import { SportsArbStrategy, type SportsArbAlert } from '../strategies/sports-arb.js';
 import { PendleBorosScanner, type BorosArbAlert } from '../strategies/pendle-boros-scanner.js';
 import { TokenizedEquityScanner, type TokenizedEquityAlert } from '../strategies/tokenized-equity-scanner.js';
+import { CexLikeDexPriceArbStrategy, type PriceArbAlert } from '../strategies/cexlike-dex-price-arb.js';
+import { HlAmmArbScanner, type HlAmmArbAlert } from '../strategies/hl-amm-arb-scanner.js';
+import { HlLstArbScanner, type HlLstArbAlert } from '../strategies/hl-lst-arb-scanner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -141,7 +144,29 @@ async function main() {
     markets: ['SPCX.US_USDC', 'SNDK.US_USDC'],
   });
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity]`);
+  // Strategy 9: CEX-like DEX price spread arb (VOOI)
+  const cexLikeDexArb = new CexLikeDexPriceArbStrategy(vooi, {
+    minPriceSpreadPct: 0.5,
+    maxSizeUsd: 5000,
+    minOpenInterest: 10_000,
+    venues: [],
+  });
+
+  // Strategy 10: HL AMM vs orderbook arb
+  const hlAmmArb = new HlAmmArbScanner({
+    minSpreadPct: 0.1,
+    minPoolLiquidityUsd: 100,
+    maxSizeUsd: 5000,
+  });
+
+  // Strategy 11: HL LST (kHYPE/WHYPE) carry arb
+  const hlLstArb = new HlLstArbScanner({
+    minDiscountPct: 0.1,
+    maxSizeUsd: 5000,
+    preferredFeeTier: 100,
+  });
+
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -164,7 +189,7 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts] = await Promise.all([
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
@@ -172,10 +197,13 @@ async function main() {
         predictionArb.scan().catch(e => { console.warn(`prediction failed: ${e.message}`); return [] as PredictionArbAlert[]; }),
         pendleBoros.scan().catch(e => { console.warn(`boros failed: ${e.message}`); return [] as BorosArbAlert[]; }),
         tokenizedEquity.scan().catch(e => { console.warn(`equity failed: ${e.message}`); return [] as TokenizedEquityAlert[]; }),
+        cexLikeDexArb.scan().catch(e => { console.warn(`pricewarb failed: ${e.message}`); return [] as PriceArbAlert[]; }),
+        hlAmmArb.scan().catch(e => { console.warn(`hl_amm failed: ${e.message}`); return [] as HlAmmArbAlert[]; }),
+        hlLstArb.scan().catch(e => { console.warn(`hl_lst failed: ${e.message}`); return [] as HlLstArbAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -353,6 +381,68 @@ async function main() {
             `Basis: ${a.basisPct.toFixed(2)}%`,
             `Spot spread: ${a.spotSpreadPct?.toFixed(1)}%  Perp spread: ${a.perpSpreadPct?.toFixed(1)}%`,
             `Spot depth: $${a.spotDepthUsd?.toFixed(0)}  Perp depth: $${a.perpDepthUsd?.toFixed(0)}`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process CexLikeDex price arb alerts
+      for (const a of priceArbAlerts.slice(0, 3)) {
+        const key = `pricearb|${a.asset}|${a.longVenue}|${a.shortVenue}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `pricearb_${a.asset}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'cexlike_dex_price_arb',
+          title: `[PRICE] ${a.asset} ${a.priceSpreadPct.toFixed(1)}% spread`,
+          body: [
+            `Long ${a.longVenue} $${a.longPrice} → Short ${a.shortVenue} $${a.shortPrice}`,
+            `Spread: ${a.priceSpreadPct.toFixed(2)}%  Profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+            `Long OI: $${a.longOiUsd.toFixed(0)}  Short OI: $${a.shortOiUsd.toFixed(0)}`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process HL AMM arb alerts
+      for (const a of hlAmmAlerts.slice(0, 2)) {
+        const key = `hlamm|${a.pair}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `hlamm_${a.pair}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'hl_amm_arb',
+          title: `[HLAMM] ${a.pair} ${a.spreadPct.toFixed(2)}% spread`,
+          body: [
+            `AMM: ${a.ammPrice.toFixed(6)}  Orderbook: ${a.orderbookPrice.toFixed(6)}`,
+            `Spread: ${a.spreadPct.toFixed(2)}%  Direction: ${a.direction}`,
+            `Pool liq: $${a.poolLiquidityUsd.toFixed(0)}  Profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process HL LST arb alerts
+      for (const a of hlLstAlerts.slice(0, 2)) {
+        const key = `hllst|${a.pair}|${a.feeTier}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `hllst_${a.pair}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'hl_lst_arb',
+          title: `[HLLST] ${a.pair} ${a.discountPct.toFixed(2)}% discount`,
+          body: [
+            `kHYPE price: ${a.khypePrice.toFixed(6)} WHYPE  Discount: ${a.discountPct.toFixed(2)}%`,
+            `Net profit: ${a.estimatedProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)} on $5k`,
+            `Fee tier: ${a.feeTier/10000}%  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
+            `Liquidity: ${a.poolLiquidity.toString()}`,
+            `Carry arb: buy kHYPE, queue 7-9 day withdrawal, receive HYPE`,
           ].join('\n'),
           channels: ['telegram'],
         });
