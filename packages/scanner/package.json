@@ -22,7 +22,9 @@
     "start:discover": "tsx src/runners/discover-runner.ts",
     "start:dashboard": "tsx src/runners/dashboard.ts",
     "start:khype-carry": "tsx src/runners/khype-carry-executor.ts",
-    "start:commands": "tsx src/runners/command-handler.ts --loop"
+    "start:euler-arb": "tsx src/runners/euler-lending-executor.ts",
+    "start:commands": "tsx src/runners/command-handler.ts --loop",
+    "start:daily-report": "tsx src/runners/daily-report.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
