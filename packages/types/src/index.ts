@@ -15,7 +15,8 @@ export type ChainId =
   | 'polygon'
   | 'bsc'
   | 'zksync'
-  | 'solana';
+  | 'solana'
+  | 'hyperevm';
 
 export type VenueType = 'cex' | 'dex' | 'perp-dex' | 'prediction' | 'sportsbook';
 

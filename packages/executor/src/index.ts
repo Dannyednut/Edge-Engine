@@ -20,9 +20,23 @@
  */
 
 import type { ChainId } from '@edge/types';
-import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, type Chain as ViemChain } from 'viem';
+import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, type Chain as ViemChain, defineChain } from 'viem';
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+
+// ─── HyperEVM chain definition (Hyperliquid L1 EVM, chain ID 999) ──────
+export const hyperEvm = defineChain({
+  id: 999,
+  name: 'HyperEVM',
+  nativeCurrency: { name: 'HYPE', symbol: 'HYPE', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://rpc.hyperliquid.xyz/evm'] },
+  },
+  blockExplorers: {
+    default: { name: 'HyperEVMScan', url: 'https://hyperevmscan.io' },
+  },
+  testnet: false,
+});
 
 // ─── Balancer V2 addresses (same on all EVM chains where deployed) ─────
 
@@ -35,6 +49,7 @@ export const BALANCER_VAULT_ADDRESS: Record<ChainId, `0x${string}` | null> = {
   bsc:       null,  // Balancer V2 not deployed on BSC
   zksync:    null,  // Not deployed on zkSync
   solana:    null,
+  hyperevm:  null,  // Balancer V2 not on HyperEVM
 };
 
 // ─── Aave V3 Pool addresses ────────────────────────────────────────────
@@ -48,6 +63,7 @@ export const AAVE_V3_POOL_ADDRESS: Record<ChainId, `0x${string}` | null> = {
   bsc:       null,  // Aave V3 not on BSC (Aave V3 only on Ethereum L1 + L2s)
   zksync:    null,
   solana:    null,
+  hyperevm:  null,  // Aave V3 not on HyperEVM (use HyperLend instead)
 };
 
 // ─── AgentVault ABI (subset — the functions the executor calls) ────────
@@ -121,7 +137,7 @@ export const AGENT_VAULT_ABI = [
 // ─── EvmExecutor ───────────────────────────────────────────────────────
 
 const CHAIN_MAP: Record<string, ViemChain> = {
-  ethereum: mainnet, arbitrum, base, optimism, polygon, bsc, zksync,
+  ethereum: mainnet, arbitrum, base, optimism, polygon, bsc, zksync, hyperEvm,
 };
 
 export interface EvmExecutorOptions {
