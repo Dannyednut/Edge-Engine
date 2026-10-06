@@ -153,10 +153,14 @@ export class KhypeCarryExecutor {
 
   /** Sign and submit a transaction, wait for confirmation. Returns tx hash. */
   private async sendTx(to: Address, data: `0x${string}`, value: bigint = 0n): Promise<Hash> {
-    if (!this.walletClient || !this.publicClient) {
+    if (!this.walletClient || !this.publicClient || !this.walletClient.account) {
       throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
     }
-    const txHash = await this.walletClient.sendTransaction({ to, data, value });
+    const txHash = await this.walletClient.sendTransaction({
+      account: this.walletClient.account,
+      chain: hyperEvm,
+      to, data, value,
+    });
     const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
     if (receipt.status !== 'success') {
       throw new Error(`Transaction reverted: ${txHash}`);
@@ -273,25 +277,27 @@ export class KhypeCarryExecutor {
       console.log(`[khype-carry] Step 1: swap ${Number(whypeAmountWei) / 1e18} WHYPE → kHYPE on HyperSwap V3 (fee=${opp.feeTier})`);
       console.log(`  → to: ${HYPERSWAP_V3_SWAP_ROUTER_02}`);
       console.log(`  → data: ${swapCalldata}`);
-      // ACTUAL TX SUBMISSION WOULD HAPPEN HERE via wallet client
-      // const swapTxHash = await walletClient.sendTransaction({ to: HYPERSWAP_V3_SWAP_ROUTER_02, data: swapCalldata, value: whypeAmountWei });
+      // Execute swap via wallet client (when not in dry-run)
+      const swapTxHash = await this.sendTx(
+        HYPERSWAP_V3_SWAP_ROUTER_02 as Address,
+        swapCalldata,
+        whypeAmountWei,
+      );
+      console.log(`  ✓ tx: ${swapTxHash}`);
 
       // STEP 2: Approve kHYPE → STAKING_MANAGER
       console.log(`[khype-carry] Step 2: approve kHYPE → STAKING_MANAGER`);
       const approveData = this.kinetiq.buildApproveTx(BigInt(2) ** BigInt(256) - BigInt(1)); // max approve
-      console.log(`  → to: ${approveData.to}`);
-      console.log(`  → data: ${approveData.data}`);
-      // const approveTxHash = await walletClient.sendTransaction({ to: approveData.to, data: approveData.data });
+      const approveTxHash = await this.sendTx(approveData.to, approveData.data);
+      console.log(`  ✓ tx: ${approveTxHash}`);
 
       // STEP 3: Call unstake(kHypeAmount) to queue withdrawal
       console.log(`[khype-carry] Step 3: unstake kHYPE → queue withdrawal`);
       const kHypeAmountWei = BigInt(Math.floor(Number(whypeAmountWei) * opp.khypePriceInWhype)); // expected kHYPE received
       const unstakeData = this.kinetiq.buildUnstakeTx(kHypeAmountWei);
-      console.log(`  → to: ${unstakeData.to}`);
-      console.log(`  → data: ${unstakeData.data}`);
-      // const unstakeTxHash = await walletClient.sendTransaction({ to: unstakeData.to, data: unstakeData.data });
-      // const unstakeReceipt = await publicClient.waitForTransactionReceipt({ hash: unstakeTxHash });
-      // const withdrawalId = parseLog(unstakeReceipt.logs, 'WithdrawalQueued');
+      const unstakeTxHash = await this.sendTx(unstakeData.to, unstakeData.data);
+      console.log(`  ✓ tx: ${unstakeTxHash}`);
+      // TODO: parse withdrawalId from unstakeTxHash receipt logs (WithdrawalQueued event)
 
       // STEP 4: Record state for claiming later
       const status = await this.kinetiq.getStatus();
