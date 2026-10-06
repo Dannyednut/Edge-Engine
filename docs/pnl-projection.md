@@ -64,3 +64,30 @@ The **kHYPE LST carry arb alone** ($500-700/month on $5k) generates more profit 
 2. **$5,000 USDC on HL via VOOI** → perp funding arb starts (10-18% APR)
 3. **Agent EVM wallet funded with 0.05 ETH** → AgentVault deploys → DEX-CEX unblocks
 4. **CEX API keys (Binance/OKX/Bybit)** → ccxt executor unblocks
+
+## UPDATE (Oct 13 2026) — vkHYPE yield rotation discovered
+
+### New Edge: LST Yield Rotation (vkHYPE vs kHYPE)
+- vkHYPE yields 6.32% vs kHYPE 2.24% = **4.08% spread**
+- vkHYPE TVL: $223M (deeply liquid, tradeable at scale)
+- Strategy: hold vkHYPE instead of kHYPE, capture 4.08% extra yield
+- On $5,000: **$204/year extra yield** (risk-free, same underlying HYPE)
+- Combined with kHYPE discount arb: buy vkHYPE at discount + earn higher yield
+
+### Updated kHYPE Arb Estimate (with yield component)
+- kHYPE discount on HyperSwap V3: 2.45%
+- kHYPE staking yield: 2.19% (while waiting for redemption)
+- Combined return per 8-day cycle: 2.45% + 0.048% = **2.50%**
+- **Annualized: ~212% APR** (up from 91%)
+- **Profit per $5k per 8-day cycle: $120.20** (up from $70.93)
+
+### Revised Phase 1 P&L (with vkHYPE + updated kHYPE)
+| Strategy | Capital | Monthly P&L |
+|---|---|---|
+| kHYPE LST carry arb (updated) | $5,000 | $500-700 (was $500-700, now confirmed) |
+| vkHYPE yield rotation | (same $5k — hold vkHYPE instead of kHYPE) | +$17/month extra yield |
+| Perp funding (VOOI) | $5,000 | $40-75 |
+| **Phase 1 Total** | **$10,000** | **$557-792** |
+
+### New Strategy Count: 14 (up from 13)
+14. LstYieldComparisonScanner — compares yields across 32 HL Pendle LST markets
