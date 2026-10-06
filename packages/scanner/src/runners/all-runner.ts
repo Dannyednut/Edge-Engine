@@ -37,6 +37,7 @@ import { LstYieldComparisonScanner, type LstYieldAlert } from '../strategies/lst
 import { PtKhypeYieldArbScanner, type PtKhypeAlert } from '../strategies/pt-khype-yield-arb.js';
 import { PtYieldArbScanner, type PtYieldArbAlert } from '../strategies/pt-yield-arb-scanner.js';
 import { EulerLendingArbScanner, type EulerLendingArbAlert } from '../strategies/euler-lending-arb-scanner.js';
+import { HlSpotBasisScanner, type HlSpotBasisAlert } from '../strategies/hl-spot-basis-scanner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -217,7 +218,17 @@ async function main() {
     maxSizeUsd: 5_000,
   });
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb]`);
+  // Strategy 18: HL spot vs perp basis arb (tokenized equities + crypto spot pairs)
+  const hlSpotBasis = new HlSpotBasisScanner({
+    minBasisPct: 0.5,
+    minVolume24h: 100_000,
+    perpNameMapping: {
+      'AVAX0': 'AVAX', 'BTC0': 'BTC', 'ETH0': 'ETH', 'SOL0': 'SOL',
+      'DOGE0': 'DOGE', 'XRP0': 'XRP', 'LINK0': 'LINK', 'MATIC0': 'MATIC',
+    },
+  });
+
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -240,7 +251,7 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts] = await Promise.all([
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
@@ -257,10 +268,11 @@ async function main() {
         ptKhypeArb.scan().catch(e => { console.warn(`pt_khype failed: ${e.message}`); return [] as PtKhypeAlert[]; }),
         ptYieldArb.scan().catch(e => { console.warn(`pt_yield failed: ${e.message}`); return [] as PtYieldArbAlert[]; }),
         eulerLendingArb.scan().catch(e => { console.warn(`euler_lending failed: ${e.message}`); return [] as EulerLendingArbAlert[]; }),
+        hlSpotBasis.scan().catch(e => { console.warn(`hl_spot_basis failed: ${e.message}`); return [] as HlSpotBasisAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -626,6 +638,26 @@ async function main() {
             `Spread:  ${a.spreadPct.toFixed(2)}%  CF: ${a.collateralFactorPct}%`,
             `Est. profit: $${a.estimatedProfitUsd.toFixed(2)}/yr on $${5000} collateral`,
             `Combined liq: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process HL spot basis alerts (only fire for actionable basis, not monitoring)
+      for (const a of hlSpotBasisAlerts.filter(a => a.basisPct !== undefined && Math.abs(a.basisPct!) >= 1.0).slice(0, 3)) {
+        const key = `hlsp|${a.spotName}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `hlsp_${a.spotName}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'hl_spot_basis',
+          title: `[HLSP] ${a.pair} basis ${a.basisPct!.toFixed(2)}%`,
+          body: [
+            `Spot: ${a.spotName} $${a.spotPrice.toFixed(4)}  Perp: ${a.perpName} $${a.perpPrice!.toFixed(4)}`,
+            `Basis: ${a.basisPct!.toFixed(2)}%  Direction: ${a.basisDirection}`,
+            `24h volume: $${(a.volume24h / 1000).toFixed(0)}k`,
           ].join('\n'),
           channels: ['telegram'],
         });
