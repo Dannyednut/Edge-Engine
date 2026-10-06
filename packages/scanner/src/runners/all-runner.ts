@@ -149,7 +149,9 @@ async function main() {
     minPriceSpreadPct: 0.5,
     maxSizeUsd: 5000,
     minOpenInterest: 10_000,
+    minVolume24h: 100_000,
     venues: [],
+    minSpreadPersistence: 2,
   });
 
   // Strategy 10: HL AMM vs orderbook arb

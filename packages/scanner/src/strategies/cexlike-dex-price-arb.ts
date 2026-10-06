@@ -32,8 +32,12 @@ export interface CexLikeDexPriceArbParams {
   maxSizeUsd: number;
   /** Min OI for liquidity (default $50,000) */
   minOpenInterest: number;
+  /** Min 24h volume (default $100,000) — filters illiquid tail tokens */
+  minVolume24h: number;
   /** Venues to consider (empty = all VOOI venues) */
   venues: string[];
+  /** Min spread persistence — how many consecutive scans must show the spread (default 1) */
+  minSpreadPersistence: number;
 }
 
 export interface PriceArbAlert {
@@ -54,6 +58,9 @@ export interface PriceArbAlert {
 export class CexLikeDexPriceArbStrategy implements Strategy {
   readonly id = 'cexlike_dex_price_arb';
   readonly landscape = 'B_cex_cex' as const;
+
+  // Track spread persistence across scans
+  private spreadHistory = new Map<string, number[]>();  // key → array of recent spread values
 
   constructor(
     private vooi: VooiClient,
@@ -109,6 +116,22 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
         if (grossProfitPct <= 0) continue;
 
         const estimatedProfitUsd = (grossProfitPct / 100) * this.params.maxSizeUsd;
+
+        // Volume filter — skip illiquid tail tokens
+        const longVol = Number(pair.long.volume24h || 0);
+        const shortVol = Number(pair.short.volume24h || 0);
+        const maxVol = Math.max(longVol, shortVol);
+        if (maxVol < (this.params.minVolume24h ?? 0)) continue;
+
+        // Spread persistence tracking
+        const persistenceKey = `${item.asset}|${longVenue}|${shortVenue}`;
+        const history = this.spreadHistory.get(persistenceKey) ?? [];
+        history.push(priceSpreadPct);
+        if (history.length > 5) history.shift();
+        this.spreadHistory.set(persistenceKey, history);
+        const minPersistence = this.params.minSpreadPersistence ?? 1;
+        const persistentCount = history.filter(s => Math.abs(s) >= this.params.minPriceSpreadPct).length;
+        if (persistentCount < minPersistence) continue;
 
         alerts.push({
           asset: item.asset,
