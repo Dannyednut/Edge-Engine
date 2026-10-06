@@ -35,6 +35,7 @@ import { GoldArbScanner, type GoldArbAlert } from '../strategies/gold-arb-scanne
 import { EquityPerpCrossVenueScanner, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
 import { LstYieldComparisonScanner, type LstYieldAlert } from '../strategies/lst-yield-comparison.js';
 import { PtKhypeYieldArbScanner, type PtKhypeAlert } from '../strategies/pt-khype-yield-arb.js';
+import { PtYieldArbScanner, type PtYieldArbAlert } from '../strategies/pt-yield-arb-scanner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -197,7 +198,15 @@ async function main() {
     maxSizeUsd: 5_000,
   });
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield]`);
+  // Strategy 16: PT yield arb across ALL HL LSTs (broader coverage)
+  const ptYieldArb = new PtYieldArbScanner({
+    minYieldSpreadPct: 3.0,
+    minTvlUsd: 500_000,
+    maxImpliedApyPct: 50,
+    khypeFloatingYieldApr: 2.37,
+  });
+
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -220,7 +229,7 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts] = await Promise.all([
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
@@ -235,10 +244,11 @@ async function main() {
         equityPerpCrossVenue.scan().catch(e => { console.warn(`equity_xv failed: ${e.message}`); return [] as EquityPerpArbAlert[]; }),
         lstYield.scan().catch(e => { console.warn(`lst_yield failed: ${e.message}`); return [] as LstYieldAlert[]; }),
         ptKhypeArb.scan().catch(e => { console.warn(`pt_khype failed: ${e.message}`); return [] as PtKhypeAlert[]; }),
+        ptYieldArb.scan().catch(e => { console.warn(`pt_yield failed: ${e.message}`); return [] as PtYieldArbAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -561,6 +571,27 @@ async function main() {
             `Implied fixed: ${a.impliedFixedYieldApr.toFixed(2)}%  kHYPE floating: ${a.khypeFloatingYieldApr.toFixed(2)}%`,
             `Direction: ${a.direction}  Est. profit: $${a.estimatedProfitUsd.toFixed(2)}`,
             `Supply: ${a.ptTotalSupply.toFixed(0)} PT`,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // Process PT yield arb alerts (cross-LST)
+      for (const a of ptYieldArbAlerts.slice(0, 3)) {
+        const key = `ptya|${a.lst}|${a.expiry}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `ptya_${a.lst}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity',
+          strategyId: 'pt_yield_arb',
+          title: `[PTYA] ${a.lst} PT ${a.impliedApyPct.toFixed(2)}% vs kHYPE ${a.vsKhypeSpreadPct > 0 ? '+' : ''}${a.vsKhypeSpreadPct.toFixed(2)}%`,
+          body: [
+            `LST: ${a.lst}  Maturity: ${a.expiry} (${a.daysToMaturity.toFixed(0)}d)`,
+            `Implied: ${a.impliedApyPct.toFixed(2)}%  Underlying: ${a.underlyingApyPct.toFixed(2)}%  Spread: ${a.yieldSpreadPct.toFixed(2)}%`,
+            `vs kHYPE funding: ${a.vsKhypeSpreadPct.toFixed(2)}%  Annualized: ${a.annualizedReturnPct.toFixed(2)}%`,
+            `Est. profit: $${a.estimatedProfitUsd.toFixed(2)} on $5k  TVL: $${(a.tvlUsd / 1e6).toFixed(2)}M`,
           ].join('\n'),
           channels: ['telegram'],
         });

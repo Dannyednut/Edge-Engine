@@ -79,3 +79,20 @@
 3. **MONITOR**: sUSDe (7.46%) and hbUSDT (6.61%) — yield-bearing stablecoins, potential funding source for perp arbs.
 4. **EXPAND**: LstYieldComparisonScanner to include all 17 LSTs (currently uses Pendle API which already covers them).
 5. **AVOID**: HYPE++ (48% APY, $0.1M TVL — likely honeypot), haHYPE PT (43% implied — likely stale).
+
+## ⚠️ CORRECTION (Oct 13 2026): Most high-yield PT markets are EXPIRED
+
+After building the PtYieldArbScanner (Strategy 16) and filtering expired markets, only 4 PT markets remain active:
+
+| LST | Maturity | Days to Maturity | Implied % | Underlying % | Spread % | TVL $ |
+|-----|----------|------------------|-----------|--------------|----------|-------|
+| stHYPE | 2027-01-28 | 113 | 2.10% | 1.97% | +0.13% | $1.4M |
+| haHYPE | 2027-01-28 | 113 | 2.98% | 2.14% | +0.84% | $0.1M |
+| kHYPE | 2027-03-25 | 169 | 1.92% | 2.37% | **-0.45%** | $3.2M |
+| vkHYPE | 2027-03-25 | 169 | 2.35% | 0.00% | +2.35% | $0.3M |
+
+**Conclusion**: The 17.96% stHYPE PT yield, 43.52% haHYPE PT, 29.94% hwHYPE PT, 33.51% AVLT PT — these were ALL stale data from EXPIRED Pendle markets. Real actionable PT yield spreads are tiny (<3%).
+
+**Implication**: The kHYPE LST carry arb (Strategy 11, ~$68/cycle on $5k) remains the highest-yield opportunity on HyperEVM. PT yield arb is NOT a viable standalone strategy on HL right now — Pendle market maturity is too short and post-expiry yields are noise.
+
+The PtYieldArbScanner remains in place — it will catch genuine spreads if/when new PT markets launch with meaningful yields.
