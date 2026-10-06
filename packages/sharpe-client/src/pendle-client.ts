@@ -64,13 +64,8 @@ export class PendleClient {
 
   /** Get markets on a specific chain (e.g., 999 for Hyperliquid). */
   async getMarketsByChain(chainId: number): Promise<PendleMarket[]> {
-    const all = await this.getAllMarkersByChain(chainId);
-    return all.filter(m => m.chainId === chainId);
-  }
-
-  private async getAllMarkersByChain(chainId: number): Promise<PendleMarket[]> {
     const all = await this.getAllMarkets(10);
-    return all;
+    return all.filter(m => m.chainId === chainId);
   }
 
   /** Find markets for a specific asset (e.g., 'kHYPE', 'stHYPE'). */
