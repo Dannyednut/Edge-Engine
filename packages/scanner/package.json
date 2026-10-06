@@ -24,7 +24,8 @@
     "start:khype-carry": "tsx src/runners/khype-carry-executor.ts",
     "start:euler-arb": "tsx src/runners/euler-lending-executor.ts",
     "start:commands": "tsx src/runners/command-handler.ts --loop",
-    "start:daily-report": "tsx src/runners/daily-report.ts"
+    "start:daily-report": "tsx src/runners/daily-report.ts",
+    "start:monitor": "tsx src/runners/position-monitor.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
