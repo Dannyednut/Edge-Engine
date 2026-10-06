@@ -138,20 +138,21 @@ export class KinetiqClient {
       this.callView(STAKING_MANAGER, 'treasury()'),
     ]);
 
-    const toHype = (hex: string) => Number(BigInt(hex)) / 1e18;
-    const toAddr = (hex: string) => ('0x' + hex.slice(26)) as Address;
+    const toHype = (hex: string) => hex && hex !== '0x' ? Number(BigInt(hex)) / 1e18 : 0;
+    const toAddr = (hex: string) => (hex && hex !== '0x' ? ('0x' + hex.slice(26)) : '0x0000000000000000000000000000000000000000') as Address;
+    const toNum = (hex: string) => hex && hex !== '0x' ? Number(BigInt(hex)) : 0;
 
     return {
       minStakeAmountHype: toHype(minStake),
       maxStakeAmountHype: toHype(maxStake),
       stakingLimitHype: toHype(stakingLimit),
-      unstakeFeeRatePct: Number(BigInt(unstakeFeeRate)) / 100, // assumes bps
+      unstakeFeeRatePct: toNum(unstakeFeeRate) / 100, // assumes bps
       minWithdrawalAmountHype: toHype(minWithdrawal),
-      withdrawalDelaySec: Number(BigInt(withdrawalDelay)),
-      withdrawalDelayDays: Number(BigInt(withdrawalDelay)) / 86400,
+      withdrawalDelaySec: toNum(withdrawalDelay),
+      withdrawalDelayDays: toNum(withdrawalDelay) / 86400,
       totalStakedHype: toHype(totalStaked),
       totalQueuedWithdrawals: toHype(totalQueued),
-      whitelistEnabled: BigInt(whitelistEnabled) === 1n,
+      whitelistEnabled: toNum(whitelistEnabled) === 1,
       khypeTokenAddress: toAddr(khypeToken),
       oracleManager: toAddr(oracleManager),
       treasury: toAddr(treasury),

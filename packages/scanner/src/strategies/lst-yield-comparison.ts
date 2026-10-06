@@ -82,7 +82,14 @@ export class LstYieldComparisonScanner implements Strategy {
     }
 
     // Compare each LST's yield
+    const now = Date.now();
     for (const m of markets) {
+      // Filter out EXPIRED markets (most "huge yield" Pendle markets are stale post-expiry)
+      if (m.expiry) {
+        const maturityMs = new Date(m.expiry).getTime();
+        if (!isNaN(maturityMs) && maturityMs < now) continue;
+      }
+
       const tvl = m.details.totalTvl;
       if (tvl < this.params.minTvlUsd) continue;
 
@@ -106,6 +113,16 @@ export class LstYieldComparisonScanner implements Strategy {
         ts: Date.now(),
       });
     }
+
+    // Dedupe by LST name — keep only the highest-spread market per LST
+    const byLst = new Map<string, typeof alerts[0]>();
+    for (const a of alerts) {
+      if (!byLst.has(a.lst) || a.vsKhypeSpread > byLst.get(a.lst)!.vsKhypeSpread) {
+        byLst.set(a.lst, a);
+      }
+    }
+    alerts.length = 0;
+    alerts.push(...byLst.values());
 
     // Sort by yield spread (highest extra yield vs kHYPE first)
     alerts.sort((a, b) => b.vsKhypeSpread - a.vsKhypeSpread);
