@@ -139,7 +139,10 @@ async function main() {
   const pendleBoros = new PendleBorosScanner({
     minSpreadApr: 0.5,
     maxSizeUsd: 5000,
-    minNotionalOI: 10_000,
+    minNotionalOI: 50_000,        // raised from $10k → $50k (filter illiquid)
+    minVolume24h: 100_000,        // NEW: require $100k 24h volume
+    minDaysToMaturity: 7,         // NEW: skip markets expiring <7d
+    minSpreadPersistence: 2,      // NEW: require spread to hold 2+ scans
     platforms: [],
   });
 

@@ -35,6 +35,12 @@ export interface PendleBorosParams {
   minNotionalOI: number;
   /** Platforms to scan (empty = all) */
   platforms: string[];
+  /** Min 24h volume (default $50k — filters illiquid markets) */
+  minVolume24h?: number;
+  /** Min days to maturity (default 7 — filters markets expiring too soon) */
+  minDaysToMaturity?: number;
+  /** Spread persistence — require spread to hold across N scans (default 1 = no persistence) */
+  minSpreadPersistence?: number;
 }
 
 export interface BorosMarket {
@@ -70,6 +76,10 @@ export class PendleBorosScanner implements Strategy {
   readonly id = 'pendle_boros';
   readonly landscape = 'F_perps_funding' as const;
 
+  // Persistence tracking: marketId → array of recent spread values
+  private spreadHistory = new Map<number, number[]>();
+  private static readonly HISTORY_SIZE = 5;
+
   constructor(private params: PendleBorosParams) {}
 
   subscribesTo(): string[] { return []; }
@@ -93,8 +103,11 @@ export class PendleBorosScanner implements Strategy {
       // Filter by platform
       if (this.params.platforms.length > 0 && !this.params.platforms.includes(m.platform)) continue;
 
-      // Filter by liquidity
+      // Filter by liquidity (OI)
       if (m.notionalOI < this.params.minNotionalOI) continue;
+
+      // Filter by 24h volume (default $50k — illiquid markets have stale spreads)
+      if (this.params.minVolume24h && m.volume24h < this.params.minVolume24h) continue;
 
       // Compute spread
       const spread = m.floatingApr - m.markApr;  // positive = buy fixed (lock in yield)
@@ -104,6 +117,22 @@ export class PendleBorosScanner implements Strategy {
 
       // Compute days to maturity
       const daysToMaturity = Math.max(1, (m.maturity - Date.now()) / (24 * 60 * 60 * 1000));
+
+      // Filter by min days to maturity (default 7)
+      if (this.params.minDaysToMaturity && daysToMaturity < this.params.minDaysToMaturity) continue;
+
+      // Spread persistence check: require spread to hold across N consecutive scans
+      const persistenceRequired = this.params.minSpreadPersistence ?? 1;
+      if (persistenceRequired > 1) {
+        const history = this.spreadHistory.get(m.marketId) ?? [];
+        history.push(spreadApr);
+        if (history.length > PendleBorosScanner.HISTORY_SIZE) history.shift();
+        this.spreadHistory.set(m.marketId, history);
+        // Need at least persistenceRequired entries AND all must be above threshold
+        if (history.length < persistenceRequired) continue;
+        const recentN = history.slice(-persistenceRequired);
+        if (!recentN.every(v => v >= this.params.minSpreadApr)) continue;
+      }
 
       // Estimated profit: spread × size × (daysToMaturity / 365)
       const estimatedProfitUsd = (spreadApr / 100) * this.params.maxSizeUsd * (daysToMaturity / 365);
