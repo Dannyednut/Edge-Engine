@@ -353,6 +353,9 @@ importers:
       '@edge/alerts':
         specifier: workspace:*
         version: link:../alerts
+      '@edge/backpack-client':
+        specifier: workspace:*
+        version: link:../backpack-client
       '@edge/config':
         specifier: workspace:*
         version: link:../config

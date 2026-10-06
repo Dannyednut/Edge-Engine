@@ -186,3 +186,89 @@ export class HlAmmArbScanner implements Strategy {
     }
   }
 }
+
+// ─── V3 pool support (added Oct 13 2026) ──────────────────────────────
+
+import { HYPERSWAP_V3_POOLS, v3PriceToHuman } from '../lib/hyperliquid-defi.js';
+
+/**
+ * Scan V3 pools for AMM vs orderbook price spreads.
+ * V3 pools have MUCH deeper liquidity than V2.
+ */
+async scanV3(): Promise<HlAmmArbAlert[]> {
+  const alerts: HlAmmArbAlert[] = [];
+  const hlPrices = await this.getHlOrderbookPrices();
+
+  for (const pool of HYPERSWAP_V3_POOLS) {
+    try {
+      const [sym0, sym1] = pool.pair.split('/');
+      const dec0 = HL_TOKEN_DECIMALS[sym0] ?? 18;
+      const dec1 = HL_TOKEN_DECIMALS[sym1] ?? 18;
+
+      // Get slot0() for sqrtPriceX96
+      const slot0Res = await fetch(HYPEREVM_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', method: 'eth_call',
+          params: [{ to: pool.address, data: '0x3850c7bd' }, 'latest'], id: 1,
+        }),
+      });
+      const slot0Json = await slot0Res.json() as { result?: string };
+      const slot0Result = slot0Json.result || '0x';
+      if (slot0Result.length < 66) continue;
+
+      const sqrtPriceX96 = BigInt('0x' + slot0Result.slice(2, 66));
+      const ammPrice = v3PriceToHuman(sqrtPriceX96, dec0, dec1);
+      if (ammPrice <= 0) continue;
+
+      // Get liquidity
+      const liqRes = await fetch(HYPEREVM_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', method: 'eth_call',
+          params: [{ to: pool.address, data: '0x1a686502' }, 'latest'], id: 1,
+        }),
+      });
+      const liqJson = await liqRes.json() as { result?: string };
+      const liqResult = liqJson.result || '0x';
+      const liquidity = liqResult.length >= 66 ? BigInt('0x' + liqResult.slice(2, 66)) : 0n;
+      if (liquidity === 0n) continue;
+
+      // Compare to orderbook
+      const obPriceSym0 = hlPrices.get(sym0);
+      const obPriceSym1 = hlPrices.get(sym1);
+      if (!obPriceSym0 || !obPriceSym1) continue;
+      const orderbookPrice = obPriceSym0 / obPriceSym1;
+      if (orderbookPrice <= 0) continue;
+
+      const spreadPct = ((ammPrice - orderbookPrice) / orderbookPrice) * 100;
+      if (Math.abs(spreadPct) < this.params.minSpreadPct) continue;
+
+      // Estimate pool liquidity in USD (rough)
+      const poolLiquidityUsd = obPriceSym0 * 1000;  // rough estimate
+      if (poolLiquidityUsd < this.params.minPoolLiquidityUsd) continue;
+
+      const estimatedProfitUsd = (Math.abs(spreadPct) / 100) * Math.min(this.params.maxSizeUsd, poolLiquidityUsd * 0.05);
+
+      alerts.push({
+        pair: `${pool.pair} (V3 ${pool.fee/10000}%)`,
+        poolAddress: pool.address,
+        ammPrice,
+        orderbookPrice,
+        spreadPct,
+        direction: spreadPct > 0 ? 'buy_orderbook_sell_amm' : 'buy_amm_sell_orderbook',
+        poolLiquidityUsd,
+        estimatedProfitUsd,
+        executable: false,
+        ts: Date.now(),
+      });
+    } catch {
+      // skip
+    }
+  }
+
+  alerts.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
+  return alerts;
+}
