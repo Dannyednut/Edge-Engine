@@ -359,6 +359,9 @@ importers:
       '@edge/config':
         specifier: workspace:*
         version: link:../config
+      '@edge/executor':
+        specifier: workspace:*
+        version: link:../executor
       '@edge/pnl':
         specifier: workspace:*
         version: link:../pnl

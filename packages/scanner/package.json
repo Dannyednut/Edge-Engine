@@ -30,6 +30,7 @@
     "@edge/sharpe-client": "workspace:*",
     "@edge/vooi-client": "workspace:*",
     "@edge/pumpapi-client": "workspace:*",
+    "@edge/executor": "workspace:*",
     "viem": "^2.21.0",
     "@edge/backpack-client": "workspace:*"
   },

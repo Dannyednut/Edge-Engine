@@ -360,3 +360,7 @@ export async function submitViaFlashbotsProtect(
   if (json.error) throw new Error(`Flashbots Protect: ${json.error.message}`);
   return { txHash: json.result as `0x${string}` };
 }
+
+// ─── Kinetiq Liquid Staking (HyperEVM chain 999) ───────────────────────
+export * from './kinetiq-client.js';
+export * from './hyperlend-client.js';
