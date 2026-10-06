@@ -28,8 +28,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KinetiqClient, KHYPE_TOKEN } from '@edge/executor';
-import { encodeFunctionData, type Address } from 'viem';
+import { KinetiqClient, KHYPE_TOKEN, hyperEvm } from '@edge/executor';
+import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, encodeFunctionData, type Address, type Hash } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { HYPERSWAP_V3_POOLS, HYPERSWAP_V3_SWAP_ROUTER_02, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman } from '../lib/hyperliquid-defi.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -127,10 +128,40 @@ export interface KhypeCarryExecutorOptions {
 export class KhypeCarryExecutor {
   private kinetiq: KinetiqClient;
   private state: KhypeCarryState;
+  private walletClient: WalletClient | null = null;
+  private publicClient: PublicClient | null = null;
 
   constructor(private opts: KhypeCarryExecutorOptions) {
     this.kinetiq = new KinetiqClient({ rpcUrl: HYPEREVM_RPC });
     this.state = loadState();
+
+    // Initialize wallet client if private key is available
+    if (process.env.AGENT_HYPE_PRIVKEY && !opts.dryRun) {
+      const account = privateKeyToAccount(process.env.AGENT_HYPE_PRIVKEY as `0x${string}`);
+      this.walletClient = createWalletClient({
+        account,
+        chain: hyperEvm,
+        transport: http(HYPEREVM_RPC),
+      });
+      this.publicClient = createPublicClient({
+        chain: hyperEvm,
+        transport: http(HYPEREVM_RPC),
+      });
+      console.log(`[khype-carry] Wallet initialized: ${account.address}`);
+    }
+  }
+
+  /** Sign and submit a transaction, wait for confirmation. Returns tx hash. */
+  private async sendTx(to: Address, data: `0x${string}`, value: bigint = 0n): Promise<Hash> {
+    if (!this.walletClient || !this.publicClient) {
+      throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
+    }
+    const txHash = await this.walletClient.sendTransaction({ to, data, value });
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status !== 'success') {
+      throw new Error(`Transaction reverted: ${txHash}`);
+    }
+    return txHash;
   }
 
   /**
