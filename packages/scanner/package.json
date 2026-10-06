@@ -19,7 +19,9 @@
     "start:all": "tsx src/runners/all-runner.ts",
     "start:dexcex": "tsx src/runners/dexcex-runner.ts",
     "start:prediction": "tsx src/runners/prediction-runner.ts",
-    "start:discover": "tsx src/runners/discover-runner.ts"
+    "start:discover": "tsx src/runners/discover-runner.ts",
+    "start:dashboard": "tsx src/runners/dashboard.ts",
+    "start:khype-carry": "tsx src/runners/khype-carry-executor.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
