@@ -1,9 +1,34 @@
 # Edge-Engine Current State — Oct 13 2026
 
-> **Status**: 17 strategies running in parallel, all building clean. Agent wallet not yet funded.
+> **Status**: 18 strategies running in parallel, all building clean. Agent wallet not yet funded.
 > **Bottom line**: Multiple risk-free opportunities identified. **Need $5-10k HYPE funding to start earning.**
 
-## 17 Active Strategies
+## Update (Oct 13 2026, marathon session)
+
+**5 new strategies added** (13 → 18):
+- 13: EquityPerpCrossVenueScanner (HL ↔ Backpack equity perps)
+- 14: LstYieldComparisonScanner (32 Pendle LST markets)
+- 15: PtKhypeYieldArbScanner (PT-kHYPE fixed vs floating)
+- 16: PtYieldArbScanner (cross-LST PT yield arb, filters expired)
+- 17: EulerLendingArbScanner (Euler HL cross-vault rate spreads)
+- 18: HlSpotBasisScanner (329 HL spot pairs vs perp basis)
+
+**3 major discoveries documented**:
+- HYPE LST Atlas: 17 LSTs, stHYPE contract found (`0xffaa4a3d97fe9107cef8a3f48c069f577ff76cc1`)
+- Euler V2 Atlas: 58 vaults on HyperEVM, all contract addresses verified
+- HIP-4 Discovery: 329 `@`-prefixed spot pairs (tokenized equities + crypto + memecoins)
+  - QQQ at $1,375 ($14M daily volume) — tokenized Nasdaq-100 ETF!
+  - GLD at $562 ($2.9M volume) — tokenized Gold ETF!
+  - HOOD at $93 — tokenized Robinhood stock!
+
+**2 executors built** (ready when wallet funded):
+- KhypeCarryExecutor: kHYPE LST carry arb (~65% APR, $3,249/yr on $5k)
+- EulerClient write methods: deposit/borrow/repay/withdraw calldata for Euler HL
+
+**Dashboard built**: `pnpm --filter @edge/scanner start:dashboard`
+Shows top opportunities ranked by annual $ profit on $5k capital.
+
+## 18 Active Strategies
 
 ### High-Confidence Actionable Arbs (ready to execute on funding)
 
