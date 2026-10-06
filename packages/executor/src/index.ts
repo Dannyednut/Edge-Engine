@@ -364,3 +364,4 @@ export async function submitViaFlashbotsProtect(
 // ─── Kinetiq Liquid Staking (HyperEVM chain 999) ───────────────────────
 export * from './kinetiq-client.js';
 export * from './hyperlend-client.js';
+export * from './euler-client.js';
