@@ -644,6 +644,14 @@ async function main() {
   await tick();
   setInterval(tick, SCAN_INTERVAL_MS);
 
+  // CRITICAL: catch unhandled errors so the scanner doesn't silently exit
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[${new Date().toISOString()}] UNHANDLED REJECTION:`, reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`[${new Date().toISOString()}] UNCAUGHT EXCEPTION:`, err);
+  });
+
   process.on('SIGINT', async () => {
     console.log('\nShutting down...');
     await alerter.send('Multi-strategy scanner offline (SIGINT).').catch(() => {});
