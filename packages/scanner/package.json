@@ -21,7 +21,8 @@
     "start:prediction": "tsx src/runners/prediction-runner.ts",
     "start:discover": "tsx src/runners/discover-runner.ts",
     "start:dashboard": "tsx src/runners/dashboard.ts",
-    "start:khype-carry": "tsx src/runners/khype-carry-executor.ts"
+    "start:khype-carry": "tsx src/runners/khype-carry-executor.ts",
+    "start:commands": "tsx src/runners/command-handler.ts --loop"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
