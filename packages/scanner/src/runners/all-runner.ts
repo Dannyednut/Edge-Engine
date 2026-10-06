@@ -653,15 +653,20 @@ async function main() {
   });
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+    console.log(`\n[${new Date().toISOString()}] SIGINT received, shutting down...`);
     await alerter.send('Multi-strategy scanner offline (SIGINT).').catch(() => {});
     pnl.close();
     process.exit(0);
   });
   process.on('SIGTERM', async () => {
+    console.log(`[${new Date().toISOString()}] SIGTERM received, shutting down...`);
     await alerter.send('Multi-strategy scanner offline (SIGTERM).').catch(() => {});
     pnl.close();
     process.exit(0);
+  });
+  // Detect SIGHUP (terminal disconnect) — common when running in background
+  process.on('SIGHUP', () => {
+    console.log(`[${new Date().toISOString()}] SIGHUP received — ignoring (background mode)`);
   });
 }
 
