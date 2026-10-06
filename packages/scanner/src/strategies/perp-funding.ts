@@ -198,8 +198,12 @@ export class PerpFundingStrategy implements Strategy {
       }
     }
 
+    // Filter out illiquid pairs (OI < $50k on EITHER side — removes stale/phantom quotes)
+    const MIN_OI_USD = 50_000;
+    const filtered = alerts.filter(a => a.longOiUsd >= MIN_OI_USD && a.shortOiUsd >= MIN_OI_USD);
+
     // Sort by net APR descending
-    alerts.sort((a, b) => b.netApr - a.netApr);
-    return alerts;
+    filtered.sort((a, b) => b.netApr - a.netApr);
+    return filtered;
   }
 }
