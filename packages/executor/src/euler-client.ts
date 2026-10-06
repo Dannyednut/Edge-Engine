@@ -227,4 +227,92 @@ export class EulerClient {
       return '?';
     }
   }
+
+  // ─── Write Methods (calldata builders) ────────────────────────────
+
+  /**
+   * Build calldata for ERC4626 deposit(uint256 assets, address receiver).
+   * Caller must approve vault to spend `assets` first.
+   */
+  buildDepositTx(vault: Address, assetsWei: bigint, receiver: Address): { to: Address; data: `0x${string}` } {
+    const sel = toFunctionSelector('deposit(uint256,address)');
+    const assetsHex = assetsWei.toString(16).padStart(64, '0');
+    const receiverHex = receiver.slice(2).toLowerCase().padStart(64, '0');
+    return { to: vault, data: `0x${sel.slice(2)}${assetsHex}${receiverHex}` as `0x${string}` };
+  }
+
+  /**
+   * Build calldata for ERC4626 withdraw(uint256 assets, address receiver, address owner).
+   * Withdraws `assets` worth of shares from the vault.
+   */
+  buildWithdrawTx(vault: Address, assetsWei: bigint, receiver: Address, owner: Address): { to: Address; data: `0x${string}` } {
+    const sel = toFunctionSelector('withdraw(uint256,address,address)');
+    const assetsHex = assetsWei.toString(16).padStart(64, '0');
+    const receiverHex = receiver.slice(2).toLowerCase().padStart(64, '0');
+    const ownerHex = owner.slice(2).toLowerCase().padStart(64, '0');
+    return { to: vault, data: `0x${sel.slice(2)}${assetsHex}${receiverHex}${ownerHex}` as `0x${string}` };
+  }
+
+  /**
+   * Build calldata for ERC20 borrow(uint256 assets).
+   * Requires collateral deposited in another vault via EVC.
+   */
+  buildBorrowTx(vault: Address, assetsWei: bigint): { to: Address; data: `0x${string}` } {
+    const sel = toFunctionSelector('borrow(uint256)');
+    const assetsHex = assetsWei.toString(16).padStart(64, '0');
+    return { to: vault, data: `0x${sel.slice(2)}${assetsHex}` as `0x${string}` };
+  }
+
+  /**
+   * Build calldata for ERC20 repay(uint256 assets).
+   * Repays borrowed assets (reduces borrower's debt).
+   */
+  buildRepayTx(vault: Address, assetsWei: bigint): { to: Address; data: `0x${string}` } {
+    const sel = toFunctionSelector('repay(uint256)');
+    const assetsHex = assetsWei.toString(16).padStart(64, '0');
+    return { to: vault, data: `0x${sel.slice(2)}${assetsHex}` as `0x${string}` };
+  }
+
+  /**
+   * Build calldata for ERC20.approve(vault, amount).
+   * Required before deposit() or repay().
+   */
+  buildApproveTx(token: Address, spender: Address, amountWei: bigint): { to: Address; data: `0x${string}` } {
+    const sel = toFunctionSelector('approve(address,uint256)');
+    const spenderHex = spender.slice(2).toLowerCase().padStart(64, '0');
+    const amountHex = amountWei.toString(16).padStart(64, '0');
+    return { to: token, data: `0x${sel.slice(2)}${spenderHex}${amountHex}` as `0x${string}` };
+  }
+
+  /**
+   * Build the full lending arb cycle:
+   *   1. Approve asset → deposit vault
+   *   2. Deposit into high-APY vault (earn yield)
+   *   3. Borrow from low-APY vault (pay lower rate)
+   *   4. (Optional) Use borrowed asset for another opportunity
+   *
+   * Returns an array of { to, data } transactions to be executed in sequence.
+   * Caller must sign and submit each tx, waiting for confirmation between.
+   */
+  buildLendingArbCycle(params: {
+    asset: Address;
+    depositVault: Address;
+    borrowVault: Address;
+    depositAmountWei: bigint;
+    borrowAmountWei: bigint;
+    agentAddress: Address;
+  }): Array<{ to: Address; data: `0x${string}`; value?: bigint; description: string }> {
+    const { asset, depositVault, borrowVault, depositAmountWei, borrowAmountWei, agentAddress } = params;
+    return [
+      // 1. Approve deposit vault to spend asset
+      { ...this.buildApproveTx(asset, depositVault, depositAmountWei),
+        description: `Approve ${depositVault} to spend ${depositAmountWei} asset` },
+      // 2. Deposit into high-APY vault
+      { ...this.buildDepositTx(depositVault, depositAmountWei, agentAddress),
+        description: `Deposit ${depositAmountWei} into ${depositVault}` },
+      // 3. Borrow from low-APY vault (uses deposit as collateral via EVC)
+      { ...this.buildBorrowTx(borrowVault, borrowAmountWei),
+        description: `Borrow ${borrowAmountWei} from ${borrowVault}` },
+    ];
+  }
 }
