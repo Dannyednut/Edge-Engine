@@ -259,7 +259,8 @@ export class KhypeCarryExecutor {
 
     try {
       // STEP 1: Build swap calldata (WHYPE → kHYPE on HyperSwap V3)
-      const whypeAmountWei = BigInt(Math.floor(opp.maxSizeUsd * 1e18 / 25)); // assume HYPE ~$25
+      const HYPE_USD_PRICE = 89.5; // Updated Oct 7 2026 — was $25
+      const whypeAmountWei = BigInt(Math.floor(opp.maxSizeUsd * 1e18 / HYPE_USD_PRICE));
       const swapCalldata = encodeFunctionData({
         abi: HYPERSWAP_V3_ROUTER_ABI,
         functionName: 'exactInputSingle',

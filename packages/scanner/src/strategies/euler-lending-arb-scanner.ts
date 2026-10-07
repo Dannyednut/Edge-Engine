@@ -42,7 +42,7 @@ export interface EulerLendingArbAlert {
 
 const DEFAULT_PRICES: Record<string, number> = {
   USDC: 1, 'USDT0': 1, 'USD\u20E90': 1, USDH: 1, sUSN: 1, sUSDp: 1, USDXL: 1, USDG0: 1, syzUSD: 1, FXRP: 1,
-  WHYPE: 25, kHYPE: 24.4, wstHYPE: 25, lstHYPE: 25, beHYPE: 25, haHYPE: 25, hwHYPE: 25, xHYPE: 25, LHYPE: 25,
+  WHYPE: 89.5, kHYPE: 87.3, wstHYPE: 89.5, lstHYPE: 89.5, beHYPE: 89.5, haHYPE: 89.5, hwHYPE: 89.5, xHYPE: 89.5, LHYPE: 89.5,
   UBTC: 96000, UETH: 3300,
   PURR: 0.01, UPUMP: 0.01, UFART: 0.01,
   'PT-kHYPE-19MAR2026': 0.95,
