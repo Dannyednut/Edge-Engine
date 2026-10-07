@@ -37,12 +37,22 @@ export interface VooiArbExecutorOptions {
   apiToken: string;
   /** Max notional per arb position (default $5000) */
   maxSizeUsd: number;
-  /** Min net APR to execute (default 20% — filters marginal opps) */
+  /** Min net APR to execute (default 70% — VOOI's recommended minimum) */
   minNetApr: number;
-  /** Max hold hours for arb bots (default 24) */
+  /** Max net APR to execute (default 120% — VOOI says >120% "collapses fast") */
+  maxNetApr?: number;
+  /** Min hold hours before soft exit (default 12 — VOOI recommended) */
+  minHoldHours?: number;
+  /** Max hold hours for arb bots (default 96 — VOOI recommended 4 days) */
   maxHoldHours: number;
   /** Max round-trip cost in bps (default 12 — 0.12%) */
   maxRoundTripCostBps: number;
+  /** Stop loss percentage of collateral (default 5% — VOOI recommended) */
+  stopLossPct?: number;
+  /** Max slippage per leg in bps (default 200 = 2% — VOOI recommended) */
+  maxSlippageBps?: number;
+  /** Max adverse basis in bps (default 30 = 0.3% — VOOI recommended) */
+  maxAdverseBasisBps?: number;
   /** Dry-run mode (build orders but don't submit) */
   dryRun?: boolean;
   /** VOOI venue set (must match PerpFundingStrategy) */
@@ -84,6 +94,12 @@ export class VooiArbExecutor {
 
       if (alert.netApr < this.opts.minNetApr) {
         continue; // skip low-APR pairs
+      }
+
+      // VOOI recommends max APR cap — ">120% APR collapses fast"
+      const maxApr = this.opts.maxNetApr ?? 120;
+      if (alert.netApr > maxApr) {
+        continue; // skip high-APR spikes (likely ephemeral)
       }
 
       if (!alert.vooiExecutable) {
@@ -254,8 +270,8 @@ async function main() {
   const executor = new VooiArbExecutor({
     apiToken,
     maxSizeUsd: 5000,
-    minNetApr: 20,
-    maxHoldHours: 24,
+    minNetApr: 70,  // VOOI recommended minimum
+    maxHoldHours: 96,  // VOOI recommended (4 days)
     maxRoundTripCostBps: 12,
     dryRun: !args.has('--live'),
     venueSet: ['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate'],
