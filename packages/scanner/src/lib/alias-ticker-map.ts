@@ -81,7 +81,7 @@ export const ALIAS_MAP: Record<string, AliasInfo> = {
   // Unknown (need further research)
   'aph':       { alias: 'alias:aph',       realTicker: 'APH',    realName: 'Amphenol Corp',              assetClass: 'stock-us', yahooSymbol: 'APH' },
   'shaz':      { alias: 'alias:shaz',      realTicker: '?',      realName: 'Unknown',                     assetClass: 'unknown' },
-  'wen':       { alias: 'alias:wen',       realTicker: 'WEN?',   realName: "Wendy's?",                    assetClass: 'unknown' },
+  'wen':       { alias: 'alias:wen',       realTicker: 'WEN?',   realName: "Wendys?",                    assetClass: 'unknown' },
   'bnc':       { alias: 'alias:bnc',       realTicker: '?',      realName: 'Unknown',                     assetClass: 'unknown' },
   'bsp':       { alias: 'alias:bsp',       realTicker: '?',      realName: 'Unknown',                     assetClass: 'unknown' },
   'luna2':     { alias: 'alias:luna2',     realTicker: 'LUNA2',  realName: 'Terra Luna Classic (new?)',   assetClass: 'crypto' },
