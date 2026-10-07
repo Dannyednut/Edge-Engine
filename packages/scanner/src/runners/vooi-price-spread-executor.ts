@@ -120,11 +120,11 @@ export class VooiPriceSpreadExecutor {
           const info = getAliasInfo(item.asset);
           const name = info ? `${info.realTicker} (${info.realName})` : item.asset;
 
-          // Net profit after fees (0.3%) + slippage (from VOOI depth data)
-          const longSlippage = Math.abs(p.long.slippage || 0);
-          const shortSlippage = Math.abs(p.short.slippage || 0);
-          const totalSlippage = longSlippage + shortSlippage;
-          const netSpreadPct = spreadPct - 0.3 - totalSlippage;
+          // Use VOOI's priceSpreadAtSize — the ACTUAL spread at our trade size.
+          // This accounts for both slippage AND depth at the specified notional.
+          // Falls back to raw spread - fees - slippage if priceSpreadAtSize not available.
+          const priceSpreadAtSize = (p.priceSpreadAtSize ?? p.priceSpread ?? 0) * 100;
+          const netSpreadPct = priceSpreadAtSize - 0.3; // minus 0.3% fees
           if (netSpreadPct <= 0) continue;
 
           opps.push({
