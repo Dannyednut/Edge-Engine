@@ -112,6 +112,7 @@ async function handleCommand(text: string): Promise<string | null> {
       '/khype — kHYPE LST carry arb details',
       '/euler — Euler HL lending arb details',
       '/kinetiq — Kinetiq staking status',
+      '/vooi — VOOI perp funding arb details (TOP opportunity)',
       '/help — This message',
     ].join('\n');
   }
@@ -134,6 +135,10 @@ async function handleCommand(text: string): Promise<string | null> {
 
   if (cmd === '/kinetiq') {
     return await handleKinetiq();
+  }
+
+  if (cmd === '/vooi') {
+    return await handleVooi();
   }
 
   // Unknown command — don't respond (avoid spam)
@@ -281,6 +286,61 @@ async function handleKinetiq(): Promise<string> {
     ].join('\n');
   } catch (e: any) {
     return `Kinetiq status failed: ${e.message}`;
+  }
+}
+
+async function handleVooi(): Promise<string> {
+  try {
+    const { VooiClient } = await import('@edge/vooi-client');
+    const { getAliasInfo } = await import('../lib/alias-ticker-map.js');
+    const vooi = new VooiClient({ apiToken: process.env.VOOI_API_TOKEN });
+    const r = await vooi.scanArbitrage({
+      minFundingSpread: 0,
+      minOpenInterest: 100_000,
+      notionalUsd: 5000,
+      orderBy: 'fundingSpread1h',
+      orderDirection: 'desc',
+      limit: 100,
+    });
+
+    const opps: Array<{asset: string, name: string, apr: number, daily: number, longOi: number, shortOi: number, venues: string}> = [];
+    for (const item of r.items) {
+      const best = item.pairs[0];
+      if (!best) continue;
+      const apr = best.fundingSpread1h * 24 * 365 * 100;
+      if (apr < 50) continue;
+      const longOi = Number(best.long.openInterest) * Number(best.long.price);
+      const shortOi = Number(best.short.openInterest) * Number(best.short.price);
+      if (longOi < 100_000 || shortOi < 100_000) continue;
+      const info = getAliasInfo(item.asset);
+      const name = info ? `${info.realTicker} (${info.realName})` : item.asset;
+      opps.push({
+        asset: item.asset, name,
+        apr,
+        daily: (apr / 100 / 365) * 5000,
+        longOi, shortOi,
+        venues: `${best.long.exchange}->${best.short.exchange}`,
+      });
+    }
+    opps.sort((a, b) => b.daily - a.daily);
+
+    const lines: string[] = ['=== VOOI Perp Funding Arb (TOP Opportunity) ===', ''];
+    for (const o of opps.slice(0, 10)) {
+      lines.push(`${o.name.slice(0, 30)}`);
+      lines.push(`  ${o.venues}  APR: ${o.apr.toFixed(0)}%  Daily: $${o.daily.toFixed(0)}/5k`);
+      lines.push(`  OI: $${(o.longOi / 1e6).toFixed(0)}M / $${(o.shortOi / 1e6).toFixed(0)}M`);
+      lines.push('');
+    }
+    const top5Daily = opps.slice(0, 5).reduce((s, o) => s + o.daily, 0);
+    lines.push(`Top 5: $${top5Daily.toFixed(0)}/day = $${(top5Daily * 365 / 1000).toFixed(0)}k/yr on $25k`);
+    lines.push(`Combined APR: ${((top5Daily * 365 / 25000) * 100).toFixed(0)}%`);
+    lines.push('');
+    lines.push('Execution: VOOI atomic paired-leg');
+    lines.push('Needs: VOOI capital + principal approval');
+
+    return lines.join('\n');
+  } catch (e: any) {
+    return `VOOI scan failed: ${e.message}`;
   }
 }
 
