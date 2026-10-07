@@ -26,7 +26,12 @@
     "start:commands": "tsx src/runners/command-handler.ts --loop",
     "start:daily-report": "tsx src/runners/daily-report.ts",
     "start:monitor": "tsx src/runners/position-monitor.ts",
-    "start:vooi-exec": "tsx src/runners/vooi-arb-executor.ts"
+    "start:vooi-exec": "tsx src/runners/vooi-arb-executor.ts",
+    "start:vooi-price": "tsx src/runners/vooi-price-spread-executor.ts",
+    "start:vooi-bot": "tsx src/runners/vooi-create-bot.ts",
+    "start:opp-monitor": "tsx src/runners/opportunity-monitor.ts",
+    "start:master-view": "tsx src/runners/master-view.ts",
+    "start:readiness": "tsx src/runners/readiness-check.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
