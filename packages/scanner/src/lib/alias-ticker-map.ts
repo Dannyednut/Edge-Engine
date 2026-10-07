@@ -105,3 +105,76 @@ export function formatAlias(alias: string): string {
   if (!info) return alias;
   return `${info.realTicker} (${info.realName})`;
 }
+
+// ─── Major Index Futures (added Oct 7 2026 — MASSIVE OI) ──────────────
+export const ALIAS_MAP_INDICES: Record<string, AliasInfo> = {
+  'us100':    { alias: 'alias:us100',    realTicker: 'NDX',    realName: 'Nasdaq 100 Index',          assetClass: 'etf', yahooSymbol: '^NDX' },
+  'sp500':    { alias: 'alias:sp500',    realTicker: 'SPX',    realName: 'S&P 500 Index',             assetClass: 'etf', yahooSymbol: '^GSPC' },
+  'jp225':    { alias: 'alias:jp225',    realTicker: 'N225',   realName: 'Nikkei 225 Index',          assetClass: 'etf', yahooSymbol: '^N225' },
+  'spy':      { alias: 'alias:spy',      realTicker: 'SPY',    realName: 'SPDR S&P 500 ETF',          assetClass: 'etf', yahooSymbol: 'SPY' },
+  'qqq':      { alias: 'alias:qqq',      realTicker: 'QQQ',    realName: 'Invesco QQQ Trust (Nasdaq 100)', assetClass: 'etf', yahooSymbol: 'QQQ' },
+  'soxl':     { alias: 'alias:soxl',     realTicker: 'SOXL',   realName: 'Direxion Semiconductor Bull 3x ETF', assetClass: 'etf', yahooSymbol: 'SOXL' },
+  'soxx':     { alias: 'alias:soxx',     realTicker: 'SOXX',   realName: 'iShares Semiconductor ETF', assetClass: 'etf', yahooSymbol: 'SOXX' },
+  'smh':      { alias: 'alias:smh',      realTicker: 'SMH',    realName: 'VanEck Semiconductor ETF',  assetClass: 'etf', yahooSymbol: 'SMH' },
+};
+
+// ─── Mega-Cap Tech Stocks (added Oct 7 2026) ──────────────────────────
+export const ALIAS_MAP_MEGATECH: Record<string, AliasInfo> = {
+  'aapl':     { alias: 'alias:aapl',     realTicker: 'AAPL',   realName: 'Apple',                     assetClass: 'stock-us', yahooSymbol: 'AAPL' },
+  'msft':     { alias: 'alias:msft',     realTicker: 'MSFT',   realName: 'Microsoft',                 assetClass: 'stock-us', yahooSymbol: 'MSFT' },
+  'googl':    { alias: 'alias:googl',    realTicker: 'GOOGL',  realName: 'Alphabet (Google)',         assetClass: 'stock-us', yahooSymbol: 'GOOGL' },
+  'meta':     { alias: 'alias:meta',     realTicker: 'META',   realName: 'Meta Platforms (Facebook)', assetClass: 'stock-us', yahooSymbol: 'META' },
+  'nvda':     { alias: 'alias:nvda',     realTicker: 'NVDA',   realName: 'NVIDIA',                    assetClass: 'stock-us', yahooSymbol: 'NVDA' },
+  'tsla':     { alias: 'alias:tsla',     realTicker: 'TSLA',   realName: 'Tesla',                     assetClass: 'stock-us', yahooSymbol: 'TSLA' },
+  'amzn':     { alias: 'alias:amzn',     realTicker: 'AMZN',   realName: 'Amazon',                    assetClass: 'stock-us', yahooSymbol: 'AMZN' },
+  'amd':      { alias: 'alias:amd',      realTicker: 'AMD',    realName: 'Advanced Micro Devices',    assetClass: 'stock-us', yahooSymbol: 'AMD' },
+  'avgo':     { alias: 'alias:avgo',     realTicker: 'AVGO',   realName: 'Broadcom',                  assetClass: 'stock-us', yahooSymbol: 'AVGO' },
+  'arm':      { alias: 'alias:arm',      realTicker: 'ARM',    realName: 'ARM Holdings',              assetClass: 'stock-us', yahooSymbol: 'ARM' },
+  'intc':     { alias: 'alias:intc',     realTicker: 'INTC',   realName: 'Intel',                     assetClass: 'stock-us', yahooSymbol: 'INTC' },
+  'mu':       { alias: 'alias:mu',       realTicker: 'MU',     realName: 'Micron Technology',         assetClass: 'stock-us', yahooSymbol: 'MU' },
+  'mrvl':     { alias: 'alias:mrvl',     realTicker: 'MRVL',   realName: 'Marvell Technology',        assetClass: 'stock-us', yahooSymbol: 'MRVL' },
+  'qcom':     { alias: 'alias:qcom',     realTicker: 'QCOM',   realName: 'Qualcomm',                  assetClass: 'stock-us', yahooSymbol: 'QCOM' },
+  'wdc':      { alias: 'alias:wdc',      realTicker: 'WDC',    realName: 'Western Digital',           assetClass: 'stock-us', yahooSymbol: 'WDC' },
+  'lite':     { alias: 'alias:lite',     realTicker: 'LITE',   realName: 'Lumentum Holdings',         assetClass: 'stock-us', yahooSymbol: 'LITE' },
+  'asml':     { alias: 'alias:asml',     realTicker: 'ASML',   realName: 'ASML Holding',              assetClass: 'stock-us', yahooSymbol: 'ASML' },
+  'tsem':     { alias: 'alias:tsem',     realTicker: 'TSEM',   realName: 'Tower Semiconductor',       assetClass: 'stock-us', yahooSymbol: 'TSEM' },
+  'seagate':  { alias: 'alias:seagate',  realTicker: 'STX',    realName: 'Seagate Technology',        assetClass: 'stock-us', yahooSymbol: 'STX' },
+  'sndk':     { alias: 'alias:sndk',     realTicker: 'SNDK',   realName: 'SanDisk',                   assetClass: 'stock-us', yahooSymbol: 'SNDK' },
+  'nbis':     { alias: 'alias:nbis',     realTicker: 'NBIS',   realName: 'Nebius Group (AI)',         assetClass: 'stock-us', yahooSymbol: 'NBIS' },
+};
+
+// ─── More US Stocks (added Oct 7 2026) ────────────────────────────────
+export const ALIAS_MAP_STOCKS2: Record<string, AliasInfo> = {
+  'cost':     { alias: 'alias:cost',     realTicker: 'COST',   realName: 'Costco Wholesale',          assetClass: 'stock-us', yahooSymbol: 'COST' },
+  'lly':      { alias: 'alias:lly',      realTicker: 'LLY',    realName: 'Eli Lilly',                 assetClass: 'stock-us', yahooSymbol: 'LLY' },
+  'brkb':     { alias: 'alias:brkb',     realTicker: 'BRK.B',  realName: 'Berkshire Hathaway B',      assetClass: 'stock-us', yahooSymbol: 'BRK-B' },
+  'ma':       { alias: 'alias:ma',       realTicker: 'MA',     realName: 'Mastercard',                assetClass: 'stock-us', yahooSymbol: 'MA' },
+  'orcl':     { alias: 'alias:orcl',     realTicker: 'ORCL',   realName: 'Oracle',                    assetClass: 'stock-us', yahooSymbol: 'ORCL' },
+  'vrtx':     { alias: 'alias:vrtx',     realTicker: 'VRTX',   realName: 'Vertex Pharmaceuticals',    assetClass: 'stock-us', yahooSymbol: 'VRTX' },
+  'isrg':     { alias: 'alias:isrg',     realTicker: 'ISRG',   realName: 'Intuitive Surgical',        assetClass: 'stock-us', yahooSymbol: 'ISRG' },
+  'coin':     { alias: 'alias:coin',     realTicker: 'COIN',   realName: 'Coinbase',                  assetClass: 'stock-us', yahooSymbol: 'COIN' },
+  'mrna':     { alias: 'alias:mrna',     realTicker: 'MRNA',   realName: 'Moderna',                   assetClass: 'stock-us', yahooSymbol: 'MRNA' },
+  'mstr':     { alias: 'alias:mstr',     realTicker: 'MSTR',   realName: 'MicroStrategy',             assetClass: 'stock-us', yahooSymbol: 'MSTR' },
+  'meli':     { alias: 'alias:meli',     realTicker: 'MELI',   realName: 'MercadoLibre',              assetClass: 'stock-us', yahooSymbol: 'MELI' },
+  'rklb':     { alias: 'alias:rklb',     realTicker: 'RKLB',   realName: 'Rocket Lab',                assetClass: 'stock-us', yahooSymbol: 'RKLB' },
+  'hd':       { alias: 'alias:hd',       realTicker: 'HD',     realName: 'Home Depot',                assetClass: 'stock-us', yahooSymbol: 'HD' },
+  'ttwo':     { alias: 'alias:ttwo',     realTicker: 'TTWO',   realName: 'Take-Two Interactive',      assetClass: 'stock-us', yahooSymbol: 'TTWO' },
+  'crcl':     { alias: 'alias:crcl',     realTicker: 'CRCL',   realName: 'Circle Internet Group',     assetClass: 'stock-us', yahooSymbol: 'CRCL' },
+};
+
+// ─── Private AI Companies (PRE-IPO — massive opportunity!) ────────────
+export const ALIAS_MAP_PRIVATE_AI: Record<string, AliasInfo> = {
+  'anthropic': { alias: 'alias:anthropic', realTicker: 'PRIVATE', realName: 'Anthropic (Claude AI — PRIVATE)', assetClass: 'stock-us' },
+  'openai':    { alias: 'alias:openai',    realTicker: 'PRIVATE', realName: 'OpenAI (ChatGPT — PRIVATE)',      assetClass: 'stock-us' },
+  'zhipu':     { alias: 'alias:zhipu',     realTicker: 'PRIVATE', realName: 'Zhipu AI (Chinese AI — PRIVATE)', assetClass: 'stock-intl' },
+};
+
+// ─── More Commodities ─────────────────────────────────────────────────
+export const ALIAS_MAP_COMMODITIES2: Record<string, AliasInfo> = {
+  'silver':   { alias: 'alias:silver',   realTicker: 'XAGUSD', realName: 'Silver (Spot)',             assetClass: 'commodity' },
+  'skhynix':  { alias: 'alias:skhynix',  realTicker: '000660.KS', realName: 'SK Hynix (Korean semi)',  assetClass: 'stock-intl', yahooSymbol: '000660.KS' },
+  'skhy':     { alias: 'alias:skhy',     realTicker: 'SKHY',   realName: 'SK Hynix ADR?',             assetClass: 'stock-intl' },
+};
+
+// Merge all maps
+Object.assign(ALIAS_MAP, ALIAS_MAP_INDICES, ALIAS_MAP_MEGATECH, ALIAS_MAP_STOCKS2, ALIAS_MAP_PRIVATE_AI, ALIAS_MAP_COMMODITIES2);
