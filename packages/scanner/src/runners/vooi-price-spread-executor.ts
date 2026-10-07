@@ -120,8 +120,11 @@ export class VooiPriceSpreadExecutor {
           const info = getAliasInfo(item.asset);
           const name = info ? `${info.realTicker} (${info.realName})` : item.asset;
 
-          // Net profit after ~0.3% fees (0.15% per venue)
-          const netSpreadPct = spreadPct - 0.3;
+          // Net profit after fees (0.3%) + slippage (from VOOI depth data)
+          const longSlippage = Math.abs(p.long.slippage || 0);
+          const shortSlippage = Math.abs(p.short.slippage || 0);
+          const totalSlippage = longSlippage + shortSlippage;
+          const netSpreadPct = spreadPct - 0.3 - totalSlippage;
           if (netSpreadPct <= 0) continue;
 
           opps.push({
