@@ -113,6 +113,7 @@ async function handleCommand(text: string): Promise<string | null> {
       '/euler — Euler HL lending arb details',
       '/kinetiq — Kinetiq staking status',
       '/vooi — VOOI perp funding arb details (TOP opportunity)',
+      '/pricespread — VOOI price spread arbs (INSTANT profit)',
       '/help — This message',
     ].join('\n');
   }
@@ -139,6 +140,10 @@ async function handleCommand(text: string): Promise<string | null> {
 
   if (cmd === '/vooi') {
     return await handleVooi();
+  }
+
+  if (cmd === '/pricespread' || cmd === '/ps') {
+    return await handlePriceSpread();
   }
 
   // Unknown command — don't respond (avoid spam)
@@ -341,6 +346,38 @@ async function handleVooi(): Promise<string> {
     return lines.join('\n');
   } catch (e: any) {
     return `VOOI scan failed: ${e.message}`;
+  }
+}
+
+async function handlePriceSpread(): Promise<string> {
+  try {
+    const { VooiPriceSpreadExecutor } = await import('../runners/vooi-price-spread-executor.js');
+    const executor = new VooiPriceSpreadExecutor({
+      apiToken: process.env.VOOI_API_TOKEN!,
+      maxSizeUsd: 5000,
+      minSpreadPct: 1.5,
+      minOiUsd: 100_000,
+      dryRun: true,
+    });
+    const opps = await executor.scan();
+
+    const lines: string[] = ['=== VOOI Price Spread Arb (INSTANT) ===', ''];
+    for (const o of opps.slice(0, 10)) {
+      lines.push(`${o.name.slice(0, 30)}`);
+      lines.push(`  Buy ${o.buyVenue} $${o.buyPrice.toFixed(2)} -> Sell ${o.sellVenue} $${o.sellPrice.toFixed(2)}`);
+      lines.push(`  Spread: ${o.spreadPct.toFixed(1)}%  Profit: $${o.profitUsd.toFixed(0)}/5k`);
+      lines.push(`  OI: $${(o.longOi / 1e6).toFixed(0)}M / $${(o.shortOi / 1e6).toFixed(0)}M`);
+      lines.push('');
+    }
+    const top5 = opps.slice(0, 5).reduce((s, o) => s + o.profitUsd, 0);
+    lines.push(`Top 5: $${top5.toFixed(0)}/cycle (INSTANT)`);
+    lines.push(`At 3 cycles/day: $${(top5 * 3).toFixed(0)}/day = $${(top5 * 3 * 365 / 1000).toFixed(0)}k/yr`);
+    lines.push('');
+    lines.push('No holding required. Capital recycles same-day.');
+
+    return lines.join('\n');
+  } catch (e: any) {
+    return `Price spread scan failed: ${e.message}`;
   }
 }
 
