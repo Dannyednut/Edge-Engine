@@ -40,7 +40,7 @@ export const ALIAS_MAP: Record<string, AliasInfo> = {
   'twlo':   { alias: 'alias:twlo',   realTicker: 'TWLO',   realName: 'Twilio',                   assetClass: 'stock-us', yahooSymbol: 'TWLO' },
   'zm':     { alias: 'alias:zm',     realTicker: 'ZM',     realName: 'Zoom Video',               assetClass: 'stock-us', yahooSymbol: 'ZM' },
   'cop':    { alias: 'alias:cop',    realTicker: 'COP',    realName: 'ConocoPhillips',           assetClass: 'stock-us', yahooSymbol: 'COP' },
-  'ray':    { alias: 'alias:ray',    realTicker: 'RTX',    realName: 'RTX (Raytheon)',           assetClass: 'stock-us', yahooSymbol: 'RTX' },
+  'ray':    { alias: 'alias:ray',    realTicker: 'RAY',    realName: 'Raydium (Solana DEX)',     assetClass: 'crypto' },
   'aal':    { alias: 'alias:aal',    realTicker: 'AAL',    realName: 'American Airlines',        assetClass: 'stock-us', yahooSymbol: 'AAL' },
   'gpro':   { alias: 'alias:gpro',   realTicker: 'GPRO',   realName: 'GoPro',                    assetClass: 'stock-us', yahooSymbol: 'GPRO' },
   'ccl':    { alias: 'alias:ccl',    realTicker: 'CCL',    realName: 'Carnival Corp',            assetClass: 'stock-us', yahooSymbol: 'CCL' },
@@ -52,14 +52,14 @@ export const ALIAS_MAP: Record<string, AliasInfo> = {
   'crdo':   { alias: 'alias:crdo',   realTicker: 'CRDO',   realName: 'Credo Technology',         assetClass: 'stock-us', yahooSymbol: 'CRDO' },
   'aehr':   { alias: 'alias:aehr',   realTicker: 'AEHR',   realName: 'Aehr Test Systems',        assetClass: 'stock-us', yahooSymbol: 'AEHR' },
   'path':   { alias: 'alias:path',   realTicker: 'PATH',   realName: 'UiPath',                   assetClass: 'stock-us', yahooSymbol: 'PATH' },
-  'trump':  { alias: 'alias:trump',  realTicker: 'DJT',    realName: 'Trump Media (DJT)',        assetClass: 'stock-us', yahooSymbol: 'DJT' },
+  'trump':  { alias: 'alias:trump',  realTicker: 'MAGA',   realName: 'Trump meme token (MAGA)',  assetClass: 'crypto' },
 
   // International Stocks
   'softbank': { alias: 'alias:softbank', realTicker: '9984.T', realName: 'SoftBank Group',      assetClass: 'stock-intl', yahooSymbol: '9984.T' },
   'samsung':  { alias: 'alias:samsung',  realTicker: '005930.KS', realName: 'Samsung Electronics', assetClass: 'stock-intl', yahooSymbol: '005930.KS' },
   'hyundai':  { alias: 'alias:hyundai',  realTicker: '005380.KS', realName: 'Hyundai Motor',     assetClass: 'stock-intl', yahooSymbol: '005380.KS' },
   'kioxia':   { alias: 'alias:kioxia',   realTicker: 'KIOX', realName: 'Kioxia Holdings',       assetClass: 'stock-intl' },
-  'niulai':   { alias: 'alias:niulai',   realTicker: 'NIO', realName: 'NIO Inc (Chinese EV)',   assetClass: 'stock-intl', yahooSymbol: 'NIO' },
+  'niulai':   { alias: 'alias:niulai',   realTicker: 'NIULAI', realName: 'Niulai (Chinese token)',  assetClass: 'crypto' },
 
   // Commodities
   'gold':      { alias: 'alias:gold',      realTicker: 'XAUUSD', realName: 'Gold (Spot)',      assetClass: 'commodity' },
@@ -79,7 +79,7 @@ export const ALIAS_MAP: Record<string, AliasInfo> = {
   'urnm':      { alias: 'alias:urnm',      realTicker: 'URNM',   realName: 'Sprott Uranium Miners ETF', assetClass: 'etf', yahooSymbol: 'URNM' },
 
   // Unknown (need further research)
-  'aph':       { alias: 'alias:aph',       realTicker: '?',      realName: 'Unknown (possibly Aphria?)',  assetClass: 'unknown' },
+  'aph':       { alias: 'alias:aph',       realTicker: 'APH',    realName: 'Amphenol Corp',              assetClass: 'stock-us', yahooSymbol: 'APH' },
   'shaz':      { alias: 'alias:shaz',      realTicker: '?',      realName: 'Unknown',                     assetClass: 'unknown' },
   'wen':       { alias: 'alias:wen',       realTicker: 'WEN?',   realName: "Wendy's?",                    assetClass: 'unknown' },
   'bnc':       { alias: 'alias:bnc',       realTicker: '?',      realName: 'Unknown',                     assetClass: 'unknown' },
