@@ -21,6 +21,8 @@ import { LstYieldComparisonScanner } from '../strategies/lst-yield-comparison.js
 import { PtYieldArbScanner } from '../strategies/pt-yield-arb-scanner.js';
 import { EulerLendingArbScanner } from '../strategies/euler-lending-arb-scanner.js';
 import { KinetiqClient } from '@edge/executor';
+import { VooiClient } from '@edge/vooi-client';
+import { getAliasInfo } from '../lib/alias-ticker-map.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -183,6 +185,64 @@ async function main() {
     }
   } catch (e: any) {
     console.log(`  ⚠ PT yield scan failed: ${e.message}`);
+  }
+
+  // 6. VOOI perp funding arb (top 10 by daily profit, both sides > $100k OI)
+  console.log('Scanning VOOI perp funding arbs...');
+  try {
+    const vooi = new VooiClient({ apiToken: process.env.VOOI_API_TOKEN });
+    const r = await vooi.scanArbitrage({
+      minFundingSpread: 0,
+      minOpenInterest: 100_000,
+      notionalUsd: 5000,
+      orderBy: 'fundingSpread1h',
+      orderDirection: 'desc',
+      limit: 100,
+    });
+
+    const vooiOpps: Array<{asset: string, apr: number, dailyProfit: number, longOi: number, shortOi: number, longVenue: string, shortVenue: string}> = [];
+    for (const item of r.items) {
+      const best = item.pairs[0];
+      if (!best) continue;
+      const apr = best.fundingSpread1h * 24 * 365 * 100;
+      if (apr < 50) continue;  // min 50% APR for VOOI
+      const longOi = Number(best.long.openInterest) * Number(best.long.price);
+      const shortOi = Number(best.short.openInterest) * Number(best.short.price);
+      // Both sides must have > $100k OI (executable)
+      if (longOi < 100_000 || shortOi < 100_000) continue;
+      vooiOpps.push({
+        asset: item.asset,
+        apr,
+        dailyProfit: (apr / 100 / 365) * 5000,
+        longOi, shortOi,
+        longVenue: best.long.exchange,
+        shortVenue: best.short.exchange,
+      });
+    }
+    vooiOpps.sort((a, b) => b.dailyProfit - a.dailyProfit);
+
+    for (const o of vooiOpps.slice(0, 10)) {
+      const info = getAliasInfo(o.asset);
+      const displayName = info ? `${info.realTicker} (${info.realName})` : o.asset;
+      opportunities.push({
+        strategy: 'VOOI perp funding arb',
+        asset: displayName,
+        spreadPct: o.apr,
+        annualizedReturnPct: o.apr,
+        estimatedProfitUsd: o.dailyProfit * 365,  // annualized
+        capitalRequired: 5_000,
+        details: [
+          `Pair: ${o.asset} ${o.longVenue} -> ${o.shortVenue}`,
+          `APR: ${o.apr.toFixed(0)}%  Daily: $${o.dailyProfit.toFixed(2)} on $5k`,
+          `OI: $${(o.longOi / 1e6).toFixed(0)}M / $${(o.shortOi / 1e6).toFixed(0)}M`,
+          `Execution: VOOI atomic paired-leg (both legs fill or neither)`,
+          `Hold: 8-24h (funding resets every 8h)`,
+        ],
+        ts: Date.now(),
+      });
+    }
+  } catch (e: any) {
+    console.log(`  ⚠ VOOI scan failed: ${e.message}`);
   }
 
   // Sort by estimated annual profit (highest first)
