@@ -230,3 +230,13 @@ export const ALIAS_MAP_ADDITIONAL: Record<string, AliasInfo> = {
 };
 
 Object.assign(ALIAS_MAP, ALIAS_MAP_ADDITIONAL);
+
+// ─── More auto-decoded aliases (Oct 7 2026 — price verified) ──────────
+export const ALIAS_MAP_VERIFIED: Record<string, AliasInfo> = {
+  'app':      { alias: 'alias:app',      realTicker: 'APP',    realName: 'AppLovin',                  assetClass: 'stock-us', yahooSymbol: 'APP' },
+  'cls':      { alias: 'alias:cls',      realTicker: 'CLS',    realName: 'Celestica',                 assetClass: 'stock-us', yahooSymbol: 'CLS' },
+  'oura':     { alias: 'alias:oura',     realTicker: 'PRIVATE', realName: 'Oura Ring (private)',     assetClass: 'stock-intl' },
+  'peng':     { alias: 'alias:peng',     realTicker: 'PENG',   realName: 'Unknown (PENGSTOCK)',       assetClass: 'unknown' },
+};
+
+Object.assign(ALIAS_MAP, ALIAS_MAP_VERIFIED);
