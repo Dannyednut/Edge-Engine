@@ -219,3 +219,14 @@ export const ALIAS_MAP_AUTO: Record<string, AliasInfo> = {
 };
 
 Object.assign(ALIAS_MAP, ALIAS_MAP_AUTO);
+
+// ─── Additional aliases identified Oct 7 2026 ─────────────────────────
+export const ALIAS_MAP_ADDITIONAL: Record<string, AliasInfo> = {
+  'pep':       { alias: 'alias:pep',       realTicker: 'PEP',    realName: 'PepsiCo',                   assetClass: 'stock-us', yahooSymbol: 'PEP' },
+  'ark':       { alias: 'alias:ark',       realTicker: 'ARKK',   realName: 'ARK Innovation ETF',        assetClass: 'etf', yahooSymbol: 'ARKK' },
+  'shein':     { alias: 'alias:shein',     realTicker: 'PRIVATE', realName: 'Shein (private — pre-IPO)', assetClass: 'stock-intl' },
+  'poet':      { alias: 'alias:poet',      realTicker: 'POET',   realName: 'POET Technologies',         assetClass: 'stock-us', yahooSymbol: 'POET' },
+  'oklo':      { alias: 'alias:oklo',      realTicker: 'OKLO',   realName: 'Oklo (nuclear fission)',    assetClass: 'stock-us', yahooSymbol: 'OKLO' },
+};
+
+Object.assign(ALIAS_MAP, ALIAS_MAP_ADDITIONAL);
