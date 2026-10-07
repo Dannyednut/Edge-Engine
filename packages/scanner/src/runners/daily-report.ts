@@ -394,6 +394,59 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
     }
   } catch (e: any) { console.log(`  ⚠ HL spot basis scan failed: ${e.message}`); }
 
+  // 6. VOOI perp funding arb (top 10 by daily profit, both sides > $100k OI)
+  try {
+    const { VooiClient } = await import('@edge/vooi-client');
+    const { getAliasInfo } = await import('../lib/alias-ticker-map.js');
+    const vooi = new VooiClient({ apiToken: process.env.VOOI_API_TOKEN });
+    const r = await vooi.scanArbitrage({
+      minFundingSpread: 0,
+      minOpenInterest: 100_000,
+      notionalUsd: 5000,
+      orderBy: 'fundingSpread1h',
+      orderDirection: 'desc',
+      limit: 100,
+    });
+
+    const vooiOpps: Array<{asset: string, apr: number, dailyProfit: number, longOi: number, shortOi: number, longVenue: string, shortVenue: string}> = [];
+    for (const item of r.items) {
+      const best = item.pairs[0];
+      if (!best) continue;
+      const apr = best.fundingSpread1h * 24 * 365 * 100;
+      if (apr < 50) continue;
+      const longOi = Number(best.long.openInterest) * Number(best.long.price);
+      const shortOi = Number(best.short.openInterest) * Number(best.short.price);
+      if (longOi < 100_000 || shortOi < 100_000) continue;
+      vooiOpps.push({
+        asset: item.asset, apr,
+        dailyProfit: (apr / 100 / 365) * 5000,
+        longOi, shortOi,
+        longVenue: best.long.exchange, shortVenue: best.short.exchange,
+      });
+    }
+    vooiOpps.sort((a, b) => b.dailyProfit - a.dailyProfit);
+
+    for (const o of vooiOpps.slice(0, 10)) {
+      const info = getAliasInfo(o.asset);
+      const displayName = info ? `${info.realTicker} (${info.realName})` : o.asset;
+      opportunities.push({
+        rank: ++rank,
+        strategy: 'VOOI perp funding arb',
+        asset: displayName,
+        spreadPct: o.apr,
+        annualizedReturnPct: o.apr,
+        estimatedProfitUsd: o.dailyProfit * 365,
+        capitalRequired: 5000,
+        details: [
+          `Pair: ${o.asset} ${o.longVenue} -> ${o.shortVenue}`,
+          `APR: ${o.apr.toFixed(0)}%  Daily: $${o.dailyProfit.toFixed(2)} on $5k`,
+          `OI: $${(o.longOi / 1e6).toFixed(0)}M / $${(o.shortOi / 1e6).toFixed(0)}M`,
+          `Execution: VOOI atomic paired-leg`,
+        ],
+      });
+    }
+  } catch (e: any) { console.log(`  ⚠ VOOI scan failed: ${e.message}`); }
+
   // Sort by estimated annual profit (highest first)
   opportunities.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
   // Re-rank
