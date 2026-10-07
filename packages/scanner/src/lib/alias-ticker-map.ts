@@ -240,3 +240,39 @@ export const ALIAS_MAP_VERIFIED: Record<string, AliasInfo> = {
 };
 
 Object.assign(ALIAS_MAP, ALIAS_MAP_VERIFIED);
+
+// ─── Mass-decoded aliases (Oct 7 2026 — name+price verified) ──────────
+export const ALIAS_MAP_MASS: Record<string, AliasInfo> = {
+  'adbe':     { alias: 'alias:adbe',     realTicker: 'ADBE',   realName: 'Adobe',                     assetClass: 'stock-us', yahooSymbol: 'ADBE' },
+  'net':      { alias: 'alias:net',      realTicker: 'NET',    realName: 'Cloudflare',                assetClass: 'stock-us', yahooSymbol: 'NET' },
+  'tsm':      { alias: 'alias:tsm',      realTicker: 'TSM',    realName: 'TSMC',                      assetClass: 'stock-intl', yahooSymbol: 'TSM' },
+  'lin':      { alias: 'alias:lin',      realTicker: 'LIN',    realName: 'Linde',                     assetClass: 'stock-us', yahooSymbol: 'LIN' },
+  'amat':     { alias: 'alias:amat',     realTicker: 'AMAT',   realName: 'Applied Materials',         assetClass: 'stock-us', yahooSymbol: 'AMAT' },
+  'tmo':      { alias: 'alias:tmo',      realTicker: 'TMO',    realName: 'Thermo Fisher',             assetClass: 'stock-us', yahooSymbol: 'TMO' },
+  'caterpillar': { alias: 'alias:caterpillar', realTicker: 'CAT', realName: 'Caterpillar',           assetClass: 'stock-us', yahooSymbol: 'CAT' },
+  'txn':      { alias: 'alias:txn',      realTicker: 'TXN',    realName: 'Texas Instruments',         assetClass: 'stock-us', yahooSymbol: 'TXN' },
+  'be':       { alias: 'alias:be',       realTicker: 'BE',     realName: 'Bloom Energy',              assetClass: 'stock-us', yahooSymbol: 'BE' },
+  'ba':       { alias: 'alias:ba',       realTicker: 'BA',     realName: 'Boeing',                    assetClass: 'stock-us', yahooSymbol: 'BA' },
+  'lmt':      { alias: 'alias:lmt',      realTicker: 'LMT',    realName: 'Lockheed Martin',           assetClass: 'stock-us', yahooSymbol: 'LMT' },
+  'ceg':      { alias: 'alias:ceg',      realTicker: 'CEG',    realName: 'Constellation Energy',      assetClass: 'stock-us', yahooSymbol: 'CEG' },
+  'xle':      { alias: 'alias:xle',      realTicker: 'XLE',    realName: 'Energy Select Sector ETF',  assetClass: 'etf', yahooSymbol: 'XLE' },
+  'iwm':      { alias: 'alias:iwm',      realTicker: 'IWM',    realName: 'iShares Russell 2000 ETF',  assetClass: 'etf', yahooSymbol: 'IWM' },
+  'xbi':      { alias: 'alias:xbi',      realTicker: 'XBI',    realName: 'SPDR Biotech ETF',          assetClass: 'etf', yahooSymbol: 'XBI' },
+  'dkng':     { alias: 'alias:dkng',     realTicker: 'DKNG',   realName: 'DraftKings',                assetClass: 'stock-us', yahooSymbol: 'DKNG' },
+  'gme':      { alias: 'alias:gme',      realTicker: 'GME',    realName: 'GameStop',                  assetClass: 'stock-us', yahooSymbol: 'GME' },
+  'hims':     { alias: 'alias:hims',     realTicker: 'HIMS',   realName: 'Hims & Hers Health',        assetClass: 'stock-us', yahooSymbol: 'HIMS' },
+  'iren':     { alias: 'alias:iren',     realTicker: 'IREN',   realName: 'Iris Energy (BTC miner)',   assetClass: 'stock-us', yahooSymbol: 'IREN' },
+  'asts':     { alias: 'alias:asts',     realTicker: 'ASTS',   realName: 'AST SpaceMobile',           assetClass: 'stock-us', yahooSymbol: 'ASTS' },
+  'flex':     { alias: 'alias:flex',     realTicker: 'FLEX',   realName: 'Flex',                      assetClass: 'stock-us', yahooSymbol: 'FLEX' },
+  'aaoi':     { alias: 'alias:aaoi',     realTicker: 'AAOI',   realName: 'Applied Optoelectronics',   assetClass: 'stock-us', yahooSymbol: 'AAOI' },
+  'vst':      { alias: 'alias:vst',      realTicker: 'VST',    realName: 'Vistra Energy',             assetClass: 'stock-us', yahooSymbol: 'VST' },
+  'vrt':      { alias: 'alias:vrt',      realTicker: 'VRT',    realName: 'Vertiv Holdings',           assetClass: 'stock-us', yahooSymbol: 'VRT' },
+  'crwd':     { alias: 'alias:crwd',     realTicker: 'CRWD',   realName: 'CrowdStrike',               assetClass: 'stock-us', yahooSymbol: 'CRWD' },
+  'alab':     { alias: 'alias:alab',     realTicker: 'ALAB',   realName: 'Astera Labs',               assetClass: 'stock-us', yahooSymbol: 'ALAB' },
+  'tqqq':     { alias: 'alias:tqqq',     realTicker: 'TQQQ',   realName: 'ProShares 3x Nasdaq ETF',   assetClass: 'etf', yahooSymbol: 'TQQQ' },
+  'rtxcorp':  { alias: 'alias:rtxcorp',  realTicker: 'RTX',    realName: 'RTX (Raytheon)',            assetClass: 'stock-us', yahooSymbol: 'RTX' },
+  'nok':      { alias: 'alias:nok',      realTicker: 'NOK',    realName: 'Nokia',                     assetClass: 'stock-intl', yahooSymbol: 'NOK' },
+  'amkr':     { alias: 'alias:amkr',     realTicker: 'AMKR',   realName: 'Amkor Technology',          assetClass: 'stock-us', yahooSymbol: 'AMKR' },
+};
+
+Object.assign(ALIAS_MAP, ALIAS_MAP_MASS);
