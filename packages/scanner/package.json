@@ -25,7 +25,8 @@
     "start:euler-arb": "tsx src/runners/euler-lending-executor.ts",
     "start:commands": "tsx src/runners/command-handler.ts --loop",
     "start:daily-report": "tsx src/runners/daily-report.ts",
-    "start:monitor": "tsx src/runners/position-monitor.ts"
+    "start:monitor": "tsx src/runners/position-monitor.ts",
+    "start:vooi-exec": "tsx src/runners/vooi-arb-executor.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",

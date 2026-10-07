@@ -202,9 +202,9 @@ export class VooiClient {
     return this.request<VooiArbitrageOrder>('POST', '/arbitrage-orders', req);
   }
 
-  async listArbitrageOrders(status?: 'open' | 'history'): Promise<VooiArbitrageOrder[]> {
+  async listArbitrageOrders(status?: 'open' | 'history'): Promise<{ cursor: string | null; items: VooiArbitrageOrder[] }> {
     const q = status ? `?status=${status}` : '';
-    return this.request<VooiArbitrageOrder[]>('GET', `/arbitrage-orders${q}`);
+    return this.request<{ cursor: string | null; items: VooiArbitrageOrder[] }>('GET', `/arbitrage-orders${q}`);
   }
 
   async cancelArbitrageOrder(id: string): Promise<{ ok: boolean }> {
