@@ -276,3 +276,17 @@ export const ALIAS_MAP_MASS: Record<string, AliasInfo> = {
 };
 
 Object.assign(ALIAS_MAP, ALIAS_MAP_MASS);
+
+// ─── Final decoded aliases (Oct 7 2026) ───────────────────────────────
+export const ALIAS_MAP_FINAL: Record<string, AliasInfo> = {
+  '1000lunc': { alias: 'alias:1000lunc', realTicker: 'LUNC', realName: 'Terra Luna Classic (1000x)', assetClass: 'crypto' },
+  'gram':     { alias: 'alias:gram',     realTicker: 'GRAM', realName: 'Gram (Telegram token?)',    assetClass: 'crypto' },
+  'layer':    { alias: 'alias:layer',    realTicker: 'LAYER', realName: 'Solayer (restaking)',      assetClass: 'crypto' },
+  'minimax':  { alias: 'alias:minimax',  realTicker: 'PRIVATE', realName: 'MiniMax AI (Chinese AI — private?)', assetClass: 'stock-intl' },
+  'cxmt':     { alias: 'alias:cxmt',     realTicker: 'CXMT',  realName: 'Unknown (CXMT)',            assetClass: 'unknown' },
+  'fwdi':     { alias: 'alias:fwdi',     realTicker: 'FWDI',  realName: 'Forward Industries?',       assetClass: 'unknown' },
+  'infq':     { alias: 'alias:infq',     realTicker: 'INFQ',  realName: 'Infinite Acquisition?',     assetClass: 'unknown' },
+  'strc':     { alias: 'alias:strc',     realTicker: 'STRC',  realName: 'Unknown (STRC)',            assetClass: 'unknown' },
+};
+
+Object.assign(ALIAS_MAP, ALIAS_MAP_FINAL);
