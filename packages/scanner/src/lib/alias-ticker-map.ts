@@ -178,3 +178,44 @@ export const ALIAS_MAP_COMMODITIES2: Record<string, AliasInfo> = {
 
 // Merge all maps
 Object.assign(ALIAS_MAP, ALIAS_MAP_INDICES, ALIAS_MAP_MEGATECH, ALIAS_MAP_STOCKS2, ALIAS_MAP_PRIVATE_AI, ALIAS_MAP_COMMODITIES2);
+
+// ─── Auto-decoded aliases (Oct 7 2026 — price-matched to Yahoo Finance) ─
+export const ALIAS_MAP_AUTO: Record<string, AliasInfo> = {
+  // Direct name matches with price verification
+  'nke':       { alias: 'alias:nke',       realTicker: 'NKE',    realName: 'Nike',                      assetClass: 'stock-us', yahooSymbol: 'NKE' },
+  'ccj':       { alias: 'alias:ccj',       realTicker: 'CCJ',    realName: 'Cameco Corp (uranium)',     assetClass: 'stock-us', yahooSymbol: 'CCJ' },
+  'wmt':       { alias: 'alias:wmt',       realTicker: 'WMT',    realName: 'Walmart',                   assetClass: 'stock-us', yahooSymbol: 'WMT' },
+  'now':       { alias: 'alias:now',       realTicker: 'NOW',    realName: 'ServiceNow',                assetClass: 'stock-us', yahooSymbol: 'NOW' },
+  'pltr':      { alias: 'alias:pltr',      realTicker: 'PLTR',   realName: 'Palantir Technologies',     assetClass: 'stock-us', yahooSymbol: 'PLTR' },
+  'chevron':   { alias: 'alias:chevron',   realTicker: 'CVX',    realName: 'Chevron',                   assetClass: 'stock-us', yahooSymbol: 'CVX' },
+  'rivn':      { alias: 'alias:rivn',      realTicker: 'RIVN',   realName: 'Rivian Automotive',         assetClass: 'stock-us', yahooSymbol: 'RIVN' },
+  'nflx':      { alias: 'alias:nflx',      realTicker: 'NFLX',   realName: 'Netflix',                   assetClass: 'stock-us', yahooSymbol: 'NFLX' },
+  'cmcsa':     { alias: 'alias:cmcsa',     realTicker: 'CMCSA',  realName: 'Comcast Class A',           assetClass: 'stock-us', yahooSymbol: 'CMCSA' },
+  'jd':        { alias: 'alias:jd',        realTicker: 'JD',     realName: 'JD.com',                    assetClass: 'stock-intl', yahooSymbol: 'JD' },
+  'baba':      { alias: 'alias:baba',      realTicker: 'BABA',   realName: 'Alibaba Group',             assetClass: 'stock-intl', yahooSymbol: 'BABA' },
+  'hood':      { alias: 'alias:hood',      realTicker: 'HOOD',   realName: 'Robinhood Markets',         assetClass: 'stock-us', yahooSymbol: 'HOOD' },
+  'uber':      { alias: 'alias:uber',      realTicker: 'UBER',   realName: 'Uber Technologies',         assetClass: 'stock-us', yahooSymbol: 'UBER' },
+  'ebay':      { alias: 'alias:ebay',      realTicker: 'EBAY',   realName: 'eBay',                      assetClass: 'stock-us', yahooSymbol: 'EBAY' },
+  'ibm':       { alias: 'alias:ibm',       realTicker: 'IBM',    realName: 'IBM',                       assetClass: 'stock-us', yahooSymbol: 'IBM' },
+  'tjx':       { alias: 'alias:tjx',       realTicker: 'TJX',    realName: 'TJX Companies',            assetClass: 'stock-us', yahooSymbol: 'TJX' },
+  'bx':        { alias: 'alias:bx',        realTicker: 'BX',     realName: 'Blackstone',                assetClass: 'stock-us', yahooSymbol: 'BX' },
+  'biib':      { alias: 'alias:biib',      realTicker: 'BIIB',   realName: 'Biogen',                    assetClass: 'stock-us', yahooSymbol: 'BIIB' },
+  'glw':       { alias: 'alias:glw',       realTicker: 'GLW',    realName: 'Corning',                   assetClass: 'stock-us', yahooSymbol: 'GLW' },
+  'cvs':       { alias: 'alias:cvs',       realTicker: 'CVS',    realName: 'CVS Health',                assetClass: 'stock-us', yahooSymbol: 'CVS' },
+  'mara':      { alias: 'alias:mara',      realTicker: 'MARA',   realName: 'Marathon Digital (BTC miner)', assetClass: 'stock-us', yahooSymbol: 'MARA' },
+  'ionq':      { alias: 'alias:ionq',      realTicker: 'IONQ',   realName: 'IonQ (quantum computing)',  assetClass: 'stock-us', yahooSymbol: 'IONQ' },
+  'crwv':      { alias: 'alias:crwv',      realTicker: 'CRWV',   realName: 'CoreWeave (AI cloud)',      assetClass: 'stock-us' },
+  'unitree':   { alias: 'alias:unitree',   realTicker: 'PRIVATE', realName: 'Unitree (robotics — private?)', assetClass: 'stock-intl' },
+  'oust':      { alias: 'alias:oust',      realTicker: 'OUST',   realName: 'Ouster (LiDAR)',            assetClass: 'stock-us', yahooSymbol: 'OUST' },
+  'mnst':      { alias: 'alias:mnst',      realTicker: 'MNST',   realName: 'Monster Beverage',          assetClass: 'stock-us', yahooSymbol: 'MNST' },
+  'cof':       { alias: 'alias:cof',       realTicker: 'COF',    realName: 'Capital One Financial',     assetClass: 'stock-us', yahooSymbol: 'COF' },
+  'spcx':      { alias: 'alias:spcx',      realTicker: 'SPCX',   realName: 'Virgin Galactic?',          assetClass: 'stock-us' },
+  'qntx':      { alias: 'alias:qntx',      realTicker: 'QNTX',   realName: 'QuantumX?',                 assetClass: 'stock-us' },
+  'blackberry': { alias: 'alias:blackberry', realTicker: 'BB',   realName: 'BlackBerry',                assetClass: 'stock-us', yahooSymbol: 'BB' },
+  // ETFs
+  'ewz':       { alias: 'alias:ewz',       realTicker: 'EWZ',    realName: 'iShares MSCI Brazil ETF',   assetClass: 'etf', yahooSymbol: 'EWZ' },
+  'ewj':       { alias: 'alias:ewj',       realTicker: 'EWJ',    realName: 'iShares MSCI Japan ETF',    assetClass: 'etf', yahooSymbol: 'EWJ' },
+  'ewy':       { alias: 'alias:ewy',       realTicker: 'EWY',    realName: 'iShares MSCI South Korea ETF', assetClass: 'etf', yahooSymbol: 'EWY' },
+};
+
+Object.assign(ALIAS_MAP, ALIAS_MAP_AUTO);
