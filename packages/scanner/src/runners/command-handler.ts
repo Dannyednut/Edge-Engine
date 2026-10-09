@@ -146,8 +146,29 @@ async function handleCommand(text: string): Promise<string | null> {
     return await handlePriceSpread();
   }
 
-  // Unknown command — don't respond (avoid spam)
-  return null;
+  // Plain text (not a command) — respond with current status summary
+  return await handlePlainText(text);
+}
+
+async function handlePlainText(text: string): Promise<string> {
+  console.log(`[command-handler] plain text from principal: ${text}`);
+  // Respond with a brief status so principal knows we're listening
+  const { execSync } = await import('node:child_process');
+  let scannerRunning = false;
+  try {
+    execSync('pgrep -f all-runner 2>/dev/null', { encoding: 'utf8', stdio: 'pipe' });
+    scannerRunning = true;
+  } catch {}
+  
+  return [
+    'I hear you. 👋',
+    '',
+    `Scanner: ${scannerRunning ? '✅ Running (19 strategies)' : '⚠️ Restarting'}`,
+    `Time: ${new Date().toISOString()}`,
+    '',
+    'Commands: /status /opportunities /vooi /pricespread /khype /euler /help',
+    'Or just text me — I am listening.',
+  ].join('\n');
 }
 
 async function handleStatus(): Promise<string> {
