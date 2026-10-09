@@ -88,7 +88,7 @@ async function main() {
   const newLaunches: TokenEntry[] = [];
 
   // Listen for 60 seconds
-  const LISTEN_MS = 20_000;
+  const LISTEN_MS = 30_000;
 
   const stream = new PumpStreamClient({
     onConnect: () => console.log('✅ Connected to PumpApi stream'),
