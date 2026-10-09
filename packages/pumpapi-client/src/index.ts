@@ -388,9 +388,19 @@ export class PumpStreamClient {
       this.reconnectAttempt = 0;
       this.opts.onConnect?.();
     };
-    this.ws.onmessage = (ev) => {
+    this.ws.onmessage = async (ev) => {
       try {
-        const event = JSON.parse(ev.data as string) as PumpStreamEvent;
+        let dataStr: string;
+        if (typeof ev.data === 'string') {
+          dataStr = ev.data;
+        } else if (ev.data instanceof ArrayBuffer) {
+          dataStr = new TextDecoder().decode(ev.data);
+        } else if (typeof Blob !== 'undefined' && ev.data instanceof Blob) {
+          dataStr = await ev.data.text();
+        } else {
+          dataStr = String(ev.data);
+        }
+        const event = JSON.parse(dataStr) as PumpStreamEvent;
         this.opts.onEvent(event);
       } catch (err) {
         console.warn('PumpStreamClient: failed to parse event:', err);
