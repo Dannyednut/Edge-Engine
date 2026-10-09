@@ -140,7 +140,7 @@ export class PrecompileFlashloanArbScanner implements Strategy {
       hlFeeUsd: this.params.maxFlashloanUsd * HL_PERP_FEE,
       netProfitUsd: 0,
       executable: false,
-      blocker: 'CoreWriter not built — cannot execute HL perp trades from HyperEVM yet',
+      blocker: 'CoreWriter at 0x3333 — needs Solidity interface — cannot execute HL perp trades from HyperEVM yet',
       ts: Date.now(),
     });
 
