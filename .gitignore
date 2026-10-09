@@ -41,3 +41,12 @@ Thumbs.db
 coverage/
 .nyc_output/
 download/agent-solana-wallet.json
+
+# Sensitive download files (contain keys, wallet data, trade logs)
+download/agent-solana-wallet.json
+download/pump-watchlist.json
+download/pump-arb-log.jsonl
+download/pump-price-log.jsonl
+download/paper-trading-state.json
+download/paper-trading-log.jsonl
+download/opportunity-log.jsonl
