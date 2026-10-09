@@ -128,11 +128,26 @@ export class PredictionArbStrategy implements Strategy {
       // Group by fuzzy title similarity (simple word-overlap heuristic)
       // Look for markets that ask essentially the same question but have
       // meaningfully different YES prices
+      //
+      // FALSE POSITIVE GUARD: Markets like "Match Winner" vs "Map 1 Winner"
+      // sound similar but are DIFFERENT bets. We now:
+      //   1. Require same category
+      //   2. Require same outcome structure (e.g., both YES/NO)
+      //   3. Filter out markets with "Map" / "Game" / "Set" in title when comparing
+      //      to "Match" / "Series" / "BO3" markets
+      //   4. Require higher similarity threshold (0.5 instead of 0.3)
+      //   5. Flag divergence > 25% as suspicious (likely different bets)
       for (let i = 0; i < polyMarkets.length; i++) {
         for (let j = i + 1; j < polyMarkets.length; j++) {
           const m1 = polyMarkets[i];
           const m2 = polyMarkets[j];
           if (m1.outcomePrices.length < 2 || m2.outcomePrices.length < 2) continue;
+
+          // Must be same category
+          if (m1.category !== m2.category) continue;
+
+          // Must have same number of outcomes
+          if (m1.outcomes.length !== m2.outcomes.length) continue;
 
           const p1 = Number(m1.outcomePrices[0]);  // YES price
           const p2 = Number(m2.outcomePrices[0]);
@@ -143,13 +158,24 @@ export class PredictionArbStrategy implements Strategy {
           const divergencePct = Math.abs(p1 - p2) * 100;
           if (divergencePct < this.params.minDivergencePct) continue;
 
+          // SUSPICIOUS DIVERGENCE: > 25% likely means different bets
+          if (divergencePct > 25) continue;
+
           // Check title similarity (word overlap)
           const words1 = new Set(m1.question.toLowerCase().split(/\s+/).filter(w => w.length > 3));
           const words2 = new Set(m2.question.toLowerCase().split(/\s+/).filter(w => w.length > 3));
           const intersection = new Set([...words1].filter(w => words2.has(w)));
           const union = new Set([...words1, ...words2]);
           const similarity = intersection.size / union.size;
-          if (similarity < 0.3) continue;   // not similar enough
+          if (similarity < 0.5) continue;   // higher threshold (was 0.3)
+
+          // FILTER: "Map N" / "Game N" / "Set N" markets vs "Match" / "Series"
+          const isSubBet1 = /\b(map|game|set)\s*\d+/i.test(m1.question);
+          const isSubBet2 = /\b(map|game|set)\s*\d+/i.test(m2.question);
+          const isMatchBet1 = /\b(match|series|bo\d)\b/i.test(m1.question);
+          const isMatchBet2 = /\b(match|series|bo\d)\b/i.test(m2.question);
+          // Skip if one is sub-bet (Map 1) and other is match (Match Winner)
+          if ((isSubBet1 && isMatchBet2) || (isSubBet2 && isMatchBet1)) continue;
 
           // Compute estimated profit
           // Buy YES on cheaper venue, buy NO on expensive venue
