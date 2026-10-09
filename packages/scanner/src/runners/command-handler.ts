@@ -114,12 +114,17 @@ async function handleCommand(text: string): Promise<string | null> {
       '/kinetiq — Kinetiq staking status',
       '/vooi — VOOI perp funding arb details (TOP opportunity)',
       '/pricespread — VOOI price spread arbs (INSTANT profit)',
+      '/paper — Paper trading P&L (simulated)',
       '/help — This message',
     ].join('\n');
   }
 
   if (cmd === '/status' || cmd === 'status') {
     return await handleStatus();
+  }
+
+  if (cmd === '/paper' || cmd === 'paper') {
+    return await handlePaper();
   }
 
   if (cmd === '/opportunities' || cmd === '/opps') {
@@ -194,6 +199,40 @@ async function handleStatus(): Promise<string> {
     ].join('\n');
   } catch (e: any) {
     return `Status check failed: ${e.message}`;
+  }
+}
+
+async function handlePaper(): Promise<string> {
+  try {
+    const paperStatePath = '/home/z/my-project/download/paper-trading-state.json';
+    let state: any;
+    try {
+      const { readFileSync } = await import('node:fs');
+      state = JSON.parse(readFileSync(paperStatePath, 'utf8'));
+    } catch {
+      return 'Paper trader not yet initialized. Run paper-trader.mts to start.';
+    }
+    const winRate = state.totalTrades > 0 ? (state.winningTrades / state.totalTrades * 100).toFixed(1) : '0.0';
+    const roi = state.startingCapital > 0 ? (state.realizedPnl / state.startingCapital * 100).toFixed(2) : '0.00';
+    return [
+      '═══ Paper Trading Status ═══',
+      `Starting capital: $${state.startingCapital.toLocaleString()}`,
+      `Current capital: $${state.currentCapital.toFixed(2)}`,
+      `Realized P&L: $${state.realizedPnl.toFixed(2)}`,
+      `ROI: ${roi}%`,
+      '',
+      `Total trades: ${state.totalTrades}`,
+      `Winning: ${state.winningTrades} | Losing: ${state.losingTrades}`,
+      `Win rate: ${winRate}%`,
+      `Total fees: $${state.totalFees.toFixed(2)}`,
+      '',
+      `Open positions: ${state.openPositions.length}`,
+      `Closed positions: ${state.closedPositions.length}`,
+      '',
+      `Last update: ${new Date(state.lastUpdate).toISOString()}`,
+    ].join('\n');
+  } catch (e: any) {
+    return `Paper status failed: ${e.message}`;
   }
 }
 
