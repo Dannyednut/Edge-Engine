@@ -381,3 +381,4 @@ export async function submitViaFlashbotsProtect(
 export * from './kinetiq-client.js';
 export * from './hyperlend-client.js';
 export * from './euler-client.js';
+export * from './builder-code-client.js';
