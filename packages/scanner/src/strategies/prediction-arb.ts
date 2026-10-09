@@ -167,6 +167,8 @@ export class PredictionArbStrategy implements Strategy {
           const endDate1 = new Date(m1.endDate).getTime();
           const endDate2 = new Date(m2.endDate).getTime();
           const endDate = Math.max(endDate1, endDate2);
+          // Skip expired markets (end date already passed)
+          if (endDate < Date.now()) continue;
           const capitalLockDays = Math.max(0, (endDate - Date.now()) / (24 * 60 * 60 * 1000));
           if (capitalLockDays > this.params.maxCapitalLockDays) continue;
 
