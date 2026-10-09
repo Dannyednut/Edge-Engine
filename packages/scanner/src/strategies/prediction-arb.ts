@@ -158,8 +158,9 @@ export class PredictionArbStrategy implements Strategy {
           const divergencePct = Math.abs(p1 - p2) * 100;
           if (divergencePct < this.params.minDivergencePct) continue;
 
-          // SUSPICIOUS DIVERGENCE: > 25% likely means different bets
-          if (divergencePct > 25) continue;
+          // SUSPICIOUS DIVERGENCE: > 15% likely means different bets
+          // (lowered from 25% — was still letting false positives through)
+          if (divergencePct > 15) continue;
 
           // Check title similarity (word overlap)
           const words1 = new Set(m1.question.toLowerCase().split(/\s+/).filter(w => w.length > 3));
@@ -169,13 +170,20 @@ export class PredictionArbStrategy implements Strategy {
           const similarity = intersection.size / union.size;
           if (similarity < 0.5) continue;   // higher threshold (was 0.3)
 
-          // FILTER: "Map N" / "Game N" / "Set N" markets vs "Match" / "Series"
-          const isSubBet1 = /\b(map|game|set)\s*\d+/i.test(m1.question);
-          const isSubBet2 = /\b(map|game|set)\s*\d+/i.test(m2.question);
-          const isMatchBet1 = /\b(match|series|bo\d)\b/i.test(m1.question);
-          const isMatchBet2 = /\b(match|series|bo\d)\b/i.test(m2.question);
+          // FILTER: "Map N" / "Game N" / "Set N" / "Half N" / "Quarter N" markets vs "Match" / "Series"
+          const isSubBet1 = /\b(map|game|set|half|quarter|period|leg|stage)\s*\d+/i.test(m1.question);
+          const isSubBet2 = /\b(map|game|set|half|quarter|period|leg|stage)\s*\d+/i.test(m2.question);
+          const isMatchBet1 = /\b(match|series|bo\d|overall|total)\b/i.test(m1.question);
+          const isMatchBet2 = /\b(match|series|bo\d|overall|total)\b/i.test(m2.question);
           // Skip if one is sub-bet (Map 1) and other is match (Match Winner)
           if ((isSubBet1 && isMatchBet2) || (isSubBet2 && isMatchBet1)) continue;
+
+          // FILTER: Skip if titles contain "Winner" vs "Map" / "Game" / "Set" / "Handicap" / "Spread"
+          const isWinnerBet1 = /\b(winner|win)\b/i.test(m1.question);
+          const isWinnerBet2 = /\b(winner|win)\b/i.test(m2.question);
+          const isHandicapBet1 = /\b(handicap|spread|maps? \d|games? \d)\b/i.test(m1.question);
+          const isHandicapBet2 = /\b(handicap|spread|maps? \d|games? \d)\b/i.test(m2.question);
+          if ((isWinnerBet1 && isHandicapBet2) || (isWinnerBet2 && isHandicapBet1)) continue;
 
           // Compute estimated profit
           // Buy YES on cheaper venue, buy NO on expensive venue
