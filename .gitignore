@@ -40,3 +40,4 @@ Thumbs.db
 # Coverage
 coverage/
 .nyc_output/
+download/agent-solana-wallet.json
