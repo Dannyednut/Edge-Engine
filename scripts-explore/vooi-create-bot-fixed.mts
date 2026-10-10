@@ -88,7 +88,7 @@ async function main() {
         notionalUsd: 5000,
         maxHoldHours: 24,
         maxRoundTripCostBps: 12, // 0.12% max round-trip cost
-        symbols: best.assets.slice(0, 10), // trade top 10 assets
+        // trade top 10 assets
       });
       
       console.log('\n✅ Bot created successfully!');
