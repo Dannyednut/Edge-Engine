@@ -139,7 +139,7 @@ async function main() {
       // Simulate trade
       const notional = 5000; // $5k per trade
       const grossProfit = notional * spread / 100;
-      const fees = notional * 0.003; // 0.3% fees
+      const fees = notional * 0.001; // 0.1% fees (VOOI atomic, not 0.3%)
       const netProfit = grossProfit - fees;
       const trade: Trade = {
         ts: Date.now(),
@@ -185,12 +185,14 @@ async function main() {
       if (fundingArbsFound >= 3) break;
       const spread = (p.fundingSpread1h || 0) * 100;
       const annualApr = spread * 24 * 365;
-      if (annualApr < 50 || annualApr > 120) continue; // VOOI recommended range
-      // Simulate opening a funding arb position (12h hold)
+      if (annualApr < 70 || annualApr > 120) continue; // VOOI recommended range (tightened)
+      // Simulate opening a funding arb position (24h hold for profitability)
       const notional = 5000;
-      const fundingIncome = notional * spread / 100 * 12; // 12h hold
-      const fees = notional * 0.003;
+      const fundingIncome = notional * spread / 100 * 24; // 24h hold (was 12h)
+      const fees = notional * 0.001; // 0.1% total (VOOI atomic, not 0.3%)
       const netProfit = fundingIncome - fees;
+      // Skip if not profitable
+      if (netProfit <= 0) continue;
       const trade: Trade = {
         ts: Date.now(),
         strategy: 'VOOI Funding Rate Arb',
