@@ -125,6 +125,11 @@ async function main() {
   console.log(`Total trades: ${state.totalTrades}`);
   console.log('');
 
+  // Opportunity tracking — prevents re-counting same opportunity
+  const seenOpportunities = new Map<string, number>(); // key -> last captured timestamp
+  const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown per opportunity
+  const MAX_CAPTURES_PER_OPP = 3; // max times same opportunity can be captured
+
   // 1. Get top VOOI price spread arb opportunities
   console.log('── Scanning VOOI Price Spread Arb ──');
   const vooiResp = await vooiScan({ limit: 10, orderBy: 'priceSpread', orderDirection: 'desc', minPriceSpread: 0.005 });
@@ -136,9 +141,35 @@ async function main() {
       if (vooiArbsFound >= 3) break;
       const spread = (p.priceSpread || 0) * 100;
       if (spread < 0.5) continue;
+
+      // DEDUP: Check if this opportunity was recently captured
+      const oppKey = `price|${item.asset}|${p.long?.exchange}|${p.short?.exchange}`;
+      const lastSeen = seenOpportunities.get(oppKey) || 0;
+      const captureCount = state.closedPositions.filter(t =>
+        t.strategy === 'VOOI Price Spread Arb' &&
+        t.asset === item.asset
+      ).length;
+
+      if (Date.now() - lastSeen < COOLDOWN_MS) {
+        console.log(`  [SKIP] ${item.asset} — cooldown active (${Math.floor((COOLDOWN_MS - (Date.now() - lastSeen)) / 60000)}min left)`);
+        continue;
+      }
+      if (captureCount >= MAX_CAPTURES_PER_OPP) {
+        console.log(`  [SKIP] ${item.asset} — max captures reached (${MAX_CAPTURES_PER_OPP})`);
+        continue;
+      }
+
+      // Simulate spread erosion — each capture reduces available spread by 30%
+      const erosionFactor = Math.pow(0.7, captureCount);
+      const effectiveSpread = spread * erosionFactor;
+      if (effectiveSpread < 0.3) {
+        console.log(`  [SKIP] ${item.asset} — spread eroded to ${effectiveSpread.toFixed(2)}%`);
+        continue;
+      }
+
       // Simulate trade
       const notional = 5000; // $5k per trade
-      const grossProfit = notional * spread / 100;
+      const grossProfit = notional * effectiveSpread / 100;
       const fees = notional * 0.001; // 0.1% fees (VOOI atomic, not 0.3%)
       const netProfit = grossProfit - fees;
       const trade: Trade = {
@@ -163,9 +194,10 @@ async function main() {
       else state.losingTrades++;
       state.closedPositions.push(trade);
       logTrade(trade);
+      seenOpportunities.set(oppKey, Date.now());
       vooiArbsFound++;
       vooiProfitSimulated += netProfit;
-      console.log(`  [VOOI] ${item.asset} spread=${spread.toFixed(2)}%  notional=$${notional}  net profit=$${netProfit.toFixed(2)}`);
+      console.log(`  [VOOI] ${item.asset} spread=${effectiveSpread.toFixed(2)}% (orig ${spread.toFixed(2)}%, capture #${captureCount + 1})  net profit=$${netProfit.toFixed(2)}`);
     }
   }
   if (vooiArbsFound === 0) {
