@@ -1,0 +1,21 @@
+{
+  "name": "@edge/enterprise",
+  "version": "1.0.0",
+  "description": "Enterprise operations, risk management, client management, and reporting",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "status": "tsx src/operations/operations-manager.ts --status",
+    "risk:check": "tsx src/risk/risk-manager.ts --check",
+    "client:dashboard": "tsx src/client/client-manager.ts",
+    "report:daily": "tsx src/reporting/report-generator.ts",
+    "report:daily:send": "tsx src/reporting/report-generator.ts --send",
+    "report:monthly": "tsx src/reporting/report-generator.ts --monthly",
+    "report:monthly:send": "tsx src/reporting/report-generator.ts --monthly --send"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsx": "^4.23.0",
+    "typescript": "^5.0.0"
+  }
+}
