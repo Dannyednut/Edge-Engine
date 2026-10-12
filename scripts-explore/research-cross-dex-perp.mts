@@ -1,0 +1,32 @@
+async function main() {
+  console.log('── Cross-DEX Perp Arbitrage Research ──\n');
+  console.log('  HyperEVM perp DEXs:');
+  console.log('  1. Hyperliquid (main perp DEX)');
+  console.log('  2. Aster Finance (orderbook perp)');
+  console.log('  3. Lighter Finance (orderbook perp)');
+  console.log('  4. Felix Finance (if exists)');
+  console.log('');
+  console.log('  Arb strategy:');
+  console.log('  - Same asset trades on multiple HyperEVM perp DEXs');
+  console.log('  - If price differs > fees, arb exists');
+  console.log('  - Both legs on HyperEVM = ATOMIC execution');
+  console.log('');
+  console.log('  Advantage over CEX-HL arb:');
+  console.log('  - No bridge needed');
+  console.log('  - Atomic (flashloan + both legs in one tx)');
+  console.log('  - Lower latency (same chain)');
+  console.log('  - Lower fees (no CEX withdrawal)');
+  console.log('');
+  console.log('  VOOI already integrates these venues:');
+  console.log('  - VOOI routes through Aster, Lighter, HL');
+  console.log('  - We already capture this via VOOI price spread arb');
+  console.log('');
+  console.log('  But: direct DEX-to-DEX (without VOOI) could capture more:');
+  console.log('  - No VOOI fee');
+  console.log('  - Direct contract calls');
+  console.log('  - Custom slippage protection');
+  console.log('');
+  console.log('  VERDICT: Already partially covered by VOOI');
+  console.log('  Enhancement: build direct DEX router for better execution');
+}
+main();
