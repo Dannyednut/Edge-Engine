@@ -39,8 +39,9 @@ start_daemon telegram-listener packages/alerts/src/listener.ts
 start_daemon command-handler packages/scanner/src/runners/command-handler.ts --loop
 start_daemon realtime-opp-alerts scripts-explore/realtime-opp-alerts.mts
 start_daemon opp-db scripts-explore/opp-db.mts --loop
+start_daemon hl-funding-alerts scripts-explore/hl-funding-alerts.mts
 start_daemon paper-trader scripts-explore/paper-trader.mts
 
 echo ""
-echo "All 5 daemons started. Check logs/ for output."
+echo "All 6 daemons started. Check logs/ for output."
 echo "Stop all: pkill -f 'tsx'"
