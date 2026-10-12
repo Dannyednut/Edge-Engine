@@ -24,7 +24,7 @@ import { readFileSync, appendFileSync } from 'node:fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
-const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
+const REPO_ROOT  = resolve(__dirname, '..', '..', '..');
 
 // Load .env
 try {

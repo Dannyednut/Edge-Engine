@@ -13,7 +13,7 @@ import { buildEvmAdapters, healthCheckAll } from './index.js';
 // Resolve repo root
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
-const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
+const REPO_ROOT  = resolve(__dirname, '..', '..', '..');
 
 // Load .env
 try {
