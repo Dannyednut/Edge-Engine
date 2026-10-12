@@ -49,11 +49,13 @@ async function main() {
 
   // 1. Get HL perp + spot prices
   console.log('── Loading HL Prices ──\n');
-  const perpMeta = await hlInfo({ type: 'metaAndAssetCtxs', user: '0x0000000000000000000000000000000000000000' });
+  const perpMeta = await hlInfo
+  if (!perpMeta) { console.log("HL API returned null"); return; }({ type: 'metaAndAssetCtxs', user: '0x0000000000000000000000000000000000000000' });
   const perpUniverse = perpMeta[0]?.universe || [];
   const perpCtxs = perpMeta[1] || [];
 
-  const spotMeta = await hlInfo({ type: 'spotMetaAndAssetCtxs' });
+  const spotMeta = await hlInfo
+  if (!spotMeta) { console.log("HL spot API returned null"); return; }({ type: 'spotMetaAndAssetCtxs' });
   const spotUniverse = spotMeta[0]?.universe || [];
   const spotCtxs = spotMeta[1] || [];
   const spotTokens = spotMeta[0]?.tokens || [];

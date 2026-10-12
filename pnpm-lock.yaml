@@ -166,6 +166,9 @@ importers:
 
   .:
     dependencies:
+      '@nktkas/hyperliquid':
+        specifier: ^0.33.3
+        version: 0.33.3(typescript@5.9.3)
       '@openzeppelin/contracts':
         specifier: ^5.6.1
         version: 5.6.1
@@ -255,6 +258,15 @@ importers:
       viem:
         specifier: ^2.21.0
         version: 2.56.9(bufferutil@4.1.0)(typescript@5.9.3)
+
+  packages/enterprise:
+    devDependencies:
+      tsx:
+        specifier: ^4.23.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.0.0
+        version: 5.9.3
 
   packages/executor:
     dependencies:
@@ -726,6 +738,14 @@ packages:
     os: [linux]
     libc: [glibc]
 
+  '@nktkas/hyperliquid@0.33.3':
+    resolution: {integrity: sha512-fvnEw/2ejN14ZZVXA+nFQ9YgfFNjCI1yLliYyUboC6hr3Gwd/RwC4Ox90K4e8tkKWqkVpOcLRQ30p0nTeK4NBQ==}
+    engines: {node: '>=22.12.0'}
+
+  '@nktkas/rews@4.1.0':
+    resolution: {integrity: sha512-lPcTIPD2AE8JsJgnI+YGn9hzOhZHW3E0hrzDNUpyuVP5d1NERNz7EugR1IxW4Ly7QsM9/WmVeLif4olZsKVKjQ==}
+    engines: {node: '>=22.12.0'}
+
   '@noble/ciphers@1.3.0':
     resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
     engines: {node: ^14.21.3 || >=16}
@@ -994,6 +1014,9 @@ packages:
       supports-color:
         optional: true
 
+  decimal.js@10.6.0:
+    resolution: {integrity: sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==}
+
   deep-eql@5.0.2:
     resolution: {integrity: sha512-h5k/5U50IJJFpzfL6nO9jaaumfjO/f2NjK/oYB2Djzm4p9L+3T9qWpZqZ2hAbLPuuYq9wrU08WQyBTL5GbPk5Q==}
     engines: {node: '>=6'}
@@ -1155,6 +1178,14 @@ packages:
   undici@7.29.1:
     resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
+
+  valibot@1.5.0:
+    resolution: {integrity: sha512-nil6AkP2TChWL43Z5uJ6GTxX01CUA+g8LWUM+N/rB9NBbkUMaUsi9PUNzlUPgoKASgmx9f7eGOYpJ04/fSa6FQ==}
+    peerDependencies:
+      typescript: '>=5'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 
   viem@2.56.9:
     resolution: {integrity: sha512-UC1G0Qz+RbPKqwl6yRrp3dH6ltrOmUcFJMTcOyE1Mg0nO5lxrEBTONh/8OFWPnALGuN/O7LkNcz/IsSj83Svqw==}
@@ -1398,6 +1429,17 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
+  '@nktkas/hyperliquid@0.33.3(typescript@5.9.3)':
+    dependencies:
+      '@nktkas/rews': 4.1.0
+      '@noble/hashes': 2.2.0
+      decimal.js: 10.6.0
+      valibot: 1.5.0(typescript@5.9.3)
+    transitivePeerDependencies:
+      - typescript
+
+  '@nktkas/rews@4.1.0': {}
+
   '@noble/ciphers@1.3.0': {}
 
   '@noble/curves@1.9.1':
@@ -1599,6 +1641,8 @@ snapshots:
   debug@4.4.3:
     dependencies:
       ms: 2.1.3
+
+  decimal.js@10.6.0: {}
 
   deep-eql@5.0.2: {}
 
@@ -1802,6 +1846,10 @@ snapshots:
   undici-types@6.21.0: {}
 
   undici@7.29.1: {}
+
+  valibot@1.5.0(typescript@5.9.3):
+    optionalDependencies:
+      typescript: 5.9.3
 
   viem@2.56.9(bufferutil@4.1.0)(typescript@5.9.3):
     dependencies:
