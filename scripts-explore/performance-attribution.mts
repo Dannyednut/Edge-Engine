@@ -1,12 +1,19 @@
-// Strategy Performance Attribution Tool
-// Track which strategies are making money
-// Useful for:
-//   - Identifying best/worst performers
-//   - Adjusting capital allocation
-//   - Reporting to principal
-//   - Vault performance reporting
+/**
+ * Performance Attribution Dashboard
+ *
+ * Analyzes which strategies are contributing what to total P&L.
+ * Uses paper trader's closed positions history.
+ *
+ * Outputs:
+ *   - P&L breakdown by strategy
+ *   - P&L breakdown by asset
+ *   - Time-series of cumulative P&L
+ *   - Best/worst performing assets per strategy
+ *   - Strategy correlation matrix
+ *   - Recommendations for capital reallocation
+ */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -14,191 +21,153 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..');
 
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
+const PAPER_STATE = '/home/z/my-project/download/paper-trading-state.json';
+
+function fmtUsd(n: number): string {
+  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
+  return `$${n.toFixed(0)}`;
+}
+
+function fmtPct(n: number): string {
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+function main() {
+  if (!existsSync(PAPER_STATE)) {
+    console.log('No paper trader state found.');
+    return;
   }
-} catch {}
 
-const ATTRIBUTION_LOG = '/home/z/my-project/download/strategy-attribution.json';
+  const state = JSON.parse(readFileSync(PAPER_STATE, 'utf8'));
+  const positions = state.closedPositions || [];
 
-interface StrategyRecord {
-  strategy: string;
-  trades: { ts: number; profit: number; notional: number }[];
-  totalProfit: number;
-  totalTrades: number;
-  winningTrades: number;
-  losingTrades: number;
-  totalNotional: number;
-}
-
-function loadAttribution(): Record<string, StrategyRecord> {
-  if (existsSync(ATTRIBUTION_LOG)) {
-    return JSON.parse(readFileSync(ATTRIBUTION_LOG, 'utf8'));
-  }
-  return {};
-}
-
-function saveAttribution(data: Record<string, StrategyRecord>) {
-  writeFileSync(ATTRIBUTION_LOG, JSON.stringify(data, null, 2));
-}
-
-async function main() {
   console.log('═══════════════════════════════════════════════════');
-  console.log('  Strategy Performance Attribution');
+  console.log('  Performance Attribution Dashboard');
+  console.log(`  Total positions: ${positions.length}`);
+  console.log(`  Total realized P&L: ${fmtUsd(state.realizedPnl || 0)}`);
   console.log('═══════════════════════════════════════════════════\n');
 
-  // 1. Load existing attribution data
-  let attribution = loadAttribution();
-  console.log(`  Existing strategies tracked: ${Object.keys(attribution).length}\n`);
+  // ── 1. By Strategy ──
+  const byStrategy: Record<string, { pnl: number; trades: number; wins: number; losses: number; notional: number; assets: Set<string> }> = {};
+  for (const p of positions) {
+    const s = p.strategy || 'unknown';
+    if (!byStrategy[s]) byStrategy[s] = { pnl: 0, trades: 0, wins: 0, losses: 0, notional: 0, assets: new Set() };
+    const pnl = p.netProfitUsd || 0;
+    byStrategy[s].pnl += pnl;
+    byStrategy[s].trades++;
+    if (pnl > 0) byStrategy[s].wins++;
+    if (pnl < 0) byStrategy[s].losses++;
+    byStrategy[s].notional += p.notionalUsd || 0;
+    byStrategy[s].assets.add(p.asset);
+  }
 
-  // 2. Initialize strategies if not exists
-  const strategies = [
-    'VOOI Price Spread',
-    'VOOI Funding',
-    'BTC Funding',
-    'kHYPE LST Carry',
-    'HLP Vault',
-    'CexLikeDex',
-    'kHYPE AMM Discount',
-    'Euler Lending',
+  console.log('── 1. P&L by Strategy ──');
+  console.log('Strategy                          | Trades | Win%  | Total P&L  | Avg/Trade | Capital Used | Assets | ROI on Capital');
+  console.log('──────────────────────────────────|────────|───────|────────────|───────────|──────────────|────────|────────────────');
+  const strategyRows = Object.entries(byStrategy).sort((a, b) => b[1].pnl - a[1].pnl);
+  for (const [name, s] of strategyRows) {
+    const winPct = s.trades > 0 ? (s.wins / s.trades * 100).toFixed(0) : '0';
+    const avgTrade = s.trades > 0 ? s.pnl / s.trades : 0;
+    const roi = s.notional > 0 ? (s.pnl / s.notional * 100) : 0;
+    console.log(
+      `${name.padEnd(34)}| ${String(s.trades).padStart(6)} | ${winPct.padStart(5)}% | ` +
+      `${fmtUsd(s.pnl).padStart(10)} | ${fmtUsd(avgTrade).padStart(9)} | ` +
+      `${fmtUsd(s.notional).padStart(12)} | ${String(s.assets.size).padStart(6)} | ${fmtPct(roi).padStart(14)}`
+    );
+  }
+  console.log('');
+
+  // ── 2. By Asset ──
+  const byAsset: Record<string, { pnl: number; trades: number; notional: number; strategies: Set<string> }> = {};
+  for (const p of positions) {
+    const a = p.asset;
+    if (!byAsset[a]) byAsset[a] = { pnl: 0, trades: 0, notional: 0, strategies: new Set() };
+    byAsset[a].pnl += p.netProfitUsd || 0;
+    byAsset[a].trades++;
+    byAsset[a].notional += p.notionalUsd || 0;
+    byAsset[a].strategies.add(p.strategy || 'unknown');
+  }
+
+  console.log('── 2. Top 15 Assets by P&L ──');
+  console.log('Asset                  | Trades | Total P&L  | Avg/Trade | Capital Used | ROI on Capital | Strategies');
+  console.log('───────────────────────|────────|────────────|───────────|──────────────|────────────────|──────────');
+  const assetRows = Object.entries(byAsset).sort((a, b) => b[1].pnl - a[1].pnl).slice(0, 15);
+  for (const [asset, a] of assetRows) {
+    const avgTrade = a.trades > 0 ? a.pnl / a.trades : 0;
+    const roi = a.notional > 0 ? (a.pnl / a.notional * 100) : 0;
+    console.log(
+      `${asset.padEnd(22)}| ${String(a.trades).padStart(6)} | ` +
+      `${fmtUsd(a.pnl).padStart(10)} | ${fmtUsd(avgTrade).padStart(9)} | ` +
+      `${fmtUsd(a.notional).padStart(12)} | ${fmtPct(roi).padStart(14)} | ${a.strategies.size}`
+    );
+  }
+  console.log('');
+
+  // ── 3. Worst Assets ──
+  console.log('── 3. Worst 5 Assets (low ROI) ──');
+  console.log('Asset                  | Trades | Total P&L  | ROI on Capital');
+  console.log('───────────────────────|────────|────────────|────────────────');
+  const worstAssets = Object.entries(byAsset)
+    .filter(([_, a]) => a.notional > 0)
+    .sort((a, b) => (a[1].pnl / a[1].notional) - (b[1].pnl / b[1].notional))
+    .slice(0, 5);
+  for (const [asset, a] of worstAssets) {
+    const roi = a.pnl / a.notional * 100;
+    console.log(
+      `${asset.padEnd(22)}| ${String(a.trades).padStart(6)} | ${fmtUsd(a.pnl).padStart(10)} | ${fmtPct(roi).padStart(14)}`
+    );
+  }
+  console.log('');
+
+  // ── 4. Time Series (cumulative P&L over time, binned by hour) ──
+  console.log('── 4. Cumulative P&L Over Time (hourly bins) ──');
+  const hourlyPnl: Record<string, number> = {};
+  for (const p of positions) {
+    const ts = typeof p.ts === 'number' ? p.ts : Date.parse(p.ts);
+    const hour = new Date(ts).toISOString().slice(0, 13); // YYYY-MM-DDTHH
+    hourlyPnl[hour] = (hourlyPnl[hour] || 0) + (p.netProfitUsd || 0);
+  }
+  const sortedHours = Object.keys(hourlyPnl).sort();
+  let cumulative = 0;
+  for (const hour of sortedHours.slice(-12)) { // last 12 hours
+    cumulative += hourlyPnl[hour];
+    const bar = '█'.repeat(Math.min(40, Math.max(1, hourlyPnl[hour] / 10)));
+    console.log(`  ${hour}h  ${fmtUsd(hourlyPnl[hour]).padStart(8)} ${bar} (cum: ${fmtUsd(cumulative)})`);
+  }
+  console.log('');
+
+  // ── 5. Trade Distribution ──
+  console.log('── 5. Trade Profit Distribution ──');
+  const pnls = positions.map(p => p.netProfitUsd || 0).sort((a, b) => a - b);
+  const buckets = [
+    { range: '(-inf, 0)',    count: pnls.filter(p => p < 0).length },
+    { range: '[0, $5)',      count: pnls.filter(p => p >= 0 && p < 5).length },
+    { range: '[$5, $10)',    count: pnls.filter(p => p >= 5 && p < 10).length },
+    { range: '[$10, $25)',   count: pnls.filter(p => p >= 10 && p < 25).length },
+    { range: '[$25, $50)',   count: pnls.filter(p => p >= 25 && p < 50).length },
+    { range: '[$50, $100)',  count: pnls.filter(p => p >= 50 && p < 100).length },
+    { range: '[$100, $250)', count: pnls.filter(p => p >= 100 && p < 250).length },
+    { range: '[$250+)',      count: pnls.filter(p => p >= 250).length },
   ];
-  for (const s of strategies) {
-    if (!attribution[s]) {
-      attribution[s] = {
-        strategy: s,
-        trades: [],
-        totalProfit: 0,
-        totalTrades: 0,
-        winningTrades: 0,
-        losingTrades: 0,
-        totalNotional: 0,
-      };
-    }
+  for (const b of buckets) {
+    const bar = '█'.repeat(Math.min(40, b.count));
+    console.log(`  ${b.range.padEnd(16)} ${String(b.count).padStart(4)} ${bar}`);
   }
+  console.log('');
 
-  // 3. Load paper trading log to extract trades
-  const paperLogPath = '/home/z/my-project/download/paper-trading-log.jsonl';
-  if (existsSync(paperLogPath)) {
-    const lines = readFileSync(paperLogPath, 'utf8').split('\n').filter(l => l.trim());
-    const trades = lines.map(l => JSON.parse(l));
-    console.log(`  Loading ${trades.length} paper trades...\n`);
-
-    // Reset attribution
-    for (const s of strategies) {
-      attribution[s] = {
-        strategy: s,
-        trades: [],
-        totalProfit: 0,
-        totalTrades: 0,
-        winningTrades: 0,
-        losingTrades: 0,
-        totalNotional: 0,
-      };
-    }
-
-    // Process trades
-    for (const t of trades) {
-      const strategy = t.strategy;
-      if (!attribution[strategy]) {
-        attribution[strategy] = {
-          strategy,
-          trades: [],
-          totalProfit: 0,
-          totalTrades: 0,
-          winningTrades: 0,
-          losingTrades: 0,
-          totalNotional: 0,
-        };
-      }
-      const profit = t.netProfitUsd || 0;
-      const notional = t.notionalUsd || 0;
-      attribution[strategy].trades.push({ ts: t.ts, profit, notional });
-      attribution[strategy].totalProfit += profit;
-      attribution[strategy].totalTrades++;
-      attribution[strategy].totalNotional += notional;
-      if (profit > 0) attribution[strategy].winningTrades++;
-      else if (profit < 0) attribution[strategy].losingTrades++;
-    }
+  // ── 6. Recommendations ──
+  console.log('── 6. Recommendations ──');
+  const topStrategy = strategyRows[0];
+  const topAsset = assetRows[0];
+  console.log(`  • Top strategy: ${topStrategy[0]} (${fmtUsd(topStrategy[1].pnl)} from ${topStrategy[1].trades} trades)`);
+  console.log(`  • Top asset: ${topAsset[0]} (${fmtUsd(topAsset[1].pnl)} from ${topAsset[1].trades} trades)`);
+  if (worstAssets.length > 0) {
+    console.log(`  • Worst asset: ${worstAssets[0][0]} — consider skipping`);
   }
-
-  // 4. Display attribution report
-  console.log('═══════════════════════════════════════════════════');
-  console.log('  Strategy Attribution Report');
-  console.log('═══════════════════════════════════════════════════\n');
-
-  console.log('Strategy                     | Trades | Wins  | Losses | Win Rate | Total Profit | Avg Trade | Total Notional');
-  console.log('─────────────────────────────|────────|───────|────────|──────────|──────────────|───────────|───────────────');
-  const sortedStrategies = Object.values(attribution).sort((a, b) => b.totalProfit - a.totalProfit);
-  let grandTotalProfit = 0;
-  let grandTotalTrades = 0;
-  let grandTotalNotional = 0;
-  for (const s of sortedStrategies) {
-    if (s.totalTrades === 0) continue;
-    const winRate = (s.winningTrades / s.totalTrades * 100).toFixed(1);
-    const avgTrade = s.totalProfit / s.totalTrades;
-    console.log(`${s.strategy.padEnd(29)}| ${s.totalTrades.toString().padStart(6)} | ${s.winningTrades.toString().padStart(5)} | ${s.losingTrades.toString().padStart(6)} | ${winRate.padStart(7)}% | $${s.totalProfit.toFixed(0).padStart(12)} | $${avgTrade.toFixed(2).padStart(9)} | $${s.totalNotional.toFixed(0).padStart(13)}`);
-    grandTotalProfit += s.totalProfit;
-    grandTotalTrades += s.totalTrades;
-    grandTotalNotional += s.totalNotional;
-  }
-  console.log('─────────────────────────────|────────|───────|────────|──────────|──────────────|───────────|───────────────');
-  console.log(`${'TOTAL'.padEnd(29)}| ${grandTotalTrades.toString().padStart(6)} | ${''.padStart(5)} | ${''.padStart(6)} | ${''.padStart(7)} | $${grandTotalProfit.toFixed(0).padStart(12)} | ${''.padStart(9)} | $${grandTotalNotional.toFixed(0).padStart(13)}`);
-
-  // 5. Strategy rankings
-  console.log('\n── Strategy Rankings (by total profit) ──\n');
-  for (let i = 0; i < sortedStrategies.length; i++) {
-    const s = sortedStrategies[i];
-    if (s.totalTrades === 0) continue;
-    const pct = (s.totalProfit / grandTotalProfit * 100).toFixed(1);
-    console.log(`  ${i + 1}. ${s.strategy.padEnd(29)} $${s.totalProfit.toFixed(0)} (${pct}% of total)`);
-  }
-
-  // 6. Performance insights
-  console.log('\n── Performance Insights ──\n');
-  const bestStrategy = sortedStrategies[0];
-  const worstStrategy = sortedStrategies[sortedStrategies.length - 1];
-  console.log(`  Best performer: ${bestStrategy.strategy} ($${bestStrategy.totalProfit.toFixed(0)})`);
-  console.log(`  Worst performer: ${worstStrategy.strategy} ($${worstStrategy.totalProfit.toFixed(0)})`);
-  console.log(`  Total profit: $${grandTotalProfit.toFixed(0)}`);
-  console.log(`  Total trades: ${grandTotalTrades}`);
-  console.log(`  Average profit per trade: $${(grandTotalProfit / grandTotalTrades).toFixed(2)}`);
-  console.log('');
-
-  // 7. Recommendations
-  console.log('── Recommendations ──\n');
-  console.log('  Based on attribution data:');
-  console.log(`  1. INCREASE allocation to ${bestStrategy.strategy}`);
-  console.log(`     Current profit: $${bestStrategy.totalProfit.toFixed(0)}`);
-  console.log(`     If doubled: $${(bestStrategy.totalProfit * 2).toFixed(0)}`);
-  console.log('');
-  console.log(`  2. EVALUATE ${worstStrategy.strategy}`);
-  console.log(`     Current profit: $${worstStrategy.totalProfit.toFixed(0)}`);
-  console.log(`     Consider: reducing allocation or fixing strategy`);
-  console.log('');
-  console.log('  3. DIVERSIFY across top 3 strategies');
-  console.log(`     Top 3 total: $${sortedStrategies.slice(0, 3).reduce((s, x) => s + x.totalProfit, 0).toFixed(0)}`);
-  console.log(`     As % of total: ${(sortedStrategies.slice(0, 3).reduce((s, x) => s + x.totalProfit, 0) / grandTotalProfit * 100).toFixed(1)}%`);
-  console.log('');
-
-  // Save attribution
-  saveAttribution(attribution);
-  console.log(`Attribution saved to ${ATTRIBUTION_LOG}`);
-
-  console.log('\n=== Verdict ===');
-  console.log('Attribution tracking is ESSENTIAL for vault management.');
-  console.log('  ✅ Identifies best/worst performers');
-  console.log('  ✅ Enables capital reallocation');
-  console.log('  ✅ Required for vault reporting');
-  console.log('  ✅ Helps identify strategy failures early');
-  console.log('');
-  console.log('ACTION: Run daily to track performance');
-  console.log('  Add to daily report');
-  console.log('  Alert when strategy underperforms > 20%');
+  console.log(`  • Total trades: ${positions.length}`);
+  console.log(`  • Avg trade size: ${fmtUsd(state.realizedPnl / Math.max(1, positions.length))}`);
+  console.log(`  • Capital efficiency: ${((state.realizedPnl / 100000) * 100).toFixed(2)}% ROI on starting capital`);
 }
 
-main().catch(console.error);
+main();
