@@ -15,6 +15,23 @@
 
 cd "$(dirname "$0")/.."  # edge-engine root
 
+# CRITICAL: Ensure /home/z/my-project/.env is symlinked to edge-engine/.env
+# The parent Next.js project overwrites this file periodically
+if [ -f "/home/z/my-project/.env" ] && [ ! -L "/home/z/my-project/.env" ]; then
+  echo "WARNING: /home/z/my-project/.env is not a symlink — re-symlinking..."
+  rm /home/z/my-project/.env
+  ln -s /home/z/my-project/edge-engine/.env /home/z/my-project/.env
+fi
+
+# Verify .env has all required keys
+ENV_LINES=$(wc -l < /home/z/my-project/edge-engine/.env)
+if [ "$ENV_LINES" -lt 30 ]; then
+  echo "CRITICAL: .env file has only $ENV_LINES lines — may be corrupted!"
+  echo "Expected: 50+ lines with all API keys"
+  exit 1
+fi
+echo "OK: .env file verified ($ENV_LINES lines)"
+
 mkdir -p logs
 
 start_daemon() {
