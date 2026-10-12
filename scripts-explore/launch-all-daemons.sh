@@ -41,7 +41,8 @@ start_daemon realtime-opp-alerts scripts-explore/realtime-opp-alerts.mts
 start_daemon opp-db scripts-explore/opp-db.mts --loop
 start_daemon hl-funding-alerts scripts-explore/hl-funding-alerts.mts
 start_daemon paper-trader scripts-explore/paper-trader.mts
+start_daemon risk-dashboard scripts-explore/risk-dashboard-v2.mts
 
 echo ""
-echo "All 6 daemons started. Check logs/ for output."
+echo "All 7 daemons started. Check logs/ for output."
 echo "Stop all: pkill -f 'tsx'"
