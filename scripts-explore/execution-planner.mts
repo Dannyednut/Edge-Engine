@@ -11,7 +11,7 @@ async function main() {
   console.log('═══════════════════════════════════════════════════\n');
   
   // Get current opportunities
-  const vooiRes = await fetch('https://per2-api.vooi.io/arbitrage-scanner?limit=10&orderBy=priceSpread&orderDirection=desc&minPriceSpread=0.005');
+  const vooiRes = await fetch('https://perps-api.vooi.io/arbitrage-scanner?limit=10&orderBy=priceSpread&orderDirection=desc&minPriceSpread=0.005');
   const vooiData = vooiRes.ok ? await vooiRes.json() : { items: [] };
   
   const hlRes = await fetch('https://api.hyperliquid.xyz/info', {
