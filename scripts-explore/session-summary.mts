@@ -36,10 +36,10 @@ async function main() {
   console.log(' 24. EMA crossover');
   console.log(' 25. Portfolio optimizer');
   console.log(' 26. Strategy selector');
- 27. Volume profile
-  28. Price action scanner
-  29. Maker order strategy
-  30. Enterprise structure (31/31 checks)
+     27. Volume profile
+      28. Price action scanner
+      29. Maker order strategy
+      30. Enterprise structure (31/31 checks)
   
   console.log('\n── Key Discoveries ──');
   console.log('  1. GRASS: 100% reliable funding, 33.6% APR');
