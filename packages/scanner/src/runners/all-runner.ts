@@ -40,6 +40,17 @@ import { EulerLendingArbScanner, type EulerLendingArbAlert } from '../strategies
 import { HlSpotBasisScanner, type HlSpotBasisAlert } from '../strategies/hl-spot-basis-scanner.js';
 import { HlpYieldScanner, type HlpYieldAlert } from '../strategies/hlp-yield-scanner.js';
 
+import { DefiLlamaYieldScanner, type YieldPoolAlert } from '../strategies/defillama-yield-scanner.js';
+import { RwaTreasuryScanner, type RwaYieldAlert } from '../strategies/rwa-treasury-scanner.js';
+import { StablecoinDepegScanner, type DepegAlert } from '../strategies/stablecoin-depeg-scanner.js';
+import { LiquidationBackrunScanner, type LiquidationAlert } from '../strategies/liquidation-backrun-scanner.js';
+import { OrderbookImbalanceScanner, type OrderbookAlert } from '../strategies/orderbook-imbalance-scanner.js';
+import { FundingDivergenceScanner, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
+import { AirdropFarmingScanner, type AirdropAlert } from '../strategies/airdrop-farming-scanner.js';
+import { LeverageLoopScanner, type LeverageLoopAlert } from '../strategies/leverage-loop-scanner.js';
+import { WhaleSignalScanner, type WhaleSignalAlert } from '../strategies/whale-signal-scanner.js';
+import { CexDexBridgeScanner, type CexDexBridgeAlert } from '../strategies/cex-dex-bridge-scanner.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
