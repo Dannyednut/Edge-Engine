@@ -21,6 +21,11 @@ jobs:
         # pnpm v12 blocks build scripts by default (ERR_PNPM_IGNORED_BUILDS).
         # --config.strict-build-check=false disables the block non-interactively.
         # The allowed packages are also listed in pnpm-workspace.yaml.
+      - run: pnpm -r build
+        # Build ALL workspace packages so that @edge/types, @edge/alerts,
+        # @edge/config, etc. emit dist/ with .d.ts files. Without this,
+        # tsc in @edge/scanner cannot resolve @edge/* imports.
+        name: Build all workspace packages
       - run: pnpm --filter @edge/scanner typecheck
       - run: pnpm --filter @edge/scanner build
       - run: npx vitest run
