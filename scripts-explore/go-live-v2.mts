@@ -54,7 +54,7 @@ async function main() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'clearingHouseState', user: agentAddress }),
     });
-    const data = await res.json();
+    const text = await res.text(); let data; try { data = JSON.parse(text); } catch { data = { error: text }; }
     const balance = parseFloat(data?.marginSummary?.accountValue || '0');
     console.log(`  Balance: $${balance.toFixed(2)}`);
     

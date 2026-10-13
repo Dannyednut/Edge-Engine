@@ -51,7 +51,7 @@ async function main() {
   // Step 1: Check balance
   console.log('── Step 1: Check Wallet Balance ──\n');
   try {
-    const userState = await infoClient.userState({ user: agentAddress });
+    const userState = await infoClient.clearinghouseState({ user: agentAddress });
     const accountValue = parseFloat(userState?.marginSummary?.accountValue || '0');
     console.log(`  Account value: $${accountValue.toFixed(2)}`);
     
