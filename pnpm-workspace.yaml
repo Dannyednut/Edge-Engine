@@ -2,10 +2,7 @@ packages:
   - 'packages/*'
   - 'contracts'
 
-allowBuilds:
-  bufferutil: set this to true or false
-  ccxt: set this to true or false
-  esbuild: set this to true or false
-
 onlyBuiltDependencies:
+  - bufferutil
+  - ccxt
   - esbuild
