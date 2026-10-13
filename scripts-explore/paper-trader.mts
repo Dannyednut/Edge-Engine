@@ -258,26 +258,35 @@ async function main() {
   }
 
   // 3. Simulate HLP vault passive yield (per scan = ~5 min)
+  // APR is configurable via env var. Default lowered from 100%→30% per
+  // docs/PAPER_PERFORMANCE_AUDIT.md — 100% was an unverified mid-estimate.
+  // HLP vault APRs are highly variable (-20% to +200% historically).
+  // The env var allows adjustment without code changes.
   console.log('\n── Simulating HLP Vault Passive Yield ──');
   const hlpCapital = 5000;
-  const hlpApr = 1.0; // 100% APR (mid estimate)
+  const hlpApr = Number(process.env.PAPER_HLP_APR ?? 0.30); // 30% APR (configurable)
   const hlpDailyYield = hlpCapital * hlpApr / 365;
   const hlpScanYield = hlpDailyYield / (24 * 60 / 5); // 5-min scan interval = 288 scans/day
   state.realizedPnl += hlpScanYield;
   state.currentCapital += hlpScanYield;
-  console.log(`  HLP deposit: $${hlpCapital} at ${hlpApr*100}% APR`);
+  console.log(`  HLP deposit: $${hlpCapital} at ${hlpApr*100}% APR (SIMULATED, unverified)`);
   console.log(`  Daily yield: $${hlpDailyYield.toFixed(2)}`);
   console.log(`  This scan (+5 min): $${hlpScanYield.toFixed(4)}`);
 
   // 4. Simulate kHYPE LST carry (per scan = ~5 min)
+  // APR corrected from 5.1%→1.93% per docs/PAPER_PERFORMANCE_AUDIT.md.
+  // The verified kHYPE staking yield is 1.93% (DefiLlama, 4 samples).
+  // The previous 5.1% was 2.6x the verified rate; with the false 3x
+  // leverage claim it was 7.9x inflated. Leverage removed — it would
+  // require borrowing against kHYPE which adds liquidation risk.
   console.log('\n── Simulating kHYPE LST Carry ──');
   const khypeCapital = 10000;
-  const khypeApr = 0.051; // 5.1% APR
+  const khypeApr = Number(process.env.PAPER_KHYPE_APR ?? 0.0193); // 1.93% APR (verified)
   const khypeDailyYield = khypeCapital * khypeApr / 365;
   const khypeScanYield = khypeDailyYield / (24 * 60 / 5);
   state.realizedPnl += khypeScanYield;
   state.currentCapital += khypeScanYield;
-  console.log(`  kHYPE deposit: $${khypeCapital} at ${khypeApr*100}% APR (3x lev)`);
+  console.log(`  kHYPE deposit: $${khypeCapital} at ${khypeApr*100}% APR (verified via DefiLlama)`);
   console.log(`  Daily yield: $${khypeDailyYield.toFixed(2)}`);
   console.log(`  This scan (+5 min): $${khypeScanYield.toFixed(4)}`);
 
