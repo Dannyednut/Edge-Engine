@@ -15,6 +15,7 @@ DAEMONS=(
   "risk-dashboard:scripts-explore/risk-dashboard-v2.mts:"
   "wallet-funding-alert:scripts-explore/wallet-funding-alert.mts:"
   "realtime-spread-monitor:scripts-explore/realtime-spread-monitor.mts:"
+  "khype-timeseries:packages/scanner/src/runners/khype-timeseries.ts:"
 )
 
 check_and_restart() {

@@ -55,7 +55,8 @@ start_daemon hl-funding-alerts scripts-explore/hl-funding-alerts.mts
 start_daemon paper-trader scripts-explore/paper-trader.mts
 start_daemon risk-dashboard scripts-explore/risk-dashboard-v2.mts
 start_daemon wallet-funding-alert scripts-explore/wallet-funding-alert.mts
+start_daemon khype-timeseries packages/scanner/src/runners/khype-timeseries.ts
 
 echo ""
-echo "All 8 daemons started. Check logs/ for output."
+echo "All 9 daemons started. Check logs/ for output."
 echo "Stop all: pkill -f 'tsx'"
