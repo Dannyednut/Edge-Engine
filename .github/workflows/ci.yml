@@ -15,8 +15,8 @@ jobs:
         with:
           node-version: '22'
       - uses: pnpm/action-setup@v4
-        with:
-          version: 12
+        # No "version" key — the action reads packageManager from package.json
+        # (currently pnpm@12.6.0). This avoids ERR_PNPM_BAD_PM_VERSION.
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @edge/scanner typecheck
       - run: pnpm --filter @edge/scanner build
