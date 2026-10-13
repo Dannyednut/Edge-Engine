@@ -110,18 +110,31 @@ async function vooiScan(params: any): Promise<any> {
   return res.json();
 }
 
+// Minimum spread to record (filters noise — see docs/ALERT_QUALITY_AUDIT.md)
+// Negative spreads are never actionable arbs. 0.5% matches the min_edge_bps
+// used by the alert pipeline (50 bps = 0.5%).
+const MIN_RECORD_SPREAD_PCT = 0.5;
+
 async function recordSnapshot(): Promise<number> {
   const now = Date.now();
   const hour = new Date().toISOString().slice(0,13); // YYYY-MM-DDTHH
   let count = 0;
+  let skipped = 0;
+  const seen = new Set<string>(); // dedup within this scan cycle
 
   // Price spread
   const priceResp = await vooiScan({ limit: 50, orderBy: 'priceSpread', orderDirection: 'desc', minPriceSpread: 0.005 });
   for (const item of (priceResp?.items || [])) {
     for (const p of (item.pairs || [])) {
       const spreadPct = (p.priceSpread || 0) * 100;
-      const profit5k = 5000 * spreadPct / 100 - 5000 * 0.003;
+      // Filter: skip negative or below-threshold spreads (audit P1 fix)
+      if (spreadPct < MIN_RECORD_SPREAD_PCT) { skipped++; continue; }
       const venues = `${p.long?.exchange}→${p.short?.exchange}`;
+      // Dedup: skip duplicate (asset, venues) within same scan cycle
+      const key = `${item.asset}|${venues}`;
+      if (seen.has(key)) { skipped++; continue; }
+      seen.add(key);
+      const profit5k = 5000 * spreadPct / 100 - 5000 * 0.003;
       insertOpp.run(now, 'PRICE', item.asset, venues, spreadPct, null, profit5k);
       upsertHourly.run(hour, item.asset, 'PRICE', spreadPct, spreadPct, null);
       count++;
@@ -133,14 +146,22 @@ async function recordSnapshot(): Promise<number> {
   for (const item of (fundResp?.items || [])) {
     for (const p of (item.pairs || [])) {
       const funding = (p.fundingRate || 0) * 365 * 100;
-      const profit5k = 5000 * funding / 100 / 365;
+      // Filter: skip negative or below-threshold funding rates
+      if (funding < 0) { skipped++; continue; }
       const venues = `${p.long?.exchange}→${p.short?.exchange}`;
+      const key = `FUND|${item.asset}|${venues}`;
+      if (seen.has(key)) { skipped++; continue; }
+      seen.add(key);
+      const profit5k = 5000 * funding / 100 / 365;
       insertOpp.run(now, 'FUNDING', item.asset, venues, null, funding, profit5k);
       upsertHourly.run(hour, item.asset, 'FUNDING', null, null, funding);
       count++;
     }
   }
 
+  if (skipped > 0) {
+    console.log(`  [opp-db] skipped ${skipped} below-threshold/duplicate opps`);
+  }
   return count;
 }
 
