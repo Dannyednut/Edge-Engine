@@ -31,7 +31,8 @@
     "start:vooi-bot": "tsx src/runners/vooi-create-bot.ts",
     "start:opp-monitor": "tsx src/runners/opportunity-monitor.ts",
     "start:master-view": "tsx src/runners/master-view.ts",
-    "start:readiness": "tsx src/runners/readiness-check.ts"
+    "start:readiness": "tsx src/runners/readiness-check.ts",
+    "start:realtime": "tsx src/runners/realtime-pipeline.ts"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
