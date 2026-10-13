@@ -1,46 +1,29 @@
-# CI Status and Permission Blocker
+# CI Status
 
-## Current state: NO CI is running
+## Current state: CI ENABLED (as of Oct 13, 2026, 14:26 UTC)
 
-**As of Oct 13, 2026, no GitHub Actions CI runs on this repository.**
-Any claim of "CI passing" or "CI validated" would be false.
+**GitHub Actions CI is now enabled.** The `.github/workflows/` gitignore
+entry has been removed and the workflow file has been pushed (commit
+`0764a68`). The Principal granted `workflow` scope to the PAT, resolving
+the prior blocker.
 
-## Root cause: two compounding issues
+## History
 
-### Issue 1: `.github/workflows/` is gitignored
+### Prior blocker (resolved Oct 13, 2026)
 
-File: `.gitignore` line 53:
-```
-.github/workflows/
-```
+Two compounding issues previously prevented CI from running:
 
-A local workflow file exists at `.github/workflows/ci.yml` but is **never
-pushed** to GitHub because of this gitignore rule. The file is effectively
-dead code — it has never executed.
+1. `.github/workflows/` was gitignored (added in commit `694c60e` as a
+   workaround so that non-workflow commits could push).
+2. The GitHub PAT lacked the `workflow` scope, so pushes containing
+   workflow files would be rejected by GitHub.
 
-### Issue 2: GitHub PAT lacks `workflow` scope
+**Resolution:** The Principal granted `workflow` scope to the PAT.
+Commit `0764a68` removed the gitignore entry and pushed `ci.yml`.
 
-The repository is pushed using a Personal Access Token (PAT) embedded in
-the remote URL (redacted here for security):
+## Current workflow
 
-```
-https://***@github.com/Dannyednut/Edge-Engine.git
-```
-
-This PAT does **not** have the `workflow` scope. Even if we removed the
-`.gitignore` entry, any `git push` that includes files under
-`.github/workflows/` would be rejected by GitHub with:
-
-```
-refspec 'refs/heads/main' -> main (denied)
-! [remote rejected] main -> main (refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflow` permission)
-```
-
-This was discovered in the prior shift (commit `694c60e`, which added the
-gitignore rule as a workaround so that non-workflow commits could still
-push).
-
-## What the local ci.yml would do (if it could run)
+File: `.github/workflows/ci.yml`
 
 ```yaml
 name: CI
@@ -57,53 +40,32 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
+        with: { version: 12 }
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - run: pnpm --filter @edge/scanner typecheck
+      - run: pnpm --filter @edge/scanner build
       - run: npx vitest run
 ```
 
-This is a reasonable CI definition. It would run `pnpm install`, `pnpm build`,
-and `npx vitest run` on every push/PR to `main`.
+This runs on every push/PR to `main`:
+1. Install dependencies (pnpm, frozen lockfile)
+2. Typecheck the scanner package
+3. Build the scanner package
+4. Run the full vitest suite
 
-## Reproducible local verification (in lieu of CI)
-
-Since CI cannot run, the following commands provide equivalent local
-verification. All outputs are captured in the acceptance report.
+## Reproducible local verification (equivalent to CI)
 
 ```bash
-# 1. Typecheck (zero errors expected)
 cd edge-engine
-./node_modules/.bin/tsc --noEmit -p packages/scanner/tsconfig.json
-
-# 2. Build (zero errors expected)
-./node_modules/.bin/tsc -p packages/scanner/tsconfig.json
-
-# 3. Test (124 tests expected to pass)
-npx vitest run
+./node_modules/.bin/tsc --noEmit -p packages/scanner/tsconfig.json   # typecheck
+./node_modules/.bin/tsc -p packages/scanner/tsconfig.json            # build
+npx vitest run                                                       # tests
 ```
 
-## Action required from principal
+## Security note
 
-To enable real CI, the principal must:
-
-1. **Rotate the GitHub PAT** (the current one is embedded in the remote
-   URL — a security risk).
-2. **Grant the `workflow` scope** to the new PAT.
-3. **Update the remote URL** with the new PAT:
-   ```bash
-   git remote set-url origin https://<NEW_PAT>@github.com/Dannyednut/Edge-Engine.git
-   ```
-4. **Remove line 53** from `.gitignore` (the `.github/workflows/` entry).
-5. **Commit and push** the `.github/workflows/ci.yml` file.
-
-Until these steps are taken, CI will not run and any CI status claim
-would be false.
-
-## What will NOT be done (per principal's directive)
-
-- The PAT will not be exposed in logs, commits, or messages.
-- The `.gitignore` rule will not be removed without a PAT that has
-  `workflow` scope (doing so would cause all pushes to fail).
-- No workaround will be implemented that pretends ignored workflow
-  files constitute CI.
+The GitHub PAT is still embedded in the remote URL. This is a security
+risk — anyone with access to the repo config can extract it. The
+Principal should rotate the PAT and configure the remote using a
+credential helper or `gh auth login` instead of embedding it in the URL.
+This is tracked as security debt.
