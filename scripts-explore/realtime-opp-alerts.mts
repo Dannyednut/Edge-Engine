@@ -40,13 +40,17 @@ const VOI_API  = 'https://perps-api.vooi.io';
 const HL_API   = 'https://api.hyperliquid.xyz/info';
 const TG_API   = 'https://api.telegram.org';
 
-// Tunables
-const POLL_INTERVAL_MS         = 60_000;          // 1 min
-const MIN_PRICE_SPREAD_ALERT   = 5.0;             // %, fire alert when ≥
-const MIN_FUNDING_YIELD_ALERT  = 100.0;           // %/yr, fire alert when ≥
-const MIN_PROFIT_USD_ALERT     = 200;             // $ profit on $5k
-const COOLDOWN_PER_OPP_MS      = 30 * 60 * 1000;  // 30 min
-const MAX_ALERTS_PER_DAY       = 50;
+// Tunables — configurable via env vars, with sensible defaults.
+// Lowered from 5%→2% and $200→$50 per the alert-quality audit
+// (docs/ALERT_QUALITY_AUDIT.md). The 5% threshold was too high —
+// most real arbs are 0.5-2%, so 0 alerts were being sent despite
+// thousands of actionable opportunities.
+const POLL_INTERVAL_MS         = Number(process.env.OPP_ALERT_POLL_MS ?? 60_000);          // 1 min
+const MIN_PRICE_SPREAD_ALERT   = Number(process.env.OPP_ALERT_MIN_SPREAD_PCT ?? 2.0);     // %, fire alert when ≥
+const MIN_FUNDING_YIELD_ALERT  = Number(process.env.OPP_ALERT_MIN_FUNDING_PCT ?? 100.0);  // %/yr, fire alert when ≥
+const MIN_PROFIT_USD_ALERT     = Number(process.env.OPP_ALERT_MIN_PROFIT_USD ?? 50);      // $ profit on $5k
+const COOLDOWN_PER_OPP_MS      = Number(process.env.OPP_ALERT_COOLDOWN_MS ?? 30 * 60 * 1000);  // 30 min
+const MAX_ALERTS_PER_DAY       = Number(process.env.OPP_ALERT_MAX_DAILY ?? 50);
 const STATE_PATH               = '/tmp/opp-alert-state.json';
 const HISTORY_PATH             = '/tmp/opp-alert-history.jsonl';
 
