@@ -247,7 +247,56 @@ async function main() {
     timeframe: 'week',
   });
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis, hlp_yield]`);
+  // ─── New strategies (migrated from scripts-explore) ────────────────
+  const defiLlamaYield = new DefiLlamaYieldScanner({
+    minApyPct: 5.0,
+    minTvlUsd: 1_000_000,
+    stablecoinOnly: true,
+    noIlRiskOnly: true,
+    maxResults: 50,
+  });
+  const rwaTreasury = new RwaTreasuryScanner({
+    minTvlUsd: 1_000_000,
+    includeInstitutionalCredit: true,
+  });
+  const stablecoinDepeg = new StablecoinDepegScanner({
+    minDepegPct: 0.3,
+    majorDepegPct: 2.0,
+  });
+  const liquidationBackrun = new LiquidationBackrunScanner({
+    cascadeFundingThreshold: 100,
+    squeezeFundingThreshold: 500,
+    minOiUsd: 500_000,
+  });
+  const orderbookImbalance = new OrderbookImbalanceScanner({
+    coins: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV'],
+    imbalanceThreshold: 0.30,
+    wallThresholdUsd: 500_000,
+    liquidityRangePct: 1.0,
+  });
+  const fundingDivergence = new FundingDivergenceScanner({
+    minDivergencePct: 20,
+    minExtremeOiUsd: 1_000_000,
+    extremeFundingThreshold: 50,
+  });
+  const airdropFarming = new AirdropFarmingScanner({
+    minTotalReturnPct: 10,
+  });
+  const leverageLoop = new LeverageLoopScanner({
+    minSpreadPct: 0.5,
+    maxLeverage: 5,
+  });
+  const whaleSignal = new WhaleSignalScanner({
+    minVolOiRatio: 0.5,
+    minTvlChangePct: 5.0,
+    minProtocolTvl: 5_000_000,
+  });
+  const cexDexBridge = new CexDexBridgeScanner({
+    minSpreadPct: 0.05,
+    coins: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV'],
+  });
+
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis, hlp_yield, defillama_yield, rwa_treasury, stablecoin_depeg, liquidation_backrun, orderbook_imbalance, funding_divergence, airdrop_farming, leverage_loop, whale_signal, cex_dex_bridge]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -270,7 +319,7 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts] = await Promise.all([
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts, defiLlamaAlerts, rwaAlerts, depegAlerts, liquidationAlerts, orderbookAlerts, fundingDivAlerts, airdropAlerts, leverageAlerts, whaleAlerts, bridgeAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
@@ -289,10 +338,20 @@ async function main() {
         eulerLendingArb.scan().catch(e => { console.warn(`euler_lending failed: ${e.message}`); return [] as EulerLendingArbAlert[]; }),
         hlSpotBasis.scan().catch(e => { console.warn(`hl_spot_basis failed: ${e.message}`); return [] as HlSpotBasisAlert[]; }),
         hlpYield.scan().catch(e => { console.warn(`hlp_yield failed: ${e.message}`); return [] as HlpYieldAlert[]; }),
+        defiLlamaYield.scan().catch(e => { console.warn(`defillama failed: ${e.message}`); return [] as YieldPoolAlert[]; }),
+        rwaTreasury.scan().catch(e => { console.warn(`rwa failed: ${e.message}`); return [] as RwaYieldAlert[]; }),
+        stablecoinDepeg.scan().catch(e => { console.warn(`depeg failed: ${e.message}`); return [] as DepegAlert[]; }),
+        liquidationBackrun.scan().catch(e => { console.warn(`liq failed: ${e.message}`); return [] as LiquidationAlert[]; }),
+        orderbookImbalance.scan().catch(e => { console.warn(`orderbook failed: ${e.message}`); return [] as OrderbookAlert[]; }),
+        fundingDivergence.scan().catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
+        airdropFarming.scan().catch(e => { console.warn(`airdrop failed: ${e.message}`); return [] as AirdropAlert[]; }),
+        leverageLoop.scan().catch(e => { console.warn(`lev_loop failed: ${e.message}`); return [] as LeverageLoopAlert[]; }),
+        whaleSignal.scan().catch(e => { console.warn(`whale failed: ${e.message}`); return [] as WhaleSignalAlert[]; }),
+        cexDexBridge.scan().catch(e => { console.warn(`bridge failed: ${e.message}`); return [] as CexDexBridgeAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} dfly=${defiLlamaAlerts.length} rwa=${rwaAlerts.length} depeg=${depegAlerts.length} liq=${liquidationAlerts.length} ob=${orderbookAlerts.length} fundiv=${fundingDivAlerts.length} airdrop=${airdropAlerts.length} levloop=${leverageAlerts.length} whale=${whaleAlerts.length} bridge=${bridgeAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -703,6 +762,136 @@ async function main() {
             `30d APR: ${a.apr30d.toFixed(2)}%`,
             a.signal === 'ENTRY' ? '✅ Good time to deposit — APR above 15%' : '⚠️ Drawdown in progress — avoid depositing',
           ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
+      // ─── New strategy alerts (migrated from scripts-explore) ─────────
+
+      // Process DefiLlama yield alerts (top 3 by risk-adjusted yield)
+      for (const a of defiLlamaAlerts.filter(a => a.apy > 10 && a.riskScore <= 3).slice(0, 3)) {
+        const key = `dfly|${a.symbol}|${a.project}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `dfly_${a.symbol}_${a.project}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity' as const,
+          strategyId: 'defillama_yield',
+          title: `[YIELD] ${a.symbol} ${a.apy.toFixed(1)}% APY on ${a.project}`,
+          body: `Chain: ${a.chain}\nTVL: $${(a.tvlUsd / 1e6).toFixed(2)}M\n30d APY: ${a.apy30d.toFixed(1)}%\nRisk: ${a.riskScore}/10\nDaily on $10k: $${a.dailyProfitOn10k.toFixed(2)}`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process RWA Treasury alerts
+      for (const a of rwaAlerts.filter(a => a.apy > 3).slice(0, 2)) {
+        const key = `rwa|${a.symbol}|${a.project}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `rwa_${a.symbol}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'info' as const,
+          strategyId: 'rwa_treasury',
+          title: `[RWA] ${a.symbol} ${a.apy.toFixed(2)}% APY — ${a.backingAsset}`,
+          body: `Project: ${a.project}\nChain: ${a.chain}\nTVL: $${(a.tvlUsd / 1e6).toFixed(2)}M\nRisk: ${a.riskScore}/10`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process depeg alerts (only BUY or SHORT, not WATCH)
+      for (const a of depegAlerts.filter(a => a.action !== 'WATCH')) {
+        const key = `depeg|${a.stablecoin}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `depeg_${a.stablecoin}_${Date.now()}`,
+          ts: Date.now(),
+          severity: a.riskScore >= 7 ? 'critical' as const : 'warning' as const,
+          strategyId: 'stablecoin_depeg',
+          title: `[DEPEG] ${a.stablecoin} at $${a.price.toFixed(4)} (${a.depegPct.toFixed(2)}%)`,
+          body: `Action: ${a.action}\nPotential profit on $10k: $${a.potentialProfitOn10k.toFixed(0)}\nRisk: ${a.riskScore}/10`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process liquidation backrun alerts (SQUEEZE or CASCADE only)
+      for (const a of liquidationAlerts.filter(a => a.severity !== 'MONITOR')) {
+        const key = `liq|${a.coin}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `liq_${a.coin}_${Date.now()}`,
+          ts: Date.now(),
+          severity: a.severity === 'SQUEEZE_IMMINENT' ? 'critical' as const : 'warning' as const,
+          strategyId: 'liquidation_backrun',
+          title: `[LIQ] ${a.coin} ${a.direction} — ${a.severity}`,
+          body: `Funding: ${a.fundingAnnual.toFixed(0)}/yr\nOI: $${(a.oi / 1e6).toFixed(2)}M\nLiquidator profit: $${(a.liquidatorProfitPotential / 1000).toFixed(1)}k`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process orderbook imbalance alerts (BULLISH or BEARISH only)
+      for (const a of orderbookAlerts.filter(a => a.signal !== 'NEUTRAL')) {
+        const key = `ob|${a.coin}|${a.signal}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `ob_${a.coin}_${a.signal}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity' as const,
+          strategyId: 'orderbook_imbalance',
+          title: `[ORDERBOOK] ${a.coin} ${a.signal} — ${(a.imbalance * 100).toFixed(1)}%`,
+          body: `Mid: $${a.midPrice.toFixed(2)}\nBid: $${(a.bidLiquidity / 1e6).toFixed(2)}M / Ask: $${(a.askLiquidity / 1e6).toFixed(2)}M`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process funding divergence alerts (top 3)
+      for (const a of fundingDivAlerts.slice(0, 3)) {
+        const key = `fundiv|${a.asset}|${a.type}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `fundiv_${a.asset}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity' as const,
+          strategyId: 'funding_divergence',
+          title: `[FUND DIV] ${a.asset} ${a.divergence.toFixed(0)}/yr — ${a.type}`,
+          body: `Direction: ${a.direction}\nDaily on $5k: $${a.dailyProfitOn5k.toFixed(2)}`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process whale signal alerts (STRONG only)
+      for (const a of whaleAlerts.filter(a => a.signal === 'STRONG').slice(0, 3)) {
+        const key = `whale|${a.type}|${a.asset}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `whale_${a.asset}_${a.type}_${Date.now()}`,
+          ts: Date.now(),
+          severity: a.type === 'TVL_BEARISH' ? 'warning' as const : 'opportunity' as const,
+          strategyId: 'whale_signal',
+          title: `[WHALE] ${a.asset} ${a.type}`,
+          body: `${a.detail}\nAction: ${a.action}\nTVL: $${(a.tvlUsd / 1e6).toFixed(2)}M`,
+          channels: ['telegram'],
+        });
+      }
+
+      // Process CEX-DEX bridge alerts (top 3)
+      for (const a of bridgeAlerts.slice(0, 3)) {
+        const key = `bridge|${a.asset}`;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: `bridge_${a.asset}_${Date.now()}`,
+          ts: Date.now(),
+          severity: 'opportunity' as const,
+          strategyId: 'cex_dex_bridge',
+          title: `[BRIDGE] ${a.asset} ${a.spreadPct.toFixed(3)}% spread`,
+          body: `Buy: ${a.buyVenue} @ $${a.buyPrice.toFixed(4)}\nSell: ${a.sellVenue} @ $${a.sellPrice.toFixed(4)}\nNet on $10k: $${a.netProfitOn10k.toFixed(2)}`,
           channels: ['telegram'],
         });
       }
