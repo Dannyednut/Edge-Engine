@@ -17,7 +17,10 @@ jobs:
       - uses: pnpm/action-setup@v4
         # No "version" key — the action reads packageManager from package.json
         # (currently pnpm@12.6.0). This avoids ERR_PNPM_BAD_PM_VERSION.
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --config.strict-build-check=false
+        # pnpm v12 blocks build scripts by default (ERR_PNPM_IGNORED_BUILDS).
+        # --config.strict-build-check=false disables the block non-interactively.
+        # The allowed packages are also listed in pnpm-workspace.yaml.
       - run: pnpm --filter @edge/scanner typecheck
       - run: pnpm --filter @edge/scanner build
       - run: npx vitest run
