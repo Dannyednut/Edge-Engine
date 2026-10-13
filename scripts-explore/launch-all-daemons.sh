@@ -55,8 +55,12 @@ start_daemon hl-funding-alerts scripts-explore/hl-funding-alerts.mts
 start_daemon paper-trader scripts-explore/paper-trader.mts
 start_daemon risk-dashboard scripts-explore/risk-dashboard-v2.mts
 start_daemon wallet-funding-alert scripts-explore/wallet-funding-alert.mts
+start_daemon realtime-spread-monitor scripts-explore/realtime-spread-monitor.mts
 start_daemon khype-timeseries packages/scanner/src/runners/khype-timeseries.ts
 
 echo ""
-echo "All 9 daemons started. Check logs/ for output."
+echo "All 10 daemons started. Check logs/ for output."
 echo "Stop all: pkill -f 'tsx'"
+echo ""
+echo "NOTE: daemon-supervisor.sh should be started separately to auto-restart"
+echo "  any daemon that crashes. It is NOT started by this script."

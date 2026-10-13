@@ -25,13 +25,21 @@ max_concurrent    = 2
 cooldown_ms       = 60000
 
 [dex_cex_flashloan]
+# min_edge_bps: gross spread threshold (30 bps = 0.3%)
+# max_position_usd: flashloan-funded position size
+# flashloan_provider: informational — the use_balancer/use_aave_fallback
+#   booleans below drive actual provider selection.
+# use_balancer: use Balancer V2 as primary flashloan (0% fee)
+# use_aave_fallback: fall back to Aave V3 if Balancer not on chain (0.05% fee)
+# use_flashbots: MEV protection (not yet wired — tracked in docs/CONFIG_AUDIT.md)
 min_edge_bps      = 30
 max_position_usd  = 5000
 max_concurrent    = 3
 cooldown_ms       = 30000
 flashloan_provider = "aave-v3"
 chains_active     = ["arbitrum", "base"]
-use_flashbots     = true
+use_balancer      = true
+use_aave_fallback = true
 
 [dex_dex]
 min_edge_bps      = 15
@@ -71,7 +79,9 @@ warning_apr_pct   = -5
 timeframe         = "week"
 
 [pendle_boros]
-min_yield_pct     = 5
+# min_spread_apr_pct: min APR spread between fixed and floating yield (5 = 5% APR)
+#   (renamed from min_yield_pct for clarity — see docs/CONFIG_AUDIT.md)
+min_spread_apr_pct = 5
 max_position_usd  = 10000
 max_concurrent    = 3
 
@@ -86,7 +96,12 @@ max_position_usd  = 5000
 max_concurrent    = 2
 
 [lst_yield_comparison]
+# min_yield_pct: min yield spread between LSTs (3.0 = 3%)
+# min_tvl_usd: min TVL for a market to be considered ($1M default)
+# max_position_usd: parsed but NOT consumed — LstYieldComparisonScanner
+#   has no maxSizeUsd param; riskParams hardcodes 10_000.
 min_yield_pct     = 3.0
+min_tvl_usd       = 1000000
 max_position_usd  = 10000
 max_concurrent    = 3
 
@@ -137,7 +152,11 @@ max_position_usd  = 5000
 max_concurrent    = 2
 
 [solana_memecoin_arb]
-min_edge_bps      = 50
+# min_edge_bps: min cross-AMM spread (80 bps = 0.8%).
+#   Break-even is 50 bps (0.25% × 2 legs PumpApi fee). 80 bps gives
+#   a 0.3% profit margin above fees. DO NOT set below 50 or arbs fire
+#   at a guaranteed loss.
+min_edge_bps      = 80
 max_position_usd  = 500
 max_concurrent    = 3
 

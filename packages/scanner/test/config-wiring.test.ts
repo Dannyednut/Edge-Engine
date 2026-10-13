@@ -39,6 +39,9 @@ describe('config wiring: strategies.toml → all-runner.ts', () => {
     expect(s.min_edge_bps).toBe(30);
     expect(Array.isArray(s.chains_active)).toBe(true);
     expect(s.chains_active).toContain('arbitrum');
+    // CORRECTION: use_balancer/use_aave_fallback replace the misused use_flashbots
+    expect(s.use_balancer).toBe(true);
+    expect(s.use_aave_fallback).toBe(true);
   });
 
   it('defillama_yield new-strategy section is present', () => {
@@ -64,11 +67,11 @@ describe('config wiring: strategies.toml → all-runner.ts', () => {
     expect(Array.isArray(s.coins)).toBe(true);
   });
 
-  it('hlp_yield timeframe is "week"', () => {
-    const s = cfg.strategies['hlp_yield'];
-    expect(s.min_entry_apr_pct).toBe(15);
-    expect(s.warning_apr_pct).toBe(-5);
-    expect(s.timeframe).toBe('week');
+  it('pendle_boros uses renamed min_spread_apr_pct', () => {
+    const s = cfg.strategies['pendle_boros'];
+    expect(s.min_spread_apr_pct).toBe(5);
+    // old key should NOT be present
+    expect(s.min_yield_pct).toBeUndefined();
   });
 
   it('whale_signal thresholds are present', () => {
@@ -76,6 +79,24 @@ describe('config wiring: strategies.toml → all-runner.ts', () => {
     expect(s.min_vol_oi_ratio).toBe(0.5);
     expect(s.min_tvl_change_pct).toBe(5.0);
     expect(s.min_protocol_tvl).toBe(5_000_000);
+  });
+
+  it('hlp_yield timeframe is "week"', () => {
+    const s = cfg.strategies['hlp_yield'];
+    expect(s.min_entry_apr_pct).toBe(15);
+    expect(s.warning_apr_pct).toBe(-5);
+    expect(s.timeframe).toBe('week');
+  });
+
+  it('lst_yield_comparison has separate min_tvl_usd (not max_position_usd)', () => {
+    const s = cfg.strategies['lst_yield_comparison'];
+    expect(s.min_tvl_usd).toBe(1_000_000);
+    expect(s.min_yield_pct).toBe(3.0);
+  });
+
+  it('solana_memecoin_arb min_edge_bps is 80 (above 50 bps break-even)', () => {
+    const s = cfg.strategies['solana_memecoin_arb'];
+    expect(s.min_edge_bps).toBe(80);
   });
 
   it('all expected strategy sections are present in TOML', () => {
