@@ -170,8 +170,14 @@ async function main() {
       // Simulate trade
       const notional = 5000; // $5k per trade
       const grossProfit = notional * effectiveSpread / 100;
+      // Slippage model: 20% of spread lost to adverse price movement
+      // between signal and execution (deterministic, not random).
+      // This is conservative — real slippage on thin order books can be
+      // higher. Capped at 0.15% to avoid unrealistic erosion on wide spreads.
+      const slippagePct = Math.min(0.15, effectiveSpread * 0.20);
+      const slippageUsd = notional * slippagePct / 100;
       const fees = notional * 0.001; // 0.1% fees (VOOI atomic, not 0.3%)
-      const netProfit = grossProfit - fees;
+      const netProfit = grossProfit - slippageUsd - fees;
       const trade: Trade = {
         ts: Date.now(),
         strategy: 'VOOI Price Spread Arb',
@@ -220,11 +226,24 @@ async function main() {
       if (annualApr < 70 || annualApr > 120) continue; // VOOI recommended range (tightened)
       // Simulate opening a funding arb position (24h hold for profitability)
       const notional = 5000;
-      const fundingIncome = notional * spread / 100 * 24; // 24h hold (was 12h)
+      // Adverse funding drift: the initial 1h funding rate is not sustained
+      // for 24h. Model 80% of initial rate as the average over the hold
+      // period (20% adverse drift — conservative; real drift can be higher
+      // as funding rates mean-revert).
+      const adverseDriftFactor = 0.80;
+      const adjustedSpread = spread * adverseDriftFactor;
+      // Funding rate reversal: ~15% of funding arbs experience a full
+      // reversal over 24h (spread flips negative). Deterministic based
+      // on asset name hash — reproducible, not random. This models the
+      // real-world risk that funding rates can flip when sentiment shifts.
+      const reversalHash = item.asset.split('').reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
+      const reversed = (Math.abs(reversalHash) % 100) < 15; // ~15% reversal rate
+      const effectiveFundingSpread = reversed ? -adjustedSpread : adjustedSpread;
+      const fundingIncome = notional * effectiveFundingSpread / 100 * 24; // 24h hold
       const fees = notional * 0.001; // 0.1% total (VOOI atomic, not 0.3%)
       const netProfit = fundingIncome - fees;
-      // Skip if not profitable
-      if (netProfit <= 0) continue;
+      // Removed the `if (netProfit <= 0) continue` skip per audit — losing
+      // trades must be recorded to produce a valid win rate.
       const trade: Trade = {
         ts: Date.now(),
         strategy: 'VOOI Funding Rate Arb',
@@ -236,7 +255,7 @@ async function main() {
         feesUsd: fees,
         netProfitUsd: netProfit,
         status: 'closed',
-        closeReason: '12h_hold_complete',
+        closeReason: '24h_hold_complete',
       };
       state.realizedPnl += netProfit;
       state.currentCapital += netProfit;
@@ -248,7 +267,7 @@ async function main() {
       logTrade(trade);
       fundingArbsFound++;
       fundingProfitSimulated += netProfit;
-      console.log(`  [FUND] ${item.asset} 1h=${spread.toFixed(4)}% (${annualApr.toFixed(0)}%/yr)  net profit=$${netProfit.toFixed(2)}/12h`);
+      console.log(`  [FUND] ${item.asset} 1h=${spread.toFixed(4)}% (${annualApr.toFixed(0)}%/yr, adj ${adjustedSpread.toFixed(4)}%${reversed ? ' REVERSED' : ''})  net=$${netProfit.toFixed(2)}/24h ${netProfit > 0 ? '✓' : '✗'}`);
     }
   }
   if (fundingArbsFound === 0) {
