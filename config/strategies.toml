@@ -1,3 +1,7 @@
+# WARNING: This file is parsed by loadConfig() but NOT yet consumed by all-runner.ts.
+# Strategy parameters are currently hardcoded in packages/scanner/src/runners/all-runner.ts.
+# See docs/CONFIG_DRIFT_REPORT.md for details.
+#
 # Strategy parameters — adjustable at runtime via re-deploy.
 # 32 strategies total (22 original + 10 migrated from scripts-explore)
 
