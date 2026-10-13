@@ -84,18 +84,20 @@ DefiLlamaYield, RwaTreasury, StablecoinDepeg, LiquidationBackrun, OrderbookImbal
 9. realtime-spread-monitor — fast price spread alerts (5s)
 10. daemon-supervisor — auto-restarts dead daemons (60s)
 
-## Track Record (Paper Trading)
+## Track Record (PAPER TRADING — NOT LIVE)
+
+**WARNING: These are simulated results from a paper trading bot.**
+**No live trades have been executed. No real capital is deployed.**
+**Past simulation performance does not guarantee future live results.**
 
 | Metric | Value |
 |--------|-------|
-| Starting capital | $100,000 |
-| Current capital | $165,000+ |
-| ROI | +65%+ |
-| Total trades | 6,000+ |
-| Win rate | 100% |
+| Starting capital | $100,000 (simulated) |
+| Current capital | $170,000+ (simulated) |
+| ROI | +70%+ (simulated) |
+| Total trades | 6,500+ (simulated) |
+| Win rate | 100% (simulated) |
 | Days active | 3 |
-
-## Risk Management
 
 | Parameter | Value |
 |-----------|-------|
