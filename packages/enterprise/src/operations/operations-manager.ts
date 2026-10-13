@@ -100,7 +100,7 @@ function isProcessRunning(pattern: string): boolean {
   }
 }
 
-function startProcess(name: string, command: string, args: string[], cwd: string, logFile: string) {
+function startProcess(name: string, command: string, args: string[], cwd: string, _logFile: string) {
   log(`Starting ${name}...`);
   const child = spawn(command, args, {
     cwd,
@@ -149,7 +149,7 @@ function checkInbox(): number {
   }
 }
 
-async function sendTelegram(msg: string): Promise<void> {
+export async function sendTelegram(msg: string): Promise<void> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!botToken || !chatId) return;
