@@ -94,3 +94,25 @@ Before this sprint, config values were inline in `all-runner.ts` and could not b
 - Type safety (oddsFormat, timeframe)
 - Malformed input (wrong types, NaN, non-arrays)
 - Per-strategy spot checks
+
+## Update (Oct 13, 14:50 UTC): `max_concurrent` and `cooldown_ms` finding
+
+**Investigation result:** `riskParams()` is called ONLY in tests, never in
+production code. The `all-runner.ts` scanner does not invoke `riskParams()`
+on any strategy — it calls `scan()` and processes the returned alerts.
+
+This means:
+1. The TOML keys `max_concurrent` and `cooldown_ms` are not consumed at runtime.
+2. The hardcoded `riskParams()` values in each strategy are ALSO not consumed
+   at runtime.
+3. These values would only matter if an execution layer checked them before
+   placing trades. No such execution layer exists — the system is alert-only
+   / paper-trading.
+
+**Disposition:** Wiring TOML into `riskParams()` would be cosmetic — it would
+make tests pass with TOML-derived values but would not change any runtime
+behavior. This is documented as low-priority engineering debt. When a live
+execution layer is added, the wiring should be done at that point, reading
+from TOML via the existing `buildStrategyConfigs()` infrastructure.
+
+**Priority downgrade:** P4 (was P3) — deferred until execution layer exists.
