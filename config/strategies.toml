@@ -1,47 +1,50 @@
 # Strategy parameters — adjustable at runtime via re-deploy.
+# 32 strategies total (22 original + 10 migrated from scripts-explore)
+
+# ═══ ORIGINAL STRATEGIES (Briefs 01-03) ═══
 
 [perp_funding]
-min_spread_apr    = 0.08      # 8% APR minimum to fire
-max_position_usd  = 4000      # 40% of $10k working cap
+min_spread_apr    = 0.08
+max_position_usd  = 4000
 max_concurrent    = 2
 cooldown_ms       = 60000
 gas_price_cap_mult = 3.0
 long_venues       = ["pacifica", "paradex"]
 short_venues      = ["hyperliquid", "dydx"]
-use_vooi_executor = true      # use VOOI atomic paired-leg execution
+use_vooi_executor = true
 
-[dex_cex]
-min_edge_bps      = 30        # 30 bps minimum
-max_position_usd  = 5000      # use flashloans to lever up beyond working cap
+[cex_hl_funding_arb]
+min_spread_apr    = 0.05
+max_position_usd  = 5000
+max_concurrent    = 2
+cooldown_ms       = 60000
+
+[dex_cex_flashloan]
+min_edge_bps      = 30
+max_position_usd  = 5000
 max_concurrent    = 3
 cooldown_ms       = 30000
-gas_price_cap_mult = 3.0
-use_flashloan     = true
 flashloan_provider = "aave-v3"
 chains_active     = ["arbitrum", "base"]
 use_flashbots     = true
 
 [dex_dex]
 min_edge_bps      = 15
-max_position_usd  = 8000      # flashloan-powered
+max_position_usd  = 8000
 max_concurrent    = 3
 cooldown_ms       = 30000
 chains_active     = ["arbitrum", "base", "solana"]
-use_flashloan     = true
 
 [prediction_arb]
 min_divergence_pct = 3.0
 max_position_usd  = 2000
 max_concurrent    = 2
 capital_lock_days_max = 30
-platforms         = ["polymarket", "azuro", "overtime", "zeitgeist", "manifold"]
 
 [sports_arb]
 min_edge_pct      = 1.0
 max_position_usd  = 500
 max_concurrent    = 5
-sharp_books       = ["pinnacle", "circa"]
-soft_books        = ["draftkings", "fanduel", "betmgm", "betus"]
 
 [mev_backrun]
 min_profit_usd    = 1
@@ -50,3 +53,134 @@ max_concurrent    = 5
 chains_active     = ["solana", "arbitrum", "bsc"]
 use_jito_bundles  = true
 use_flashbots     = true
+
+[hl_spot_basis]
+min_basis_bps     = 20
+max_position_usd  = 5000
+max_concurrent    = 2
+cooldown_ms       = 60000
+
+[hlp_yield]
+min_entry_apr_pct = 15
+warning_apr_pct   = -5
+timeframe         = "week"
+
+[pendle_boros]
+min_yield_pct     = 5
+max_position_usd  = 10000
+max_concurrent    = 3
+
+[pt_yield_arb]
+min_spread_pct    = 1.0
+max_position_usd  = 10000
+max_concurrent    = 3
+
+[pt_khype_yield_arb]
+min_spread_pct    = 1.0
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[lst_yield_comparison]
+min_yield_pct     = 3.0
+max_position_usd  = 10000
+max_concurrent    = 3
+
+[euler_lending_arb]
+min_spread_pct    = 2.0
+max_position_usd  = 10000
+max_concurrent    = 3
+
+[tokenized_equity]
+min_spread_pct    = 2.0
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[equity_perp_cross_venue]
+min_spread_pct    = 2.0
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[hl_amm_arb]
+min_edge_bps      = 20
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[hl_lst_arb]
+min_spread_pct    = 1.0
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[gold_arb]
+min_spread_pct    = 0.5
+max_position_usd  = 10000
+max_concurrent    = 2
+
+[cross_dex_arb]
+min_edge_bps      = 15
+max_position_usd  = 8000
+max_concurrent    = 3
+
+[precompile_flashloan_arb]
+min_edge_bps      = 20
+max_position_usd  = 10000
+max_concurrent    = 2
+chains_active     = ["hyperevm"]
+
+[cexlike_dex_price_arb]
+min_edge_bps      = 25
+max_position_usd  = 5000
+max_concurrent    = 2
+
+[solana_memecoin_arb]
+min_edge_bps      = 50
+max_position_usd  = 500
+max_concurrent    = 3
+
+# ═══ NEW STRATEGIES (migrated from scripts-explore) ═══
+
+[defillama_yield]
+min_apy_pct       = 5.0
+min_tvl_usd       = 1000000
+stablecoin_only   = true
+no_il_risk_only   = true
+max_results       = 50
+
+[rwa_treasury]
+min_tvl_usd       = 1000000
+include_institutional_credit = true
+
+[stablecoin_depeg]
+min_depeg_pct     = 0.3
+major_depeg_pct   = 2.0
+
+[liquidation_backrun]
+cascade_funding_threshold = 100
+squeeze_funding_threshold = 500
+min_oi_usd        = 500000
+
+[orderbook_imbalance]
+coins             = ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "UNI", "AAVE", "CRV"]
+imbalance_threshold = 0.30
+wall_threshold_usd = 500000
+liquidity_range_pct = 1.0
+
+[funding_divergence]
+min_divergence_pct = 20
+min_extreme_oi_usd = 1000000
+extreme_funding_threshold = 50
+
+[airdrop_farming]
+min_total_return_pct = 10
+
+[leverage_loop]
+min_spread_pct    = 0.5
+max_leverage      = 5
+
+[whale_signal]
+min_vol_oi_ratio  = 0.5
+min_tvl_change_pct = 5.0
+min_protocol_tvl  = 5000000
+
+[cex_dex_bridge]
+min_spread_pct    = 0.05
+coins             = ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "UNI", "AAVE", "CRV"]
