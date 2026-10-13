@@ -148,6 +148,7 @@ async function scanOnce(state: AlertState): Promise<{ fired: number; extreme: nu
     if (spike) spikes++;
 
     // Extreme funding
+    if (m.oi < 500_000) continue;  // skip low-OI markets (false positive prevention)
     const isExtremePositive = m.fundingAnnual >= 100;
     const isExtremeNegative = m.fundingAnnual <= -50;
     if (isExtremePositive || isExtremeNegative) extreme++;
