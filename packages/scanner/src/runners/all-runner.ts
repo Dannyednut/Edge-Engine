@@ -89,59 +89,88 @@ async function main() {
   const vooi   = new VooiClient({ apiToken: cfg.apis.vooi?.apiToken });
   const pump   = new PumpApiClient({ publicKey: process.env.AGENT_SOLANA_ADDRESS || undefined });
 
+  // ─── Config-driven strategy params ────────────────────────────────
+  // Every strategy reads its tunable thresholds from config/strategies.toml
+  // (loaded by loadConfig() above). Structural fields (venue lists, name
+  // mappings, platform list) remain inline because they only change when
+  // we add/remove a venue — not tunable "parameters".
+  //
+  // Helper: read a strategy section with typed fallbacks.
+  const strat = (name: string): Record<string, unknown> => cfg.strategies[name] ?? {};
+  const num   = (s: Record<string, unknown>, k: string, fallback: number): number =>
+    typeof s[k] === 'number' ? (s[k] as number) : fallback;
+  const str   = (s: Record<string, unknown>, k: string, fallback: string): string =>
+    typeof s[k] === 'string' ? (s[k] as string) : fallback;
+  const bool  = (s: Record<string, unknown>, k: string, fallback: boolean): boolean =>
+    typeof s[k] === 'boolean' ? (s[k] as boolean) : fallback;
+  const strArr = (s: Record<string, unknown>, k: string, fallback: string[]): string[] =>
+    Array.isArray(s[k]) ? (s[k] as string[]) : fallback;
+
+  // Default venue sets (structural — not in TOML)
+  const CEX_VENUES = ['binance', 'okx', 'bybit', 'mexc', 'gate'];
+  const DEX_VENUES = ['uniswap-v3', 'aerodrome', 'camelot', 'sushiswap'];
+  const FLASHLOAN_CHAINS = ['arbitrum', 'base', 'optimism', 'polygon', 'ethereum'];
+  const VOOI_VENUE_SET = ['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate'];
+
   // Strategy 1: perp funding (any venue)
+  const perpFundingCfg = strat('perp_funding');
   const perpFunding = new PerpFundingStrategy(sharpe, vooi, {
-    minSpreadApr: 0.08,
-    longVenues: ['pacifica', 'paradex', 'binance', 'okx', 'bybit', 'mexc', 'gate', 'hyperliquid'],
-    shortVenues: ['hyperliquid', 'dydx', 'binance', 'okx', 'bybit', 'mexc', 'gate'],
-    useVooiExecutor: !!cfg.apis.vooi?.apiToken,
-    vooiVenueSet: ['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate'],
+    minSpreadApr: num(perpFundingCfg, 'min_spread_apr', 0.08),
+    longVenues: strArr(perpFundingCfg, 'long_venues', ['pacifica', 'paradex', ...CEX_VENUES, 'hyperliquid']),
+    shortVenues: strArr(perpFundingCfg, 'short_venues', ['hyperliquid', 'dydx', ...CEX_VENUES]),
+    useVooiExecutor: bool(perpFundingCfg, 'use_vooi_executor', !!cfg.apis.vooi?.apiToken),
+    vooiVenueSet: VOOI_VENUE_SET,
   });
 
   // Strategy 2: CEX-HL funding arb
+  const cexHlCfg = strat('cex_hl_funding_arb');
   const cexHlArb = new CexHlFundingArbStrategy(sharpe, vooi, {
-    minNetApr: 0.05,
-    cexVenues: ['binance', 'okx', 'bybit', 'mexc', 'gate'],
+    minNetApr: num(cexHlCfg, 'min_spread_apr', 0.05),
+    cexVenues: CEX_VENUES,
     hlVenueName: 'Hyperliquid',
     useVooiExecutor: !!cfg.apis.vooi?.apiToken,
-    vooiVenueSet: ['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate'],
+    vooiVenueSet: VOOI_VENUE_SET,
     autoExecute: false,
-    maxNotionalUsd: 5000,
+    maxNotionalUsd: num(cexHlCfg, 'max_position_usd', 5000),
     minHlFundingApr: 0.02,
   });
 
   // Strategy 3: DEX-CEX flashloan
+  const dexCexCfg = strat('dex_cex_flashloan');
   const dexCexFlashloan = new DexCexFlashloanStrategy(sharpe, {
-    minGrossSpreadPct: 0.5,
-    maxSizeUsd: 50_000,
-    cexVenues: ['binance', 'okx', 'bybit', 'mexc', 'gate'],
-    dexVenues: ['uniswap-v3', 'aerodrome', 'camelot', 'sushiswap'],
-    flashloanChains: ['arbitrum', 'base', 'optimism', 'polygon', 'ethereum'],
-    useBalancer: true,
+    minGrossSpreadPct: num(dexCexCfg, 'min_edge_bps', 30) / 100,  // bps → pct
+    maxSizeUsd: num(dexCexCfg, 'max_position_usd', 50_000),
+    cexVenues: CEX_VENUES,
+    dexVenues: DEX_VENUES,
+    flashloanChains: strArr(dexCexCfg, 'chains_active', FLASHLOAN_CHAINS),
+    useBalancer: bool(dexCexCfg, 'use_flashbots', true),  // balancer avail whenever flashloan provider present
     useAaveFallback: true,
   });
 
   // Strategy 4: Solana memecoin arb
+  const solanaCfg = strat('solana_memecoin_arb');
   const solanaArb = new SolanaMultiAmmArbStrategy(pump, {
-    minSpreadPct: 0.008,
-    maxSizeUsd: 200,
+    minSpreadPct: num(solanaCfg, 'min_edge_bps', 50) / 100 / 10,  // bps → pct (legacy factor)
+    maxSizeUsd: num(solanaCfg, 'max_position_usd', 200),
     minBurnedLiquidity: 0.5,
     minBondingCurveDepthSol: 10,
-    watchlistMints: [],  // empty = discovery mode (not yet implemented)
+    watchlistMints: [],
   });
 
   // Strategy 5: Prediction market arb
+  const predCfg = strat('prediction_arb');
   const predictionArb = new PredictionArbStrategy({
-    minDivergencePct: 3.0,
-    maxSizeUsd: 2000,
-    maxCapitalLockDays: 30,
+    minDivergencePct: num(predCfg, 'min_divergence_pct', 3.0),
+    maxSizeUsd: num(predCfg, 'max_position_usd', 2000),
+    maxCapitalLockDays: num(predCfg, 'capital_lock_days_max', 30),
     platforms: ['polymarket'],
   });
 
   // Strategy 6: Sportsbook arb
+  const sportsCfg = strat('sports_arb');
   const sportsArb = new SportsArbStrategy(process.env.ODDS_API_KEY || undefined, {
-    minArbPct: 1.0,
-    maxSizeUsd: 500,
+    minArbPct: num(sportsCfg, 'min_edge_pct', 1.0),
+    maxSizeUsd: num(sportsCfg, 'max_position_usd', 500),
     sports: ['americanfootball_nfl', 'basketball_nba', 'soccer_epl'],
     regions: ['us', 'uk', 'eu'],
     oddsFormat: 'decimal',
@@ -149,27 +178,30 @@ async function main() {
   });
 
   // Strategy 7: Pendle Boros funding rate swap arb
+  const borosCfg = strat('pendle_boros');
   const pendleBoros = new PendleBorosScanner({
-    minSpreadApr: 0.5,
-    maxSizeUsd: 5000,
-    minNotionalOI: 50_000,        // raised from $10k → $50k (filter illiquid)
-    minVolume24h: 100_000,        // NEW: require $100k 24h volume
-    minDaysToMaturity: 7,         // NEW: skip markets expiring <7d
-    minSpreadPersistence: 2,      // NEW: require spread to hold 2+ scans
+    minSpreadApr: num(borosCfg, 'min_yield_pct', 0.5),
+    maxSizeUsd: num(borosCfg, 'max_position_usd', 5000),
+    minNotionalOI: 50_000,
+    minVolume24h: 100_000,
+    minDaysToMaturity: 7,
+    minSpreadPersistence: 2,
     platforms: [],
   });
 
   // Strategy 8: Tokenized equity arb (monitoring-only on Backpack)
+  const eqCfg = strat('tokenized_equity');
   const tokenizedEquity = new TokenizedEquityScanner({
-    minActionableSpreadPct: 2.0,
+    minActionableSpreadPct: num(eqCfg, 'min_spread_pct', 2.0),
     minActionableDepthUsd: 500,
     markets: ['SPCX.US_USDC', 'SNDK.US_USDC'],
   });
 
   // Strategy 9: CEX-like DEX price spread arb (VOOI)
+  const cexLikeCfg = strat('cexlike_dex_price_arb');
   const cexLikeDexArb = new CexLikeDexPriceArbStrategy(vooi, {
-    minPriceSpreadPct: 0.5,
-    maxSizeUsd: 5000,
+    minPriceSpreadPct: num(cexLikeCfg, 'min_edge_bps', 25) / 100,
+    maxSizeUsd: num(cexLikeCfg, 'max_position_usd', 5000),
     minOpenInterest: 10_000,
     minVolume24h: 100_000,
     venues: [],
@@ -177,62 +209,71 @@ async function main() {
   });
 
   // Strategy 10: HL AMM vs orderbook arb
+  const hlAmmCfg = strat('hl_amm_arb');
   const hlAmmArb = new HlAmmArbScanner({
-    minSpreadPct: 0.1,
+    minSpreadPct: num(hlAmmCfg, 'min_edge_bps', 20) / 100,
     minPoolLiquidityUsd: 100,
-    maxSizeUsd: 5000,
+    maxSizeUsd: num(hlAmmCfg, 'max_position_usd', 5000),
   });
 
   // Strategy 11: HL LST (kHYPE/WHYPE) carry arb
+  const hlLstCfg = strat('hl_lst_arb');
   const hlLstArb = new HlLstArbScanner({
-    minDiscountPct: 0.1,
-    maxSizeUsd: 5000,
+    minDiscountPct: num(hlLstCfg, 'min_spread_pct', 0.1),
+    maxSizeUsd: num(hlLstCfg, 'max_position_usd', 5000),
     preferredFeeTier: 100,
   });
 
   // Strategy 12: Tokenized gold (PAXG vs XAUT)
+  const goldCfg = strat('gold_arb');
   const goldArb = new GoldArbScanner({
-    minSpreadPct: 0.3,
-    maxSizeUsd: 10_000,
+    minSpreadPct: num(goldCfg, 'min_spread_pct', 0.3),
+    maxSizeUsd: num(goldCfg, 'max_position_usd', 10_000),
   });
 
   // Strategy 13: Equity perp cross-venue (HL HIP-3 ↔ Backpack)
+  const eqXvCfg = strat('equity_perp_cross_venue');
   const equityPerpCrossVenue = new EquityPerpCrossVenueScanner({
-    minSpreadPct: 0.5,
-    maxSizeUsd: 2_000,
+    minSpreadPct: num(eqXvCfg, 'min_spread_pct', 0.5),
+    maxSizeUsd: num(eqXvCfg, 'max_position_usd', 2_000),
   });
 
   // Strategy 14: LST yield comparison (kHYPE vs vkHYPE vs stHYPE etc.)
+  const lstYieldCfg = strat('lst_yield_comparison');
   const lstYield = new LstYieldComparisonScanner({
-    minYieldSpreadPct: 1.0,
-    minTvlUsd: 1_000_000,
+    minYieldSpreadPct: num(lstYieldCfg, 'min_yield_pct', 1.0),
+    minTvlUsd: num(lstYieldCfg, 'max_position_usd', 1_000_000),
   });
 
   // Strategy 15: PT-kHYPE fixed vs floating yield arb
+  const ptKhypeCfg = strat('pt_khype_yield_arb');
   const ptKhypeArb = new PtKhypeYieldArbScanner({
-    minYieldSpreadPct: 1.0,
+    minYieldSpreadPct: num(ptKhypeCfg, 'min_spread_pct', 1.0),
     khypeFloatingYieldApr: 2.28,
-    maxSizeUsd: 5_000,
+    maxSizeUsd: num(ptKhypeCfg, 'max_position_usd', 5_000),
   });
 
   // Strategy 16: PT yield arb across ALL HL LSTs (broader coverage)
+  const ptYieldCfg = strat('pt_yield_arb');
   const ptYieldArb = new PtYieldArbScanner({
-    minYieldSpreadPct: 3.0,
+    minYieldSpreadPct: num(ptYieldCfg, 'min_spread_pct', 3.0),
     minTvlUsd: 500_000,
     maxImpliedApyPct: 50,
     khypeFloatingYieldApr: 2.37,
   });
 
   // Strategy 17: Euler HL lending arb (cross-vault rate spreads)
+  const eulerCfg = strat('euler_lending_arb');
   const eulerLendingArb = new EulerLendingArbScanner({
-    minSpreadPct: 1.0,
+    minSpreadPct: num(eulerCfg, 'min_spread_pct', 1.0),
     minLiquidityUsd: 50_000,
-    maxSizeUsd: 5_000,
+    maxSizeUsd: num(eulerCfg, 'max_position_usd', 5_000),
   });
 
-  // Strategy 18: HL spot vs perp basis arb (tokenized equities + crypto spot pairs)
+  // Strategy 18: HL spot vs perp basis arb
+  const hlSpotCfg = strat('hl_spot_basis');
   const hlSpotBasis = new HlSpotBasisScanner({
-    minBasisPct: 0.5,
+    minBasisPct: num(hlSpotCfg, 'min_basis_bps', 20) / 100,
     minVolume24h: 100_000,
     perpNameMapping: {
       'AVAX0': 'AVAX', 'BTC0': 'BTC', 'ETH0': 'ETH', 'SOL0': 'SOL',
@@ -240,60 +281,61 @@ async function main() {
     },
   });
 
-  // Strategy 19: HLP vault yield monitor (entry/exit signals)
+  // Strategy 19: HLP vault yield monitor
+  const hlpCfg = strat('hlp_yield');
   const hlpYield = new HlpYieldScanner({
-    minEntryAprPct: 15.0,
-    warningAprPct: -5.0,
-    timeframe: 'week',
+    minEntryAprPct: num(hlpCfg, 'min_entry_apr_pct', 15.0),
+    warningAprPct: num(hlpCfg, 'warning_apr_pct', -5.0),
+    timeframe: str(hlpCfg, 'timeframe', 'week') as 'day' | 'week' | 'month',
   });
 
   // ─── New strategies (migrated from scripts-explore) ────────────────
   const defiLlamaYield = new DefiLlamaYieldScanner({
-    minApyPct: 5.0,
-    minTvlUsd: 1_000_000,
-    stablecoinOnly: true,
-    noIlRiskOnly: true,
-    maxResults: 50,
+    minApyPct: num(strat('defillama_yield'), 'min_apy_pct', 5.0),
+    minTvlUsd: num(strat('defillama_yield'), 'min_tvl_usd', 1_000_000),
+    stablecoinOnly: bool(strat('defillama_yield'), 'stablecoin_only', true),
+    noIlRiskOnly: bool(strat('defillama_yield'), 'no_il_risk_only', true),
+    maxResults: num(strat('defillama_yield'), 'max_results', 50),
   });
   const rwaTreasury = new RwaTreasuryScanner({
-    minTvlUsd: 1_000_000,
-    includeInstitutionalCredit: true,
+    minTvlUsd: num(strat('rwa_treasury'), 'min_tvl_usd', 1_000_000),
+    includeInstitutionalCredit: bool(strat('rwa_treasury'), 'include_institutional_credit', true),
   });
   const stablecoinDepeg = new StablecoinDepegScanner({
-    minDepegPct: 0.3,
-    majorDepegPct: 2.0,
+    minDepegPct: num(strat('stablecoin_depeg'), 'min_depeg_pct', 0.3),
+    majorDepegPct: num(strat('stablecoin_depeg'), 'major_depeg_pct', 2.0),
   });
   const liquidationBackrun = new LiquidationBackrunScanner({
-    cascadeFundingThreshold: 100,
-    squeezeFundingThreshold: 500,
-    minOiUsd: 500_000,
+    cascadeFundingThreshold: num(strat('liquidation_backrun'), 'cascade_funding_threshold', 100),
+    squeezeFundingThreshold: num(strat('liquidation_backrun'), 'squeeze_funding_threshold', 500),
+    minOiUsd: num(strat('liquidation_backrun'), 'min_oi_usd', 500_000),
   });
   const orderbookImbalance = new OrderbookImbalanceScanner({
-    coins: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV'],
-    imbalanceThreshold: 0.30,
-    wallThresholdUsd: 500_000,
-    liquidityRangePct: 1.0,
+    coins: strArr(strat('orderbook_imbalance'), 'coins', ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV']),
+    imbalanceThreshold: num(strat('orderbook_imbalance'), 'imbalance_threshold', 0.30),
+    wallThresholdUsd: num(strat('orderbook_imbalance'), 'wall_threshold_usd', 500_000),
+    liquidityRangePct: num(strat('orderbook_imbalance'), 'liquidity_range_pct', 1.0),
   });
   const fundingDivergence = new FundingDivergenceScanner({
-    minDivergencePct: 20,
-    minExtremeOiUsd: 1_000_000,
-    extremeFundingThreshold: 50,
+    minDivergencePct: num(strat('funding_divergence'), 'min_divergence_pct', 20),
+    minExtremeOiUsd: num(strat('funding_divergence'), 'min_extreme_oi_usd', 1_000_000),
+    extremeFundingThreshold: num(strat('funding_divergence'), 'extreme_funding_threshold', 50),
   });
   const airdropFarming = new AirdropFarmingScanner({
-    minTotalReturnPct: 10,
+    minTotalReturnPct: num(strat('airdrop_farming'), 'min_total_return_pct', 10),
   });
   const leverageLoop = new LeverageLoopScanner({
-    minSpreadPct: 0.5,
-    maxLeverage: 5,
+    minSpreadPct: num(strat('leverage_loop'), 'min_spread_pct', 0.5),
+    maxLeverage: num(strat('leverage_loop'), 'max_leverage', 5),
   });
   const whaleSignal = new WhaleSignalScanner({
-    minVolOiRatio: 0.5,
-    minTvlChangePct: 5.0,
-    minProtocolTvl: 5_000_000,
+    minVolOiRatio: num(strat('whale_signal'), 'min_vol_oi_ratio', 0.5),
+    minTvlChangePct: num(strat('whale_signal'), 'min_tvl_change_pct', 5.0),
+    minProtocolTvl: num(strat('whale_signal'), 'min_protocol_tvl', 5_000_000),
   });
   const cexDexBridge = new CexDexBridgeScanner({
-    minSpreadPct: 0.05,
-    coins: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV'],
+    minSpreadPct: num(strat('cex_dex_bridge'), 'min_spread_pct', 0.05),
+    coins: strArr(strat('cex_dex_bridge'), 'coins', ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV']),
   });
 
   console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis, hlp_yield, defillama_yield, rwa_treasury, stablecoin_depeg, liquidation_backrun, orderbook_imbalance, funding_divergence, airdrop_farming, leverage_loop, whale_signal, cex_dex_bridge]`);
