@@ -1,25 +1,30 @@
 # CI Status
 
-## Current state: CI ENABLED (as of Oct 13, 2026, 14:26 UTC)
+## Current state: CI PASSING (as of Oct 13, 2026)
 
-**GitHub Actions CI is now enabled.** The `.github/workflows/` gitignore
-entry has been removed and the workflow file has been pushed (commit
-`0764a68`). The Principal granted `workflow` scope to the PAT, resolving
-the prior blocker.
+**GitHub Actions CI is enabled and passing.** The workflow runs on every
+push/PR to `main` and executes: install, workspace build, scanner
+typecheck, scanner build, and the full vitest suite.
 
-## History
+## Resolution history (Oct 13, 2026)
 
-### Prior blocker (resolved Oct 13, 2026)
+Four issues were resolved in sequence to get CI green:
 
-Two compounding issues previously prevented CI from running:
+### 1. `.github/workflows/` was gitignored (commit `0764a68`)
+- **Cause:** Prior commit `694c60e` added `.github/workflows/` to `.gitignore` as a workaround because the PAT lacked `workflow` scope.
+- **Fix:** Principal granted `workflow` scope to the PAT. Removed the gitignore entry and pushed `ci.yml`.
 
-1. `.github/workflows/` was gitignored (added in commit `694c60e` as a
-   workaround so that non-workflow commits could push).
-2. The GitHub PAT lacked the `workflow` scope, so pushes containing
-   workflow files would be rejected by GitHub.
+### 2. pnpm version conflict — ERR_PNPM_BAD_PM_VERSION (commit `49aa2a3`)
+- **Cause:** `pnpm/action-setup@v4` specified `version: 12` while `package.json` specified `packageManager: pnpm@12.6.0`.
+- **Fix:** Removed the `version` key from the workflow — `pnpm/action-setup@v4` reads `packageManager` from `package.json` automatically.
 
-**Resolution:** The Principal granted `workflow` scope to the PAT.
-Commit `0764a68` removed the gitignore entry and pushed `ci.yml`.
+### 3. Blocked build scripts — ERR_PNPM_IGNORED_BUILDS (commits `3786a7a`, `4f6477c`)
+- **Cause:** pnpm v12 blocks dependency build scripts by default for security. The 3 affected packages (`bufferutil`, `ccxt`, `esbuild`) need postinstall scripts.
+- **Fix:** Added `onlyBuiltDependencies` and `dangerouslyAllowAllBuilds: true` to `pnpm-workspace.yaml`, plus `--config.strict-build-check=false` on the install command.
+
+### 4. Module resolution — Cannot find module @edge/* (commit `5612586`)
+- **Cause:** `tsc --noEmit` in `@edge/scanner` could not resolve `@edge/types`, `@edge/alerts`, etc. because the workspace packages hadn't been built (no `.d.ts` files).
+- **Fix:** Added `pnpm -r build` step after install, before scanner typecheck. This builds all 13 workspace packages in dependency order.
 
 ## Current workflow
 
@@ -40,26 +45,22 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - uses: pnpm/action-setup@v4
-        with: { version: 12 }
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --config.strict-build-check=false
+      - run: pnpm -r build
       - run: pnpm --filter @edge/scanner typecheck
       - run: pnpm --filter @edge/scanner build
       - run: npx vitest run
 ```
 
-This runs on every push/PR to `main`:
-1. Install dependencies (pnpm, frozen lockfile)
-2. Typecheck the scanner package
-3. Build the scanner package
-4. Run the full vitest suite
-
 ## Reproducible local verification (equivalent to CI)
 
 ```bash
 cd edge-engine
-./node_modules/.bin/tsc --noEmit -p packages/scanner/tsconfig.json   # typecheck
-./node_modules/.bin/tsc -p packages/scanner/tsconfig.json            # build
-npx vitest run                                                       # tests
+pnpm install --frozen-lockfile
+pnpm -r build
+pnpm --filter @edge/scanner typecheck
+pnpm --filter @edge/scanner build
+npx vitest run
 ```
 
 ## Security note
@@ -69,3 +70,4 @@ risk — anyone with access to the repo config can extract it. The
 Principal should rotate the PAT and configure the remote using a
 credential helper or `gh auth login` instead of embedding it in the URL.
 This is tracked as security debt.
+
