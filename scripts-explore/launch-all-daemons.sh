@@ -57,9 +57,10 @@ start_daemon risk-dashboard scripts-explore/risk-dashboard-v2.mts
 start_daemon wallet-funding-alert scripts-explore/wallet-funding-alert.mts
 start_daemon realtime-spread-monitor scripts-explore/realtime-spread-monitor.mts
 start_daemon khype-timeseries packages/scanner/src/runners/khype-timeseries.ts
+start_daemon limusd-monitor packages/scanner/src/runners/limusd-monitor.ts
 
 echo ""
-echo "All 10 daemons started. Check logs/ for output."
+echo "All 11 daemons started. Check logs/ for output."
 echo "Stop all: pkill -f 'tsx'"
 echo ""
 echo "NOTE: daemon-supervisor.sh should be started separately to auto-restart"
