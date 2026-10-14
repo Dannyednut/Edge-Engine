@@ -126,11 +126,68 @@ export class HlAmmArbScanner implements Strategy {
     return alerts;
   }
 
+  /**
+   * Pure function that resolves base-token names from a spot universe and
+   * builds a price map keyed by the CORRECT base token name.
+   *
+   * This is extracted from getHlOrderbookPrices() so it can be unit-tested
+   * with fixture data without making live API calls. EI-012 regression
+   * tests verify that @N pairs resolve via universe[i].tokens[0] (NOT
+   * via the @N pair ID as a token-array index).
+   *
+   * @param spotMeta - Raw [meta, ctxs] from spotMetaAndAssetCtxs
+   * @param allMids - Map from fetchAllMids()
+   * @returns Map of base-token-name → trusted price
+   */
+  static resolveHlOrderbookPrices(
+    spotMeta: any,
+    allMids: Map<string, number>,
+  ): Map<string, number> {
+    const prices = new Map<string, number>();
+    if (!spotMeta) return prices;
+
+    const result = normalizeSpotPrices(spotMeta, allMids);
+    const spotData = spotMeta as any[];
+    const meta = spotData[0];
+    const ctxs = spotData[1];
+    const tokens = meta?.tokens || [];
+    const universe = meta?.universe || [];
+
+    for (let i = 0; i < universe.length; i++) {
+      const m = universe[i];
+      const pairName = m.name || '';
+      if (!pairName) continue;
+
+      const vol = parseFloat(ctxs[i]?.dayNtlVlm || '0');
+      if (vol < 1000) continue;
+
+      // Use the normalized price (trusted only)
+      const normalized = result.prices.get(pairName);
+      if (!normalized || !normalized.trusted || normalized.price <= 0) continue;
+
+      // Resolve token name for @-pairs using the universe entry's
+      // base-token index (NOT the @N pair ID, which is neither a token
+      // index nor the universe index). This matches the pattern in
+      // hl-spot-price-normalizer.ts and fixes EI-012.
+      let name = pairName;
+      if (name.startsWith('@')) {
+        const baseTokenIdx = m.tokens?.[0];
+        if (baseTokenIdx !== undefined && baseTokenIdx < tokens.length) {
+          name = tokens[baseTokenIdx].name || name;
+        } else {
+          // Cannot resolve base token — skip (fail closed)
+          continue;
+        }
+      }
+      prices.set(name, normalized.price);
+    }
+    return prices;
+  }
+
   /** Query HL spot orderbook prices for all listed tokens.
    *  Uses the normalizer to cross-validate @-pair ctx markPx against allMids
    *  (EI-S004 fix: @-pair ctx markPx can be corrupted). */
   private async getHlOrderbookPrices(): Promise<Map<string, number>> {
-    const prices = new Map<string, number>();
     try {
       const [spotMeta, allMids] = await Promise.all([
         fetch('https://api.hyperliquid.xyz/info', {
@@ -141,43 +198,19 @@ export class HlAmmArbScanner implements Strategy {
         fetchAllMids(),
       ]);
 
-      if (!spotMeta) return prices;
+      if (!spotMeta) return new Map();
 
       const result = normalizeSpotPrices(spotMeta, allMids);
       if (result.fallbackCount > 0 || result.rejectedCount > 0) {
         console.log(`[hl_amm_arb] price normalization: ${result.trustedCount} trusted, ${result.fallbackCount} fallback, ${result.rejectedCount} rejected`);
       }
 
-      const spotData = spotMeta as any[];
-      const meta = spotData[0];
-      const ctxs = spotData[1];
-      const tokens = meta?.tokens || [];
-      const universe = meta?.universe || [];
-
-      for (let i = 0; i < universe.length; i++) {
-        const m = universe[i];
-        const pairName = m.name || '';
-        if (!pairName) continue;
-
-        const vol = parseFloat(ctxs[i]?.dayNtlVlm || '0');
-        if (vol < 1000) continue;
-
-        // Use the normalized price (trusted only)
-        const normalized = result.prices.get(pairName);
-        if (!normalized || !normalized.trusted || normalized.price <= 0) continue;
-
-        // Resolve token name for @-pairs
-        let name = pairName;
-        if (name.startsWith('@')) {
-          const idx = parseInt(name.slice(1));
-          if (idx < tokens.length) name = tokens[idx].name || name;
-        }
-        prices.set(name, normalized.price);
-      }
+      // Delegate to the pure static method (testable, no live API)
+      return HlAmmArbScanner.resolveHlOrderbookPrices(spotMeta, allMids);
     } catch (err) {
       console.warn('[hl_amm_arb] failed to get HL prices:', err);
+      return new Map();
     }
-    return prices;
   }
 
   /** Query UniswapV2 pool reserves via HyperEVM RPC. */
