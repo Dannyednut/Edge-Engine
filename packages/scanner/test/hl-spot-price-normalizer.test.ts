@@ -9,7 +9,7 @@
  * and hl_allmids_final_*.json
  */
 import { describe, it, expect } from 'vitest';
-import { normalizeSpotPrices } from '../src/strategies/hl-spot-price-normalizer.js';
+import { normalizeSpotPrices, parseAllMidsResponse } from '../src/strategies/hl-spot-price-normalizer.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -287,5 +287,176 @@ describe('hl-spot-price-normalizer — markPx vs midPx distinction', () => {
     expect(np.source).toBe('allmids');
     expect(np.ctxPrice).toBeCloseTo(0.081882, 9);
     expect(np.allMidsPrice).toBeCloseTo(80.8905, 9);
+  });
+});
+
+// ─── parseAllMidsResponse tests ─────────────────────────────────────
+
+describe('parseAllMidsResponse — live response shape', () => {
+  // The actual live allMids response (verified 2026-10-14 07:28Z) is a
+  // FLAT top-level map, NOT wrapped in { mids: {...} }.
+  // The old code read resp.mids which returned undefined → empty map →
+  // all normalizer fallbacks silently failed.
+
+  it('parses a flat top-level map (the actual live shape)', () => {
+    const liveResp = {
+      '@107': '81.9725',
+      '@166': '0.999145',
+      '@285': '0.0200915',
+      '@336': '84.135',
+      '@109': '0.00025755',
+      '@144': '0.000146',
+      '#102220': '0.0012',
+      'HYPE': '81.9455',
+      'PURR': '0.11152',
+    };
+    const mids = parseAllMidsResponse(liveResp);
+    expect(mids.size).toBe(9);
+    expect(mids.get('@107')).toBeCloseTo(81.9725, 9);
+    expect(mids.get('@166')).toBeCloseTo(0.999145, 9);
+    expect(mids.get('@336')).toBeCloseTo(84.135, 9);
+    expect(mids.get('HYPE')).toBeCloseTo(81.9455, 9);
+    expect(mids.get('PURR')).toBeCloseTo(0.11152, 9);
+  });
+
+  it('contains @107, @166, @336 reference values from a live-like payload', () => {
+    const liveResp = {
+      '@107': '81.97',
+      '@166': '0.999',
+      '@336': '84.10',
+    };
+    const mids = parseAllMidsResponse(liveResp);
+    expect(mids.has('@107')).toBe(true);
+    expect(mids.has('@166')).toBe(true);
+    expect(mids.has('@336')).toBe(true);
+    expect(mids.get('@107')!).toBeGreaterThan(80);
+    expect(mids.get('@166')!).toBeGreaterThan(0.99);
+    expect(mids.get('@166')!).toBeLessThan(1.01);
+  });
+
+  it('also handles the wrapped shape { mids: {...} } for backward compat', () => {
+    // Some SDKs or older docs may wrap the response
+    const wrappedResp = {
+      mids: {
+        '@107': '81.97',
+        'HYPE': '81.95',
+      },
+    };
+    const mids = parseAllMidsResponse(wrappedResp);
+    expect(mids.size).toBe(2);
+    expect(mids.get('@107')).toBeCloseTo(81.97, 9);
+    expect(mids.get('HYPE')).toBeCloseTo(81.95, 9);
+  });
+
+  it('handles numeric values (not just strings)', () => {
+    const numericResp = {
+      '@107': 81.97,
+      'HYPE': 81.95,
+    };
+    const mids = parseAllMidsResponse(numericResp);
+    expect(mids.size).toBe(2);
+    expect(mids.get('@107')).toBeCloseTo(81.97, 9);
+  });
+});
+
+describe('parseAllMidsResponse — malformed/edge cases', () => {
+  it('returns empty map for null', () => {
+    expect(parseAllMidsResponse(null).size).toBe(0);
+  });
+
+  it('returns empty map for undefined', () => {
+    expect(parseAllMidsResponse(undefined).size).toBe(0);
+  });
+
+  it('returns empty map for empty object', () => {
+    expect(parseAllMidsResponse({}).size).toBe(0);
+  });
+
+  it('returns empty map for array (wrong type)', () => {
+    expect(parseAllMidsResponse(['81.97', '0.999']).size).toBe(0);
+  });
+
+  it('returns empty map for string (wrong type)', () => {
+    expect(parseAllMidsResponse('not a response').size).toBe(0);
+  });
+
+  it('filters out invalid prices (zero, negative, NaN, Infinity)', () => {
+    const malformedResp = {
+      '@107': '81.97',      // valid
+      '@166': '0',          // zero — filtered
+      '@285': '-1.5',       // negative — filtered
+      '@336': 'NaN',        // NaN — filtered
+      '@109': 'Infinity',   // Infinity — filtered
+      '@144': 'abc',        // non-numeric — filtered
+      'HYPE': '81.95',      // valid
+    };
+    const mids = parseAllMidsResponse(malformedResp);
+    expect(mids.size).toBe(2);  // only @107 and HYPE
+    expect(mids.has('@107')).toBe(true);
+    expect(mids.has('HYPE')).toBe(true);
+    expect(mids.has('@166')).toBe(false);
+    expect(mids.has('@285')).toBe(false);
+    expect(mids.has('@336')).toBe(false);
+  });
+
+  it('filters out non-string/non-number values', () => {
+    const weirdResp = {
+      '@107': '81.97',
+      '@166': { nested: 'object' },
+      '@285': [1, 2, 3],
+      '@336': null,
+      '@109': true,
+    };
+    const mids = parseAllMidsResponse(weirdResp);
+    expect(mids.size).toBe(1);  // only @107
+    expect(mids.has('@107')).toBe(true);
+  });
+
+  it('does NOT treat an empty parsed map as a successful response', () => {
+    // An empty map means no reference prices available. The normalizer
+    // must mark @-pair ctx prices as untrusted (rejected), not silently
+    // accept them. This is tested in the normalizer tests above
+    // ("@-pair with no allMids reference: marked untrusted").
+    const emptyResp = {};
+    const mids = parseAllMidsResponse(emptyResp);
+    expect(mids.size).toBe(0);
+    // The caller (fetchAllMids) logs a warning when size===0, and the
+    // normalizer rejects all @-pair ctx prices when allMids is empty.
+  });
+});
+
+describe('parseAllMidsResponse — ensures untrusted @-pair ctx is never silently accepted', () => {
+  it('when allMids is empty, @-pair ctx price is rejected (not silently accepted)', () => {
+    // This is the critical safety property: if the allMids reference is
+    // unavailable (empty map from a failed/malformed API response), the
+    // normalizer must NOT fall back to trusting the corrupted ctx price.
+    // It must mark it as untrusted (rejected).
+    const spotMeta = buildSpotMeta([
+      { name: '@107', markPx: '0.081882', tokens: ['HYPE', 'USDC'] },
+    ]);
+    const emptyAllMids = new Map<string, number>();  // empty — simulates API failure
+    const result = normalizeSpotPrices(spotMeta, emptyAllMids);
+    const np = result.prices.get('@107')!;
+    expect(np.trusted).toBe(false);
+    expect(np.source).toBe('ctx');  // ctx price is the only source, but it's untrusted
+    expect(np.rejectReason).toContain('no allMids reference');
+    expect(result.rejectedCount).toBe(1);
+    expect(result.trustedCount).toBe(0);
+    expect(result.fallbackCount).toBe(0);
+  });
+
+  it('when allMids has the reference, corrupted ctx price falls back to allMids', () => {
+    // Contrast with above: when allMids IS available, the corrupted ctx
+    // price is detected and the allMids value is used instead.
+    const spotMeta = buildSpotMeta([
+      { name: '@107', markPx: '0.081882', tokens: ['HYPE', 'USDC'] },
+    ]);
+    const allMids = buildAllMids({ '@107': 81.97 });
+    const result = normalizeSpotPrices(spotMeta, allMids);
+    const np = result.prices.get('@107')!;
+    expect(np.trusted).toBe(true);
+    expect(np.source).toBe('allmids');
+    expect(np.price).toBeCloseTo(81.97, 9);
+    expect(result.fallbackCount).toBe(1);
   });
 });

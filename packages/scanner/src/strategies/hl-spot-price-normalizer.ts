@@ -84,18 +84,85 @@ async function hlInfo(req: any): Promise<any> {
 }
 
 /**
- * Fetch allMids and return a Map keyed by asset name.
+ * Parse the raw `allMids` API response into a Map of asset → price.
+ *
+ * The Hyperliquid REST API for `type: allMids` returns a **flat top-level
+ * map** of asset names to price strings. Verified live on 2026-10-14:
+ * the response is a JSON object whose keys are asset identifiers (@N for
+ * spot pairs, #N for perps, or bare names like 'PURR', 'HYPE') and whose
+ * values are price strings.
+ *
+ * Example response shape (live, 2026-10-14 07:28Z):
+ *   {
+ *     "@107": "81.9725",
+ *     "@166": "0.999145",
+ *     "#102220": "0.0012",
+ *     "HYPE": "81.9455",
+ *     "PURR": "0.11152",
+ *     ...
+ *   }
+ *
+ * This is a PURE function — no network access, no side effects. It can be
+ * unit-tested with fixture payloads.
+ *
+ * @param resp - The raw parsed JSON response from the allMids endpoint
+ * @returns Map of asset name → numeric price (only valid positive finite prices)
+ */
+export function parseAllMidsResponse(resp: unknown): Map<string, number> {
+  const mids = new Map<string, number>();
+
+  // The live response is a flat top-level map. Some older documentation
+  // or SDKs may wrap it in { mids: {...} }, so handle both shapes.
+  let midsObj: Record<string, unknown> | null = null;
+
+  if (resp && typeof resp === 'object' && !Array.isArray(resp)) {
+    const r = resp as Record<string, unknown>;
+    if (r.mids && typeof r.mids === 'object' && !Array.isArray(r.mids)) {
+      // Wrapped shape: { mids: { ... } }
+      midsObj = r.mids as Record<string, unknown>;
+    } else {
+      // Flat shape (the actual live response): { "@107": "81.97", ... }
+      // Check if any key looks like an asset identifier
+      const keys = Object.keys(r);
+      if (keys.length > 0 && keys.some(k => typeof r[k] === 'string' || typeof r[k] === 'number')) {
+        midsObj = r;
+      }
+    }
+  }
+
+  if (!midsObj) return mids;
+
+  for (const [key, val] of Object.entries(midsObj)) {
+    // Prices can be strings ("81.9725") or numbers (81.9725)
+    const px = typeof val === 'string' ? parseFloat(val) : typeof val === 'number' ? val : NaN;
+    if (px > 0 && isFinite(px)) {
+      mids.set(key, px);
+    }
+  }
+
+  return mids;
+}
+
+/**
+ * Fetch allMids from the Hyperliquid API and return a Map keyed by asset name.
  * For spot @-pairs, the key is `@N` (e.g. `@107`).
- * For perps, the key is the perp name (e.g. `HYPE`).
+ * For perps, the key is the perp name (e.g. `HYPE`) or `#N`.
+ *
+ * Returns an EMPTY map if the API is unreachable or the response is malformed.
+ * Callers should check the map size — an empty map means no reference prices
+ * are available, and @-pair ctx prices will be marked untrusted (rejected).
  */
 export async function fetchAllMids(): Promise<Map<string, number>> {
-  const mids = new Map<string, number>();
   const resp = await hlInfo({ type: 'allMids' });
-  if (!resp?.mids) return mids;
-  for (const [key, val] of Object.entries(resp.mids)) {
-    const px = parseFloat(val as string);
-    if (px > 0 && isFinite(px)) mids.set(key, px);
+  const mids = parseAllMidsResponse(resp);
+
+  if (mids.size === 0) {
+    // Log when we get an empty map — this means the parser couldn't extract
+    // any prices, which indicates either an API failure or a response shape
+    // change that the parser doesn't handle.
+    console.warn(`[hl-normalizer] fetchAllMids: parsed 0 prices from allMids response (resp type=${typeof resp}, keys=${resp && typeof resp === 'object' ? Object.keys(resp).length : 'N/A'})`);
   }
+
   return mids;
 }
 
