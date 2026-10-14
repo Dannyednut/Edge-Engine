@@ -23,6 +23,7 @@
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
+import { normalizeSpotPrices, fetchAllMids } from './hl-spot-price-normalizer.js';
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 
@@ -81,17 +82,26 @@ export class HlSpotBasisScanner implements Strategy {
   async scan(): Promise<HlSpotBasisAlert[]> {
     const alerts: HlSpotBasisAlert[] = [];
 
-    // 1. Fetch spot meta + perp meta in parallel
-    const [spotMeta, perpMeta] = await Promise.all([
+    // 1. Fetch spot meta + perp meta + allMids in parallel
+    const [spotMeta, perpMeta, allMids] = await Promise.all([
       hlInfo({ type: 'spotMetaAndAssetCtxs' }),
       hlInfo({ type: 'metaAndAssetCtxs' }),
+      fetchAllMids(),
     ]);
     if (!spotMeta || !perpMeta) return alerts;
 
     const [spotUniverse, spotCtxs] = spotMeta;
     const [perpUniverse, perpCtxs] = perpMeta;
 
-    // Build perp name → price map
+    // Normalize spot prices against allMids (EI-S004 fix: @-pair ctx markPx
+    // can be corrupted; cross-validate against allMids before use)
+    const spotNormalization = normalizeSpotPrices(spotMeta, allMids);
+    if (spotNormalization.fallbackCount > 0 || spotNormalization.rejectedCount > 0) {
+      console.log(`[hl_spot_basis] spot price normalization: ${spotNormalization.trustedCount} trusted, ${spotNormalization.fallbackCount} allMids fallback, ${spotNormalization.rejectedCount} rejected`);
+    }
+
+    // Build perp name → price map (perp metaAndAssetCtxs is NOT affected by
+    // the @-pair defect — that was specific to spotMetaAndAssetCtxs)
     const perpPrices = new Map<string, number>();
     for (let i = 0; i < perpUniverse.universe.length; i++) {
       const u = perpUniverse.universe[i];
@@ -113,10 +123,17 @@ export class HlSpotBasisScanner implements Strategy {
       if (!u.name?.startsWith('@')) continue;
 
       const ctx = spotCtxs[i] || {};
-      const spotPrice = parseFloat(ctx.markPx || '0');
       const vol24h = parseFloat(ctx.dayNtlVlm || '0');
 
-      if (spotPrice <= 0) continue;
+      // Get normalized (trusted) spot price — falls back to allMids if ctx
+      // markPx is corrupted, or skips if no trusted price is available
+      const normalized = spotNormalization.prices.get(u.name);
+      if (!normalized || !normalized.trusted || normalized.price <= 0) {
+        // Price untrusted — skip this pair (do not publish garbage)
+        continue;
+      }
+      const spotPrice = normalized.price;
+
       if (vol24h < this.params.minVolume24h) continue;
 
       const baseToken = tokenNames.get(u.tokens[0]) || '?';

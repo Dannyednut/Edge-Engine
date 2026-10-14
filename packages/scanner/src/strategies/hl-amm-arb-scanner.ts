@@ -15,6 +15,7 @@
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { HYPERSWAP_V2_POOLS, HL_TOKEN_DECIMALS, HYPEREVM_RPC } from '../lib/hyperliquid-defi.js';
+import { normalizeSpotPrices, fetchAllMids } from './hl-spot-price-normalizer.js';
 
 export interface HlAmmArbParams {
   /** Min price spread % between AMM and orderbook (default 0.5%) */
@@ -125,34 +126,53 @@ export class HlAmmArbScanner implements Strategy {
     return alerts;
   }
 
-  /** Query HL spot orderbook prices for all listed tokens. */
+  /** Query HL spot orderbook prices for all listed tokens.
+   *  Uses the normalizer to cross-validate @-pair ctx markPx against allMids
+   *  (EI-S004 fix: @-pair ctx markPx can be corrupted). */
   private async getHlOrderbookPrices(): Promise<Map<string, number>> {
     const prices = new Map<string, number>();
     try {
-      const res = await fetch('https://api.hyperliquid.xyz/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'spotMetaAndAssetCtxs' }),
-      });
-      const data = await res.json() as any[];
-      const meta = data[0];
-      const ctxs = data[1];
-      const tokens = meta.tokens || [];
-      const universe = meta.universe || [];
+      const [spotMeta, allMids] = await Promise.all([
+        fetch('https://api.hyperliquid.xyz/info', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'spotMetaAndAssetCtxs' }),
+        }).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetchAllMids(),
+      ]);
+
+      if (!spotMeta) return prices;
+
+      const result = normalizeSpotPrices(spotMeta, allMids);
+      if (result.fallbackCount > 0 || result.rejectedCount > 0) {
+        console.log(`[hl_amm_arb] price normalization: ${result.trustedCount} trusted, ${result.fallbackCount} fallback, ${result.rejectedCount} rejected`);
+      }
+
+      const spotData = spotMeta as any[];
+      const meta = spotData[0];
+      const ctxs = spotData[1];
+      const tokens = meta?.tokens || [];
+      const universe = meta?.universe || [];
 
       for (let i = 0; i < universe.length; i++) {
         const m = universe[i];
-        const ctx = ctxs[i] || {};
-        const markPx = parseFloat(ctx.markPx || '0');
-        const vol = parseFloat(ctx.dayNtlVlm || '0');
-        if (markPx > 0 && vol > 1000) {
-          let name = m.name || '';
-          if (name.startsWith('@')) {
-            const idx = parseInt(name.slice(1));
-            if (idx < tokens.length) name = tokens[idx].name || name;
-          }
-          prices.set(name, markPx);
+        const pairName = m.name || '';
+        if (!pairName) continue;
+
+        const vol = parseFloat(ctxs[i]?.dayNtlVlm || '0');
+        if (vol < 1000) continue;
+
+        // Use the normalized price (trusted only)
+        const normalized = result.prices.get(pairName);
+        if (!normalized || !normalized.trusted || normalized.price <= 0) continue;
+
+        // Resolve token name for @-pairs
+        let name = pairName;
+        if (name.startsWith('@')) {
+          const idx = parseInt(name.slice(1));
+          if (idx < tokens.length) name = tokens[idx].name || name;
         }
+        prices.set(name, normalized.price);
       }
     } catch (err) {
       console.warn('[hl_amm_arb] failed to get HL prices:', err);

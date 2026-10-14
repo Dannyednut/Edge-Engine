@@ -92,7 +92,39 @@ export class DefiLlamaYieldScanner implements Strategy {
       const pools = j?.data || [];
 
       for (const p of pools) {
-        // Apply filters
+        // ── EI-S004 data-quality filters ────────────────────────────
+        // 1. Exclude trading vaults — poolMeta containing "Vault" indicates
+        //    an annualized trading-vault PnL, not a deposit yield.
+        //    Evidence: growihf pool 90c0b5b5… has poolMeta="Hyperliquid
+        //    Vault", APY 50.8%, but apyBase=null, apyPct1D=-32.45pts,
+        //    outlier=true — it's a trading strategy, not lending.
+        const poolMeta = String(p.poolMeta || '');
+        if (poolMeta.toLowerCase().includes('vault')) {
+          continue;
+        }
+        // 2. Exclude outlier pools — DefiLlama marks these as statistically
+        //    anomalous (prediction Down, extreme 1d swings). These are not
+        //    reliable deposit yields.
+        if (p.outlier === true) {
+          continue;
+        }
+        // 3. Require apyBase non-null for yield pools — apyBase is the
+        //    base APR from the protocol's yield mechanism. When null, the
+        //    "APY" is often a trading-vault PnL or a transient reward that
+        //    cannot be relied upon. This excludes legitimate categories
+        //    (see documentation below) but prevents misclassification.
+        //    EXCLUDED CATEGORIES (documented, accepted trade-off):
+        //    - Pure reward-token farms with no base yield (apyBase=null,
+        //      apyReward>0) — these are incentive emissions, not yield.
+        //    - Trading vaults that report only total PnL as "APY".
+        //    - New pools with insufficient history for apyBase calculation.
+        //    LEGITIMATE pools that still pass: those with apyBase>0 from
+        //    lending/borrowing spread, staking rewards, or PT fixed yield.
+        if (p.apyBase === null || p.apyBase === undefined) {
+          continue;
+        }
+
+        // Apply existing filters
         if (this.params.stablecoinOnly && !p.stablecoin) continue;
         if (this.params.noIlRiskOnly && p.ilRisk !== 'no') continue;
         if ((p.apy || 0) < this.params.minApyPct) continue;
