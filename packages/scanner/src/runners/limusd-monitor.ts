@@ -64,13 +64,24 @@ const STATE_FILE = resolve(DATA_DIR, 'monitor-state.json');
 const POLL_INTERVAL_MS = Number(process.env.LIMUSD_POLL_INTERVAL_SEC ?? 600) * 1000; // 10 min default
 
 // ─── Verified contract identities (EI-S006, re-checked 2026-10-14) ──
-const LIMUSD_ADDR    = '0x1822bd335489d84abdd0779a7dcaeda0625e83c8';  // underlying, 18 dec
-const PT_LIMUSD_ADDR = '0x6b7cea9d070bbffd8205f256897319139cdef399';  // PT token, 6 dec
-const SY_LIMUSD_ADDR = '0xcf6b4c156f51818922b98524dc832e352f40d516';  // SY token, 18 dec
-const MARKET_ADDR    = '0xfc93d1ada3277e6274c3905db0a2c81ac1252025';  // Pendle market
-const NAV_ORACLE_ADDR= '0x47f8d4847f528C18Ea5A6dcb9E0940F6b2977CA7';
-const REDEMPTION_PIPE_ADDR = '0x2E8c1256356e261150120a384d95DC0d0D00ae29';
-const USDC_ADDR      = '0xb88339CB7199b77E23DB6E890353E22632Ba630f';  // 6 dec
+// Exported so tests can import and verify without duplicating literals.
+export const LIMUSD_ADDR    = '0x1822bd335489d84abdd0779a7dcaeda0625e83c8';  // underlying, 18 dec
+export const PT_LIMUSD_ADDR = '0x6b7cea9d070bbffd8205f256897319139cdef399';  // PT token, 6 dec
+export const SY_LIMUSD_ADDR = '0xcf6b4c156f51818922b98524dc832e352f40d516';  // SY token, 18 dec
+export const MARKET_ADDR    = '0xfc93d1ada3277e6274c3905db0a2c81ac1252025';  // Pendle market
+export const NAV_ORACLE_ADDR= '0x47f8d4847f528C18Ea5A6dcb9E0940F6b2977CA7';
+export const REDEMPTION_PIPE_ADDR = '0x2E8c1256356e261150120a384d95DC0d0D00ae29';
+export const USDC_ADDR      = '0xb88339CB7199b77E23DB6E890353E22632Ba630f';  // 6 dec
+
+// ─── Function selectors (keccak256, EI-S007 verified) ──────────────
+// Exported so tests can verify the exact selectors used by the monitor.
+// These were independently verified by EI-S007 at block 48527765:
+//   getNAV() = keccak256("getNAV()") = 0x0126c606
+//   expiry() = keccak256("expiry()") = 0xe184c9be
+// The previous selectors (0x41976e09, 0x96c8ef5d) were wrong and reverted
+// on every node — not an RPC outage.
+export const GETNAV_SELECTOR  = '0x0126c606';
+export const EXPIRY_SELECTOR  = '0xe184c9be';
 
 const LIMUSD_DECIMALS = 18;
 const PT_DECIMALS = 6;
@@ -317,40 +328,42 @@ async function collectOnce(): Promise<void> {
   }
   collecting = true;
 
-  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  console.log(`[limusd] collecting sample at ${ts}`);
+  // try/finally ensures the overlap flag is ALWAYS reset, even if an
+  // unexpected throw occurs mid-collection. Without this, a single
+  // unhandled error would permanently disable sampling.
+  try {
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    console.log(`[limusd] collecting sample at ${ts}`);
 
-  const state = loadState();
-  const alerts: string[] = [];
-  const readFailures: string[] = [];
+    const state = loadState();
+    const alerts: string[] = [];
+    const readFailures: string[] = [];
 
-  // 1. Block number
-  const blockNumber = await getBlockNumber();
-  if (blockNumber === null) readFailures.push('blockNumber');
+    // 1. Block number
+    const blockNumber = await getBlockNumber();
+    if (blockNumber === null) readFailures.push('blockNumber');
 
-  // 2. Token supplies (exact bigint)
-  const [limUsdSupply, ptSupply, sySupply] = await Promise.all([
-    getTotalSupplyBig(LIMUSD_ADDR),
-    getTotalSupplyBig(PT_LIMUSD_ADDR),
-    getTotalSupplyBig(SY_LIMUSD_ADDR),
-  ]);
+    // 2. Token supplies (exact bigint)
+    const [limUsdSupply, ptSupply, sySupply] = await Promise.all([
+      getTotalSupplyBig(LIMUSD_ADDR),
+      getTotalSupplyBig(PT_LIMUSD_ADDR),
+      getTotalSupplyBig(SY_LIMUSD_ADDR),
+    ]);
 
   if (limUsdSupply === null) readFailures.push('limUsdTotalSupply');
   if (ptSupply === null) readFailures.push('ptTotalSupply');
   if (sySupply === null) readFailures.push('syTotalSupply');
 
-  // 3. NAV from NAVOracle
-  // getNAV() selector — try the known selector
-  const navRaw = await getUint256(NAV_ORACLE_ADDR, '0x41976e09');
+  // 3. NAV from NAVOracle (EI-S007 corrected selector: 0x0126c606)
+  const navRaw = await getUint256(NAV_ORACLE_ADDR, GETNAV_SELECTOR);
   if (navRaw === null) readFailures.push('navOracle');
 
   // 4. RedemptionPipe USDC balance (direct balanceOf read)
   const redemptionBufferRaw = await getBalanceOfBig(USDC_ADDR, REDEMPTION_PIPE_ADDR);
   if (redemptionBufferRaw === null) readFailures.push('redemptionBuffer');
 
-  // 5. PT expiry (authoritative maturity, not DefiLlama label)
-  // expiry() selector — try 0x96c8ef5d (Pendle PT standard)
-  const ptExpiryRaw = await getUint256(PT_LIMUSD_ADDR, '0x96c8ef5d');
+  // 5. PT expiry (authoritative maturity, EI-S007 corrected selector: 0xe184c9be)
+  const ptExpiryRaw = await getUint256(PT_LIMUSD_ADDR, EXPIRY_SELECTOR);
   let ptExpiry: number | null = null;
   let ptMaturityDate: string | null = null;
   if (ptExpiryRaw !== null) {
@@ -458,7 +471,11 @@ async function collectOnce(): Promise<void> {
   saveState(state);
   console.log(`[limusd] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
-  collecting = false;
+  } finally {
+    // ALWAYS reset the overlap flag, even if an unexpected throw occurred.
+    // Without this, a single unhandled error would permanently disable sampling.
+    collecting = false;
+  }
 }
 
 async function main() {

@@ -14,17 +14,21 @@
  *   - WATCHLIST status preservation
  */
 import { describe, it, expect } from 'vitest';
+import {
+  LIMUSD_ADDR,
+  PT_LIMUSD_ADDR,
+  SY_LIMUSD_ADDR,
+  MARKET_ADDR,
+  NAV_ORACLE_ADDR,
+  REDEMPTION_PIPE_ADDR,
+  USDC_ADDR,
+  GETNAV_SELECTOR,
+  EXPIRY_SELECTOR,
+} from '../src/runners/limusd-monitor.js';
 
 // ─── Contract identity tests ────────────────────────────────────────
-// The monitor's constants must match the EI-S006 verified identities.
-
-const LIMUSD_ADDR    = '0x1822bd335489d84abdd0779a7dcaeda0625e83c8';
-const PT_LIMUSD_ADDR = '0x6b7cea9d070bbffd8205f256897319139cdef399';
-const SY_LIMUSD_ADDR = '0xcf6b4c156f51818922b98524dc832e352f40d516';
-const MARKET_ADDR    = '0xfc93d1ada3277e6274c3905db0a2c81ac1252025';
-const NAV_ORACLE_ADDR= '0x47f8d4847f528C18Ea5A6dcb9E0940F6b2977CA7';
-const REDEMPTION_PIPE_ADDR = '0x2E8c1256356e261150120a384d95DC0d0D00ae29';
-const USDC_ADDR      = '0xb88339CB7199b77E23DB6E890353E22632Ba630f';
+// Constants imported from the monitor module (not duplicated as literals)
+// so tests fail if the monitor's constants drift.
 
 describe('limUSD Monitor — contract identities (EI-S006 verified)', () => {
   it('limUSD underlying is 0x1822 (NOT the PT token)', () => {
@@ -308,5 +312,31 @@ describe('limUSD Monitor — WATCHLIST preservation', () => {
     const maturityEpoch = 1795651200; // 2026-11-26T00:00:00Z (EI-S006 verified)
     const now = Math.floor(Date.now() / 1000);
     expect(maturityEpoch).toBeGreaterThan(now);
+  });
+});
+
+// ─── Selector regression tests (EI-S007) ────────────────────────────
+// These tests verify the EXACT selector constants used by the monitor.
+// Selectors are imported from the module (not duplicated as literals)
+// so tests fail if the monitor's selectors drift.
+
+describe('limUSD Monitor — function selectors (EI-S007 verified)', () => {
+  it('getNAV() selector is 0x0126c606 (keccak256 verified)', () => {
+    // EI-S007 §2.1: keccak256("getNAV()") = 0x0126c606
+    // The previous selector 0x41976e09 was wrong and reverted on every node.
+    expect(GETNAV_SELECTOR).toBe('0x0126c606');
+    expect(GETNAV_SELECTOR).not.toBe('0x41976e09');
+  });
+
+  it('expiry() selector is 0xe184c9be (keccak256 verified)', () => {
+    // EI-S007 §2.1: keccak256("expiry()") = 0xe184c9be
+    // The previous selector 0x96c8ef5d was wrong and reverted on PT token.
+    expect(EXPIRY_SELECTOR).toBe('0xe184c9be');
+    expect(EXPIRY_SELECTOR).not.toBe('0x96c8ef5d');
+  });
+
+  it('selectors are 4-byte (8 hex chars) with 0x prefix', () => {
+    expect(GETNAV_SELECTOR).toMatch(/^0x[0-9a-f]{8}$/);
+    expect(EXPIRY_SELECTOR).toMatch(/^0x[0-9a-f]{8}$/);
   });
 });
