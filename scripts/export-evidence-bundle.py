@@ -84,10 +84,13 @@ def parse_ts(ts_str):
         sys.exit(1)
 
 def filter_window(obs_list, window_start_dt, ts_key='ts'):
+    """Filter observations to window. Fail on missing timestamps."""
     result = []
     for o in obs_list:
         ts_str = o.get(ts_key, '')
-        if not ts_str: continue
+        if not ts_str:
+            print(f"ERROR: observation missing '{ts_key}' field: {json.dumps(o)[:100]}", file=sys.stderr)
+            sys.exit(1)
         ts = parse_ts(ts_str)
         if ts >= window_start_dt:
             result.append(o)
@@ -111,7 +114,19 @@ def main():
     window_id = args.window_id
     window_start_str = args.window_start
     window_completion_str = args.window_completion
+    # Validate timestamps are UTC (must end with Z) — check BEFORE parsing
+    for label, ts_str in [('window_start', window_start_str), ('window_completion', window_completion_str)]:
+        if not ts_str.endswith('Z'):
+            print(f"ERROR: {label} must be UTC (end with 'Z'): '{ts_str}'", file=sys.stderr)
+            sys.exit(1)
+
     window_start_dt = parse_ts(window_start_str)
+    window_completion_dt = parse_ts(window_completion_str)
+
+    # Validate completion is after start
+    if window_completion_dt <= window_start_dt:
+        print(f"ERROR: window_completion ({window_completion_str}) must be after window_start ({window_start_str})", file=sys.stderr)
+        sys.exit(1)
 
     bundle_name = f'evidence-bundle-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}'
     bundle_dir = os.path.join(EXPORT_DIR, bundle_name)
@@ -155,15 +170,24 @@ def main():
             }
 
     # --- Read raw files from bundle for audit ---
+    # Fail closed on missing required observation files
+    required_files = ['limusd-observations.jsonl', 'khype-cadence-observations.jsonl', 'khype-defillama-observations.jsonl']
+    for req in required_files:
+        req_path = os.path.join(bundle_dir, req)
+        if not os.path.exists(req_path):
+            print(f"ERROR: required file missing from bundle: {req}", file=sys.stderr)
+            sys.exit(1)
+
     all_limusd = read_jsonl(os.path.join(bundle_dir, 'limusd-observations.jsonl'))
     all_cadence = read_jsonl(os.path.join(bundle_dir, 'khype-cadence-observations.jsonl'))
     all_defillama = read_jsonl(os.path.join(bundle_dir, 'khype-defillama-observations.jsonl'))
 
+    # Filter observations to the defined window only
     w_limusd = filter_window(all_limusd, window_start_dt)
     w_cadence = filter_window(all_cadence, window_start_dt)
     w_defillama = filter_window(all_defillama, window_start_dt)
 
-    # Validate window_start against first observation
+    # Validate window_start against first observation — FAIL if mismatch >5 min
     first_obs_ts = None
     if w_limusd:
         first_obs_ts = w_limusd[0]['ts']
@@ -175,7 +199,8 @@ def main():
     if first_obs_ts:
         first_dt = parse_ts(first_obs_ts)
         if abs((first_dt - window_start_dt).total_seconds()) > 300:  # 5 min tolerance
-            print(f"WARNING: window_start {window_start_str} differs from first observation {first_obs_ts} by >5 min", file=sys.stderr)
+            print(f"ERROR: window_start {window_start_str} differs from first observation {first_obs_ts} by >5 min", file=sys.stderr)
+            sys.exit(1)
 
     # Check LIMUSD data quality
     limusd_null = sum(1 for o in w_limusd for f in ['navRaw','sharePrice','ptExpiry'] if o.get(f) is None)
