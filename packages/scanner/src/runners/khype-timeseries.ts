@@ -183,100 +183,90 @@ function toPoolObservation(pool: any, selector: PoolSelector): PoolObservation {
   };
 }
 
-async function collectOnce(): Promise<void> {
+async function collectOnce(): Promise<boolean> {
   // Overlap guard — skip if a previous cycle is still running
   if (collecting) {
     console.warn(`[kHYPE] overlap: previous cycle still running, skipping`);
-    return;
+    return false;
   }
   collecting = true;
 
-  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const t0 = Date.now();
-  console.log(`[kHYPE] collecting sample at ${ts}`);
+  try {
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const t0 = Date.now();
+    console.log(`[kHYPE] collecting sample at ${ts}`);
 
-  const { pools, ok, error } = await fetchPools();
-  const fetchMs = Date.now() - t0;
+    const { pools, ok, error } = await fetchPools();
+    const fetchMs = Date.now() - t0;
 
-  if (!ok) {
-    console.error(`[kHYPE] fetch failed: ${error} (${fetchMs}ms)`);
-    // Record the failure in the JSONL so we can see gaps in the time-series
-    const failObs: Observation = {
-      ts,
-      source: 'defillama',
-      apiStatus: 'error',
-      fetchMs,
-      totalPoolsScanned: 0,
-      matchedPools: 0,
-      pools: [],
-      note: `fetch failed: ${error}`,
-    };
-    appendObservation(failObs);
-    collecting = false;
-    return;
-  }
-
-  if (pools.length === 0) {
-    console.warn(`[kHYPE] API returned 0 pools (${fetchMs}ms) — possible upstream issue`);
-    const emptyObs: Observation = {
-      ts,
-      source: 'defillama',
-      apiStatus: 'empty',
-      fetchMs,
-      totalPoolsScanned: 0,
-      matchedPools: 0,
-      pools: [],
-      note: 'API returned 0 pools',
-    };
-    appendObservation(emptyObs);
-    collecting = false;
-    return;
-  }
-
-  // Match pools and record full identity
-  const matched: PoolObservation[] = [];
-  // Track best (highest TVL) pool per label to avoid duplicates
-  const best = new Map<string, PoolObservation>();
-
-  for (const p of pools) {
-    const selector = matchPool(p);
-    if (!selector) continue;
-    const obs = toPoolObservation(p, selector);
-    const prev = best.get(obs.label);
-    if (!prev || obs.tvlUsd > prev.tvlUsd) {
-      best.set(obs.label, obs);
+    if (!ok) {
+      console.error(`[kHYPE] fetch failed: ${error} (${fetchMs}ms)`);
+      const failObs: Observation = {
+        ts, source: 'defillama', apiStatus: 'error', fetchMs,
+        totalPoolsScanned: 0, matchedPools: 0, pools: [],
+        note: `fetch failed: ${error}`,
+      };
+      const appendOk = appendObservation(failObs);
+      console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+      return appendOk;
     }
+
+    if (pools.length === 0) {
+      console.warn(`[kHYPE] API returned 0 pools (${fetchMs}ms) — possible upstream issue`);
+      const emptyObs: Observation = {
+        ts, source: 'defillama', apiStatus: 'empty', fetchMs,
+        totalPoolsScanned: 0, matchedPools: 0, pools: [],
+        note: 'API returned 0 pools',
+      };
+      const appendOk = appendObservation(emptyObs);
+      console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+      return appendOk;
+    }
+
+    const matched: PoolObservation[] = [];
+    const best = new Map<string, PoolObservation>();
+
+    for (const p of pools) {
+      const selector = matchPool(p);
+      if (!selector) continue;
+      const obs = toPoolObservation(p, selector);
+      const prev = best.get(obs.label);
+      if (!prev || obs.tvlUsd > prev.tvlUsd) {
+        best.set(obs.label, obs);
+      }
+    }
+
+    for (const v of best.values()) matched.push(v);
+
+    const observation: Observation = {
+      ts, source: 'defillama', apiStatus: 'ok', fetchMs,
+      totalPoolsScanned: pools.length, matchedPools: matched.length, pools: matched,
+    };
+
+    const appendSuccess = appendObservation(observation);
+    if (appendSuccess) {
+      console.log(`[kHYPE] sample saved: ${matched.length}/${pools.length} pools matched (${fetchMs}ms)`);
+      for (const p of matched) {
+        const apyStr = p.apy === null ? 'MISSING' : p.apy.toFixed(4) + '%';
+        console.log(`[kHYPE]   ${p.label}: ${apyStr} (TVL $${(p.tvlUsd / 1e6).toFixed(2)}M) [${p.symbol} @ ${p.project}/${p.chain}]`);
+      }
+    }
+    console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+    return appendSuccess;
+
+  } finally {
+    collecting = false;
   }
-
-  for (const v of best.values()) matched.push(v);
-
-  const observation: Observation = {
-    ts,
-    source: 'defillama',
-    apiStatus: 'ok',
-    fetchMs,
-    totalPoolsScanned: pools.length,
-    matchedPools: matched.length,
-    pools: matched,
-  };
-
-  appendObservation(observation);
-  console.log(`[kHYPE] sample saved: ${matched.length}/${pools.length} pools matched (${fetchMs}ms)`);
-  for (const p of matched) {
-    const apyStr = p.apy === null ? 'MISSING' : p.apy.toFixed(4) + '%';
-    console.log(`[kHYPE]   ${p.label}: ${apyStr} (TVL $${(p.tvlUsd / 1e6).toFixed(2)}M) [${p.symbol} @ ${p.project}/${p.chain}]`);
-  }
-  console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
-
-  collecting = false;
 }
 
-function appendObservation(obs: Observation): void {
+function appendObservation(obs: Observation): boolean {
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
     appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
+    return true;
   } catch (err: any) {
     console.error(`[kHYPE] FAILED to write observation: ${err?.message ?? err}`);
+    return false;
   }
 }
 
@@ -292,7 +282,11 @@ async function main() {
   console.log('═══════════════════════════════════════════════════');
 
   if (oneShot) {
-    await collectOnce();
+    const success = await collectOnce();
+    if (!success) {
+      console.error('[kHYPE] one-shot FAILED: observation not durably appended');
+      process.exit(1);
+    }
     console.log('[kHYPE] one-shot complete, exiting');
     process.exit(0);
   }

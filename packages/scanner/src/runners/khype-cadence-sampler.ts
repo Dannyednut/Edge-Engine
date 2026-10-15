@@ -266,13 +266,14 @@ export function commitCadenceObservation(
 
 let collecting = false;
 
-async function collectOnce(): Promise<void> {
+async function collectOnce(): Promise<boolean> {
   if (collecting) {
     console.warn(`[khype-cadence] overlap: previous cycle still running, skipping`);
-    return;
+    return false;
   }
   collecting = true;
 
+  let commitSuccess = false;
   try {
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     console.log(`[khype-cadence] collecting sample at ${ts}`);
@@ -373,14 +374,15 @@ async function collectOnce(): Promise<void> {
       lastTs: ts,
       rewardStep: rewardStepDetected,
     };
-    commitCadenceObservation(state, obs, staged);
+    commitSuccess = commitCadenceObservation(state, obs, staged);
 
     console.log(`[khype-cadence] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
   } finally {
-    // ALWAYS reset the overlap flag, even if an unexpected throw occurred.
     collecting = false;
   }
+
+  return commitSuccess;
 }
 
 async function main() {
@@ -401,7 +403,11 @@ async function main() {
   console.log('═══════════════════════════════════════════════════');
 
   if (oneShot) {
-    await collectOnce();
+    const success = await collectOnce();
+    if (!success) {
+      console.error('[khype-cadence] one-shot FAILED: observation not durably appended');
+      process.exit(1);
+    }
     console.log('[khype-cadence] one-shot complete, exiting');
     process.exit(0);
   }
