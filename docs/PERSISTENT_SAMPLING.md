@@ -214,32 +214,36 @@ Always run `pkill -f 'tsx'` before re-launching.
 
 ## D. 24-hour runtime acceptance test (P3)
 
-### Corrected monitor acceptance window
-- **Start timestamp:** 2026-10-14T16:36:56Z (first corrected observation)
-- **Deployed commit:** `7448155` (EI-S007 selector fix)
-- **Nominal completion:** 2026-10-15T16:36:56Z
-- **Status:** PENDING — window not yet fully elapsed at time of writing
+### Acceptance window history
 
-### Obsolete window (does NOT count)
-The previous window starting 2026-10-14T14:05:59Z at commit `bc55dba`
-does NOT count because the monitor's NAV and expiry reads were broken
-at that time. Only the corrected monitor (commit `7448155`+) produces
-valid acceptance evidence.
+**Window 1 (COMPROMISED):**
+- Start: 2026-10-14T16:36:56Z (commit `7448155`, corrected monitor)
+- Gap: 2026-10-14T18:47:59Z → 2026-10-15T04:51:31Z (~10 hours)
+- Cause: Daemons died during session boundary; restarted on 2026-10-15T04:51Z
+- Verdict: FAIL — gap exceeds 60-minute threshold. Window does NOT count.
+
+**Window 2 (CURRENT — in progress):**
+- Start: 2026-10-15T04:51:31Z (first observation after restart)
+- Deployed commit: `7afc07d`
+- Nominal completion: 2026-10-16T04:51:31Z
+- Status: PENDING — accumulating observations
+
+### Session-boundary limitation
+The Manager's attended session may end at any time. When the session ends,
+the daemons continue running via `setsid` but the Manager cannot verify
+this without a live session. If a gap is detected on the next session,
+the window is restarted from the first post-gap observation per the
+documented protocol. A successful 24h window requires uninterrupted
+daemon operation across session boundaries.
 
 ### Pass criteria
-1. Daemon uptime evidence (no gaps > 60 minutes in observation timestamps
-   without an explicit restart log entry)
+1. No gaps > 60 minutes in observation timestamps without an explicit
+   restart log entry
 2. Timestamped observations across the full 24h window from raw JSONL
-   records (not summary counts)
-3. All observations have non-null NAV/share-price/expiry fields
+3. All LIMUSD observations have non-null NAV/share-price/expiry fields
 4. `readFailures` accurately reports any problems
 5. No duplicate-worker evidence
 6. All read failures recorded (not hidden)
-
-### Gap handling
-If continuity breaks, state the gap, restart, and qualify the acceptance
-window accordingly. A successful first sample does not prove a successful
-24-hour run.
 
 ### Evidence paths
 - LIMUSD observations: `data/limusd-study/observations.jsonl`
@@ -248,12 +252,6 @@ window accordingly. A successful first sample does not prove a successful
 - kHYPE cadence observations: `data/khope-study/cadence-observations.jsonl`
 - kHYPE logs: `logs/khype-timeseries.log`, `logs/khype-cadence-sampler.log`
 - Supervisor log: `logs/daemon-supervisor.log`
-
-### Session-boundary limitation
-The Manager's attended session may end before 24 hours elapse. The
-daemons continue running in the background (via `setsid`), but the
-Manager cannot verify this without a live session. The next session
-should check the JSONL files and log timestamps to confirm continuity.
 
 ---
 
