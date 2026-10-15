@@ -157,15 +157,22 @@ DAEMONS array. PID files in `run/<name>.pid`.
 **Window 5 (INVALIDATED):** Start `2026-10-15T07:07:46Z`. Controlled restart at `07:18:37Z` (code update to working tree subsequently committed as `5b6d376`).
 **Window 6 (INVALIDATED):** Start `2026-10-15T07:18:37Z`. Container restart at ~08:01 UTC killed all processes. Not a controlled restart — the host environment restarted.
 **Window 7 (INVALIDATED):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Environment restart between sessions killed all processes. Not a controlled restart.
-**Window 8 (CURRENT):** Start 2026-10-15T12:22:09Z (confirmed from ps -eo lstart). HEAD at start: 5d58e46 (docs-only from 5b6d376, no daemon source affected). Nominal completion: 2026-10-16T12:22:09Z. Status: PENDING.
+**Window 8 (CURRENT):**
+  - Container restart: `2026-10-15T12:08:21Z` (tini PID 1 start)
+  - Launcher invocation: ~`2026-10-15T12:21:48Z`
+  - Wrapper process start: `2026-10-15T12:21:50Z` (both samplers, from `ps -eo lstart`)
+  - tsx child process start: `2026-10-15T12:21:50Z` (same second)
+  - First LIMUSD observation: `2026-10-15T12:21:52Z` (block 48607077)
+  - First kHYPE cadence observation: `2026-10-15T12:21:52Z` (block 48607077)
+  - First kHYPE DefiLlama observation: `2026-10-15T12:21:53Z`
+  - **Acceptance start (conservative):** `2026-10-15T12:21:52Z` (first observation)
+  - Manager-reported loaded revision: `5d58e46` (HEAD at process start; `1844ab5` committed 19s later, docs-only; `5d58e46` is docs-only from CI-verified `5b6d376` — no daemon source change. Manager-reported; no contemporaneous tree hash recorded.)
+  - Nominal completion: `2026-10-16T12:21:52Z`
+  - Status: PENDING
 
 Note: Window 1 was compromised by an observation gap (~10h). Windows 2–5
-were invalidated by controlled restarts for code updates. Window 6 was
-invalidated by an environment/container restart (~08:01 UTC) that killed
-all processes. Window 7 was invalidated by an environment restart between
-sessions. Window 8 is the current window. The daemons loaded commit
-`f7aeb04` (docs-only change from CI-verified `5b6d376` — no daemon source
-code affected). The latest repository commit at the time of writing is `f7aeb04` (also docs-only).
+were invalidated by controlled restarts for code updates. Windows 6–7
+were invalidated by environment/container restarts. Window 8 is current.
 
 Startup/commit claim qualification (Window 6):
   Process start: 2026-10-15T07:18:37Z (ps -eo lstart)
@@ -194,6 +201,63 @@ Startup/commit claim qualification (Window 6):
 - Evidence bundles: `/home/z/my-project/download/evidence-bundle-*.tar.gz`
 
 ---
+
+## F. Environment restart diagnosis
+
+### Root cause
+The Z.ai sandbox container is ephemeral. The container init process
+(`tini`, PID 1) is restarted between Manager sessions or when the
+platform reclaims resources. All background processes — including
+`setsid`-forked daemons — are killed when the container stops.
+
+### Evidence
+- Window 6→7 transition: tini restarted at ~08:01 UTC (Oct 15)
+- Window 7→8 transition: tini restarted at 12:08:21 UTC (Oct 15)
+- Both transitions killed all `tsx` daemon processes
+- The `setsid` double-fork keeps processes alive within a session but
+  cannot survive container restart
+
+### Impact on 24h acceptance
+A 24-hour acceptance window requires uninterrupted daemon operation.
+The current environment cannot guarantee this. Windows 1–7 were all
+invalidated by either observation gaps (W1), controlled restarts (W2–5),
+or environment restarts (W6–7). Window 8 is the current attempt but
+faces the same limitation.
+
+---
+
+## G. Persistent-host deployment plan (proposed, not deployed)
+
+If a 24h uninterrupted window is required, a persistent host is needed.
+The following plan is proposed for Principal approval — do not deploy
+or incur cost without explicit authorization.
+
+### Option A: External VM (recommended)
+- Provision a small Linux VM (e.g., t3.micro, ~$8/mo) on AWS/GCP
+- Install Node.js 22+, clone the repo, run `pnpm install`
+- Run `launch-all-daemons.sh` + `daemon-supervisor.sh` as systemd services
+- Use systemd's `Restart=always` for automatic recovery
+- Persistent disk for `data/` and `logs/` (survives VM restart)
+- Cron job to push evidence bundles to a shared location (S3/GitHub)
+- Manager connects via SSH to check status and export evidence
+
+### Option B: GitHub Actions scheduled workflow
+- Create a GitHub Actions workflow that runs every 30 minutes
+- Each run: checkout repo, run samplers once, append to GitHub Artifacts
+- No persistent process needed — GitHub Actions is the scheduler
+- Limitation: 30-minute minimum interval, 6-hour max per job, 2000 min/mo free tier
+- Evidence stored as GitHub Artifacts (90-day retention)
+
+### Option C: Keep current environment with documented limitation
+- Accept that 24h windows cannot be achieved in the ephemeral container
+- Document this as a known limitation
+- Use shorter validation windows (e.g., maximum session duration ~4h)
+- Accumulate evidence across sessions with explicit gap markers
+
+### Recommendation
+Option A (external VM) is the most reliable for 24h acceptance.
+Option C is the zero-cost fallback. The Principal should decide which
+option to pursue. No deployment without explicit approval.
 
 ## E. Manager-reported vs independently-verified evidence
 
