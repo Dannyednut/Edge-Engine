@@ -451,9 +451,8 @@ function shouldAlert(state: MonitorState, alertKey: string): boolean {
   return (Date.now() - last) >= ALERT_COOLDOWN_MS;
 }
 
-function recordAlert(state: MonitorState, alertKey: string): void {
-  state.lastAlertTime[alertKey] = Date.now();
-}
+// Legacy: recordAlert is no longer used — cooldowns are now staged
+// in stagedCooldowns and committed only after successful append.
 
 // Legacy: recordPreexisting is no longer used — replaced by evaluateBufferTransition
 // which implements true OK↔BREACH transition tracking.
@@ -525,9 +524,10 @@ async function collectOnce(): Promise<void> {
   }
 
   // 8. Redemption buffer alert (true transition-based, EI-S008 §A)
-  // STAGE state changes — do NOT mutate state directly. Commit only after append.
+  // STAGE all state changes — commit only after append.
   let redemptionBufferUsd: number | null = null;
   let stagedBufferBreachActive = state.bufferBreachActive; // staged copy
+  const stagedCooldowns: Record<string, number> = {}; // staged cooldown updates
   if (redemptionBufferRaw !== null) {
     redemptionBufferUsd = Number(redemptionBufferRaw) / 1e6;
     const bufferResult = evaluateBufferTransition(redemptionBufferUsd, state);
@@ -537,14 +537,15 @@ async function collectOnce(): Promise<void> {
   } else {
     // RPC read failed — distinguish from a true zero balance
     // Apply cooldown to read-failed alerts (does NOT suppress buffer transitions)
+    // STAGE the cooldown — do NOT mutate state.lastAlertTime directly
     if (shouldAlert(state, 'redemption_buffer_read_failed')) {
       alerts.push(`Redemption buffer RPC read FAILED (not zero — distinguish from real zero)`);
-      recordAlert(state, 'redemption_buffer_read_failed');
+      stagedCooldowns['redemption_buffer_read_failed'] = Date.now();
     }
   }
 
   // 9. Share-price daily decline alert (time-aware, EI-S008 §B)
-  // Apply 1h cooldown to share-price decline alerts
+  // Apply 1h cooldown to share-price decline alerts — STAGE the cooldown
   let dailyDeclinePct: number | null = null;
   if (sharePrice) {
     const declineResult = evaluateSharePriceDecline(
@@ -552,13 +553,13 @@ async function collectOnce(): Promise<void> {
     );
     if (declineResult.alerts.length > 0 && shouldAlert(state, 'share_price_decline')) {
       alerts.push(...declineResult.alerts);
-      recordAlert(state, 'share_price_decline');
+      stagedCooldowns['share_price_decline'] = Date.now();
     }
     dailyDeclinePct = declineResult.dailyDeclinePct;
   }
 
   // 10. Share-price 2% baseline veto (EI-S008 §C)
-  // Apply 1h cooldown to veto alerts (but always set vetoFlag in observation)
+  // Apply 1h cooldown to veto alerts — STAGE the cooldown
   let vetoFlag = false;
   let stagedBaseline = state.sharePriceBaseline;
   let stagedBaselineTs = state.sharePriceBaselineTs;
@@ -573,7 +574,7 @@ async function collectOnce(): Promise<void> {
     vetoFlag = vetoResult.vetoFlag;
     if (vetoResult.alerts.length > 0 && shouldAlert(state, 'baseline_veto')) {
       alerts.push(...vetoResult.alerts);
-      recordAlert(state, 'baseline_veto');
+      stagedCooldowns['baseline_veto'] = Date.now();
     }
   }
 
@@ -585,7 +586,8 @@ async function collectOnce(): Promise<void> {
     stagedLastSharePriceTs = ts;
   }
 
-  // 10. Build observation
+  // 10. Build observation — use STAGED state for bufferBreachActive
+  // (EI-S008 P2: observation must reflect the state intended for this sample)
   const rpcSuccess = blockNumber !== null && limUsdSupply !== null && ptSupply !== null;
   const obs: Observation = {
     ts,
@@ -614,7 +616,7 @@ async function collectOnce(): Promise<void> {
     alerts,
     vetoFlag,
     dailyDeclinePct,
-    bufferBreachActive: state.bufferBreachActive,
+    bufferBreachActive: stagedBufferBreachActive,  // use STAGED value, not old state
   };
 
   if (readFailures.length > 0) {
@@ -623,7 +625,8 @@ async function collectOnce(): Promise<void> {
 
   // 11. Append to JSONL FIRST — only commit state if append succeeds
   // (EI-S008 P1: state-commit ordering — failed append must not consume
-  // an alert transition or advance the last-recorded observation state)
+  // an alert transition, advance the last-recorded observation state,
+  // or persist cooldown timestamps for alerts that were not recorded)
   let appendSuccess = false;
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -644,13 +647,17 @@ async function collectOnce(): Promise<void> {
     state.sharePriceBaselineTs = stagedBaselineTs;
     state.lastSharePrice = stagedLastSharePrice;
     state.lastSharePriceTs = stagedLastSharePriceTs;
+    // Commit staged cooldowns
+    for (const [key, ts_val] of Object.entries(stagedCooldowns)) {
+      state.lastAlertTime[key] = ts_val;
+    }
     saveState(state);
   } else {
-    // Append failed — do NOT commit any staged state changes.
-    // Save only the alert cooldown times (which were already mutated for
-    // read-failed alerts) but preserve the observation baseline.
-    // (EI-S008 P1: a failed append must not silently consume a transition)
-    saveState(state); // saves cooldown updates but NOT staged observation state
+    // Append failed — do NOT commit any staged state or cooldowns.
+    // The observation was not recorded, so its alerts must not consume
+    // their cooldowns. No state mutation at all.
+    // (EI-S008 P1: failed append must not silently consume an alert
+    // transition or advance cooldown timestamps)
   }
 
   console.log(`[limusd] next sample in ${POLL_INTERVAL_MS / 1000}s`);
