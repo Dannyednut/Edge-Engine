@@ -70,21 +70,23 @@ interface Observation {
   blockNumber: number | null;
   source: 'hyperevm-rpc';
   // Raw bigint values as strings (exact, no precision loss)
-  totalRewardsRaw: string | null;     // Accountant.totalRewards() — 18-dec
-  khypeToHypeRaw: string | null;      // Accountant.kHYPEToHYPE(1e18) — 18-dec
-  totalStakedRaw: string | null;      // Accountant.totalStaked() — 18-dec
-  khypeTotalSupplyRaw: string | null; // kHYPE.totalSupply() — 18-dec
-  // Derived display values
+  totalRewardsRaw: string | null;     // Accountant.totalRewards() — 18-dec HYPE
+  khypeToHypeRaw: string | null;      // Accountant.kHYPEToHYPE(1e18) — returns 1e18-scaled rate
+  totalStakedRaw: string | null;      // Accountant.totalStaked() — 18-dec HYPE
+  khypeTotalSupplyRaw: string | null; // kHYPE.totalSupply() — 18-dec kHYPE
+  // Derived display values (18-decimal adjusted)
   totalRewards: string | null;        // e.g. "571007.910688"
-  anchorExchangeRate: string | null;  // e.g. "1.026452220069944"
+  anchorExchangeRate: string | null;  // e.g. "1.026452220069944" (raw / 1e18)
   totalStaked: string | null;
   khypeTotalSupply: string | null;
   // Changes since previous sample
   totalRewardsDelta: string | null;   // change in totalRewards (null = first sample)
   anchorDelta: string | null;         // change in anchor exchange rate
-  rewardStepDetected: boolean;        // true if totalRewards changed (non-zero delta)
-  // Data-source success
-  rpcSuccess: boolean;
+  rewardStepDetected: boolean;        // true if totalRewards POSITIVE non-zero delta
+  negativeDeltaAnomaly: boolean;      // true if totalRewards decreased (anomaly, not a reward step)
+  secsSincePrevSample: number | null; // seconds since previous observation (null = first)
+  // Data-source success — all 4 reads must succeed for rpcSuccess=true
+  rpcSuccess: boolean;                // true only if ALL on-chain reads succeeded
   readFailures: string[];
   note?: string;
 }
@@ -92,8 +94,9 @@ interface Observation {
 interface CadenceState {
   lastTotalRewards: string | null;
   lastAnchor: string | null;
-  lastTs: string | null;
-  rewardStepCount: number;           // cumulative count of detected steps
+  lastTs: string | null;              // previous observation timestamp (for secsSincePrevSample)
+  rewardStepCount: number;           // cumulative count of detected steps (only positive deltas)
+  lastObservationAppended: boolean;  // true only if the last observation was successfully written
 }
 
 // ─── RPC helpers ────────────────────────────────────────────────────
@@ -175,7 +178,7 @@ function loadState(): CadenceState {
       return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     }
   } catch {}
-  return { lastTotalRewards: null, lastAnchor: null, lastTs: null, rewardStepCount: 0 };
+  return { lastTotalRewards: null, lastAnchor: null, lastTs: null, rewardStepCount: 0, lastObservationAppended: false };
 }
 
 function saveState(state: CadenceState): void {
@@ -226,16 +229,32 @@ async function collectOnce(): Promise<void> {
     let totalRewardsDelta: string | null = null;
     let anchorDelta: string | null = null;
     let rewardStepDetected = false;
+    let negativeDeltaAnomaly = false;
+    let secsSincePrevSample: number | null = null;
+
+    // Calculate secs since previous sample
+    if (state.lastTs) {
+      const prevMs = new Date(state.lastTs).getTime();
+      const currMs = new Date(ts).getTime();
+      secsSincePrevSample = Math.round((currMs - prevMs) / 1000);
+    }
 
     if (totalRewards !== null && state.lastTotalRewards !== null) {
       const prev = BigInt(state.lastTotalRewards);
       const delta = totalRewards - prev;
       totalRewardsDelta = delta.toString();
-      if (delta !== 0n) {
+      if (delta > 0n) {
+        // Positive delta = reward credit (a reward step)
         rewardStepDetected = true;
         state.rewardStepCount++;
         console.log(`[khype-cadence] REWARD STEP DETECTED: delta=${bigToDecimalString(delta, 18)} HYPE (cumulative steps: ${state.rewardStepCount})`);
+      } else if (delta < 0n) {
+        // Negative delta = anomaly (totalRewards should only increase)
+        // Do NOT count as a reward step — flag as anomaly
+        negativeDeltaAnomaly = true;
+        console.warn(`[khype-cadence] ANOMALY: totalRewards decreased by ${bigToDecimalString(-delta, 18)} HYPE (not a reward step)`);
       }
+      // delta === 0n: no change, no step, no anomaly
     }
 
     if (anchorRate !== null && state.lastAnchor !== null) {
@@ -244,13 +263,9 @@ async function collectOnce(): Promise<void> {
       anchorDelta = delta.toString();
     }
 
-    // 4. Update state
-    if (totalRewards !== null) state.lastTotalRewards = totalRewards.toString();
-    if (anchorRate !== null) state.lastAnchor = anchorRate.toString();
-    state.lastTs = ts;
-
-    // 5. Build observation
-    const rpcSuccess = blockNumber !== null && totalRewards !== null && anchorRate !== null;
+    // 4. Build observation (rpcSuccess = ALL 4 reads succeeded, not just block+rewards)
+    const rpcSuccess = blockNumber !== null && totalRewards !== null && anchorRate !== null
+                       && totalStaked !== null && khypeSupply !== null;
     const obs: Observation = {
       ts,
       blockNumber,
@@ -266,6 +281,8 @@ async function collectOnce(): Promise<void> {
       totalRewardsDelta,
       anchorDelta,
       rewardStepDetected,
+      negativeDeltaAnomaly,
+      secsSincePrevSample,
       rpcSuccess,
       readFailures,
     };
@@ -274,16 +291,32 @@ async function collectOnce(): Promise<void> {
       obs.note = `Read failures: ${readFailures.join(', ')}`;
     }
 
-    // 6. Append to JSONL
+    // 5. Append to JSONL FIRST — only update state if append succeeds
+    // (EI-S008 §3.3: step counters must not advance if JSONL append fails)
+    let appendSuccess = false;
     try {
       if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
       appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
-      console.log(`[khype-cadence] sample saved: block=${blockNumber} totalRewards=${obs.totalRewards} anchor=${obs.anchorExchangeRate} step=${rewardStepDetected}`);
+      appendSuccess = true;
+      console.log(`[khype-cadence] sample saved: block=${blockNumber} totalRewards=${obs.totalRewards} anchor=${obs.anchorExchangeRate} step=${rewardStepDetected} secsSincePrev=${secsSincePrevSample}`);
     } catch (err: any) {
       console.error(`[khype-cadence] failed to write observation: ${err?.message ?? err}`);
+      // Do NOT update state — the observation was not recorded
     }
 
-    saveState(state);
+    // 6. Update state ONLY after successful append
+    if (appendSuccess) {
+      if (totalRewards !== null) state.lastTotalRewards = totalRewards.toString();
+      if (anchorRate !== null) state.lastAnchor = anchorRate.toString();
+      state.lastTs = ts;
+      state.lastObservationAppended = true;
+      saveState(state);
+    } else {
+      state.lastObservationAppended = false;
+      // Still save state to record the failure, but don't advance lastTotalRewards/lastTs
+      saveState(state);
+    }
+
     console.log(`[khype-cadence] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
   } finally {
