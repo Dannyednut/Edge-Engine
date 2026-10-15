@@ -88,12 +88,14 @@ const PT_DECIMALS = 6;
 // USDC uses 6 decimals — the RedemptionPipe buffer is divided by 1e6 in the alert logic
 
 // Alert thresholds (from registry)
-const SHARE_PRICE_CHANGE_THRESHOLD_PCT = 0.5;  // per day
-const REDEMPTION_BUFFER_THRESHOLD_USD = 50_000;
-const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+export const SHARE_PRICE_CHANGE_THRESHOLD_PCT = 0.5;  // per day
+export const SHARE_PRICE_VETO_THRESHOLD_PCT = 2.0;    // >2% from baseline = rejection/veto
+export const REDEMPTION_BUFFER_THRESHOLD_USD = 50_000;
+export const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
 // Baseline: redemption buffer reported as zero at EI-S005 snapshot.
-const REDEMPTION_BUFFER_BASELINE_USD = 0;
+// Documented for reference — the actual transition logic uses bufferBreachActive state.
+// const REDEMPTION_BUFFER_BASELINE_USD = 0;
 
 interface Observation {
   ts: string;              // ISO 8601 UTC
@@ -127,14 +129,159 @@ interface Observation {
   defillamaSuccess: boolean;
   readFailures: string[];                // per-field error markers
   alerts: string[];
+  vetoFlag: boolean;                     // true if share-price decline > 2% from baseline
+  dailyDeclinePct: number | null;        // time-aware daily decline rate
+  bufferBreachActive: boolean;           // current buffer breach state
   note?: string;
 }
 
 interface MonitorState {
   lastAlertTime: Record<string, number>;
-  preexistingBreaches: Record<string, string>;  // breachKey → timestamp first seen
+  // True transition tracking for redemption buffer (replaces preexistingBreaches)
+  bufferBreachActive: boolean;           // true when buffer is currently in breach
+  // Share-price baseline for the 2% veto (EI-S008 §C)
+  sharePriceBaseline: string | null;     // first observed share price — persisted
+  sharePriceBaselineTs: string | null;   // when baseline was set
+  // Previous share price for daily-rate decline detection
   lastSharePrice: string | null;
   lastSharePriceTs: string | null;
+  // Legacy field — kept for backward compat but no longer used for new logic
+  preexistingBreaches: Record<string, string>;
+}
+
+// ─── Pure alert-evaluation helpers (exported for testing) ──────────
+
+export interface AlertEvaluationResult {
+  alerts: string[];
+  vetoFlag: boolean;                     // true if share-price decline > 2% from baseline
+  bufferTransition: 'OK_TO_BREACH' | 'BREACH_TO_OK' | 'NO_CHANGE' | 'STILL_BREACH' | 'INITIAL_BREACH' | null;
+}
+
+/**
+ * Evaluate redemption-buffer transition alerts.
+ * Pure function — no side effects. Tests the real logic.
+ *
+ * Transition behavior:
+ *   OK → BREACH: issue an alert
+ *   BREACH → OK: record recovery (informational)
+ *   BREACH → BREACH: no spam (still breached)
+ *   Initial BREACH (first observation): alert
+ */
+export function evaluateBufferTransition(
+  bufferUsd: number | null,
+  prevState: MonitorState,
+): { alerts: string[]; transition: AlertEvaluationResult['bufferTransition'] } {
+  const alerts: string[] = [];
+
+  if (bufferUsd === null) {
+    // RPC read failed — distinguish from real zero
+    return { alerts: [], transition: null };
+  }
+
+  const isBreach = bufferUsd < REDEMPTION_BUFFER_THRESHOLD_USD;
+  const wasBreaching = prevState.bufferBreachActive;
+
+  if (isBreach && !wasBreaching) {
+    // OK → BREACH (or initial breach if no previous state)
+    alerts.push(`Redemption buffer $${bufferUsd.toFixed(2)} < $${REDEMPTION_BUFFER_THRESHOLD_USD} threshold (OK→BREACH)`);
+    return { alerts, transition: wasBreaching === undefined ? 'INITIAL_BREACH' : 'OK_TO_BREACH' };
+  }
+
+  if (!isBreach && wasBreaching) {
+    // BREACH → OK (recovery)
+    alerts.push(`Redemption buffer $${bufferUsd.toFixed(2)} recovered above $${REDEMPTION_BUFFER_THRESHOLD_USD} threshold (BREACH→OK)`);
+    return { alerts, transition: 'BREACH_TO_OK' };
+  }
+
+  if (isBreach && wasBreaching) {
+    // Still breached — no spam
+    return { alerts: [], transition: 'STILL_BREACH' };
+  }
+
+  // OK → OK
+  return { alerts: [], transition: 'NO_CHANGE' };
+}
+
+/**
+ * Evaluate share-price decline using time-aware daily rate.
+ * Pure function — no side effects. Tests the real logic.
+ *
+ * The 0.5% threshold is "per day" — we annualize the observed change
+ * rate by dividing by elapsed time (in days). This catches cumulative
+ * declines that remain below 0.5% per sample but exceed 0.5%/day over
+ * a longer period.
+ */
+export function evaluateSharePriceDecline(
+  currentPrice: string | null,
+  previousPrice: string | null,
+  currentTs: string,
+  previousTs: string | null,
+): { alerts: string[]; dailyDeclinePct: number | null } {
+  const alerts: string[] = [];
+
+  if (!currentPrice || !previousPrice || !previousTs) {
+    return { alerts: [], dailyDeclinePct: null };
+  }
+
+  const current = parseFloat(currentPrice);
+  const previous = parseFloat(previousPrice);
+  if (previous <= 0 || !isFinite(current) || !isFinite(previous)) {
+    return { alerts: [], dailyDeclinePct: null };
+  }
+
+  // Calculate time-aware daily decline rate
+  const currentMs = new Date(currentTs).getTime();
+  const previousMs = new Date(previousTs).getTime();
+  const elapsedMs = currentMs - previousMs;
+  if (elapsedMs <= 0) {
+    return { alerts: [], dailyDeclinePct: null };
+  }
+
+  const elapsedDays = elapsedMs / (1000 * 60 * 60 * 24);
+  const changePct = ((current - previous) / previous) * 100;
+  // Daily rate: annualize the change over the elapsed time
+  // Negative = decline. We alert on abs(dailyDeclinePct) > threshold.
+  const dailyDeclinePct = changePct / elapsedDays;
+
+  if (Math.abs(dailyDeclinePct) > SHARE_PRICE_CHANGE_THRESHOLD_PCT) {
+    alerts.push(`Share price daily decline ${dailyDeclinePct.toFixed(4)}%/day exceeds ${SHARE_PRICE_CHANGE_THRESHOLD_PCT}%/day threshold (was ${previousPrice}, now ${currentPrice}, elapsed ${elapsedDays.toFixed(3)}d)`);
+  }
+
+  return { alerts, dailyDeclinePct };
+}
+
+/**
+ * Evaluate the 2% baseline veto (EI-S008 §C).
+ * Pure function — no side effects. Tests the real logic.
+ *
+ * A decline greater than 2% from the persisted baseline must produce
+ * a veto flag and alert. The baseline is set once (first observation)
+ * and must not silently reset after a restart or during a decline.
+ */
+export function evaluateBaselineVeto(
+  currentPrice: string | null,
+  baselinePrice: string | null,
+): { alerts: string[]; vetoFlag: boolean; declineFromBaselinePct: number | null } {
+  const alerts: string[] = [];
+
+  if (!currentPrice || !baselinePrice) {
+    return { alerts: [], vetoFlag: false, declineFromBaselinePct: null };
+  }
+
+  const current = parseFloat(currentPrice);
+  const baseline = parseFloat(baselinePrice);
+  if (baseline <= 0 || !isFinite(current) || !isFinite(baseline)) {
+    return { alerts: [], vetoFlag: false, declineFromBaselinePct: null };
+  }
+
+  const declinePct = ((baseline - current) / baseline) * 100;
+
+  if (declinePct > SHARE_PRICE_VETO_THRESHOLD_PCT) {
+    alerts.push(`VETO: Share price ${currentPrice} is ${declinePct.toFixed(4)}% below baseline ${baselinePrice} (threshold: ${SHARE_PRICE_VETO_THRESHOLD_PCT}%)`);
+    return { alerts, vetoFlag: true, declineFromBaselinePct: declinePct };
+  }
+
+  return { alerts, vetoFlag: false, declineFromBaselinePct: declinePct };
 }
 
 // ─── RPC helpers ────────────────────────────────────────────────────
@@ -287,7 +434,7 @@ function loadState(): MonitorState {
       return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     }
   } catch {}
-  return { lastAlertTime: {}, preexistingBreaches: {}, lastSharePrice: null, lastSharePriceTs: null };
+  return { lastAlertTime: {}, bufferBreachActive: false, sharePriceBaseline: null, sharePriceBaselineTs: null, lastSharePrice: null, lastSharePriceTs: null, preexistingBreaches: {} };
 }
 
 function saveState(state: MonitorState): void {
@@ -308,14 +455,8 @@ function recordAlert(state: MonitorState, alertKey: string): void {
   state.lastAlertTime[alertKey] = Date.now();
 }
 
-function recordPreexisting(state: MonitorState, breachKey: string): boolean {
-  // Returns true if this is the FIRST time seeing this pre-existing breach
-  if (!state.preexistingBreaches[breachKey]) {
-    state.preexistingBreaches[breachKey] = new Date().toISOString();
-    return true;
-  }
-  return false;
-}
+// Legacy: recordPreexisting is no longer used — replaced by evaluateBufferTransition
+// which implements true OK↔BREACH transition tracking.
 
 // ─── Collection ─────────────────────────────────────────────────────
 
@@ -383,17 +524,14 @@ async function collectOnce(): Promise<void> {
     sharePrice = calcSharePrice(navRaw, limUsdSupply, LIMUSD_DECIMALS);
   }
 
-  // 8. Redemption buffer alert (transition-based, not repetitive)
+  // 8. Redemption buffer alert (true transition-based, EI-S008 §A)
   let redemptionBufferUsd: number | null = null;
   if (redemptionBufferRaw !== null) {
     redemptionBufferUsd = Number(redemptionBufferRaw) / 1e6;
-    if (redemptionBufferUsd < REDEMPTION_BUFFER_THRESHOLD_USD) {
-      // Record as pre-existing breach (fires once), then only alert on transitions
-      const isFirst = recordPreexisting(state, 'redemption_buffer_low');
-      if (isFirst) {
-        alerts.push(`Redemption buffer $${redemptionBufferUsd.toFixed(2)} < $${REDEMPTION_BUFFER_THRESHOLD_USD} threshold (PRE-EXISTING, baseline: $${REDEMPTION_BUFFER_BASELINE_USD})`);
-      }
-    }
+    const bufferResult = evaluateBufferTransition(redemptionBufferUsd, state);
+    alerts.push(...bufferResult.alerts);
+    // Update the breach state for next sample
+    state.bufferBreachActive = redemptionBufferUsd < REDEMPTION_BUFFER_THRESHOLD_USD;
   } else {
     // RPC read failed — distinguish from a true zero balance
     if (shouldAlert(state, 'redemption_buffer_read_failed')) {
@@ -402,19 +540,28 @@ async function collectOnce(): Promise<void> {
     }
   }
 
-  // 9. Share-price change alert (if we have both current and previous)
-  if (sharePrice && state.lastSharePrice) {
-    const current = parseFloat(sharePrice);
-    const previous = parseFloat(state.lastSharePrice);
-    if (previous > 0) {
-      const changePct = ((current - previous) / previous) * 100;
-      if (Math.abs(changePct) > SHARE_PRICE_CHANGE_THRESHOLD_PCT) {
-        if (shouldAlert(state, 'share_price_change')) {
-          alerts.push(`Share price change ${changePct.toFixed(4)}% exceeds ${SHARE_PRICE_CHANGE_THRESHOLD_PCT}% threshold (was ${state.lastSharePrice}, now ${sharePrice})`);
-          recordAlert(state, 'share_price_change');
-        }
-      }
+  // 9. Share-price daily decline alert (time-aware, EI-S008 §B)
+  let dailyDeclinePct: number | null = null;
+  if (sharePrice) {
+    const declineResult = evaluateSharePriceDecline(
+      sharePrice, state.lastSharePrice, ts, state.lastSharePriceTs,
+    );
+    alerts.push(...declineResult.alerts);
+    dailyDeclinePct = declineResult.dailyDeclinePct;
+  }
+
+  // 10. Share-price 2% baseline veto (EI-S008 §C)
+  let vetoFlag = false;
+  if (sharePrice) {
+    // Set baseline on first observation (or if baseline was lost on restart)
+    if (!state.sharePriceBaseline) {
+      state.sharePriceBaseline = sharePrice;
+      state.sharePriceBaselineTs = ts;
+      console.log(`[limusd] share-price baseline set: ${sharePrice} at ${ts}`);
     }
+    const vetoResult = evaluateBaselineVeto(sharePrice, state.sharePriceBaseline);
+    alerts.push(...vetoResult.alerts);
+    vetoFlag = vetoResult.vetoFlag;
   }
 
   // Update state with current share price
@@ -450,6 +597,9 @@ async function collectOnce(): Promise<void> {
     defillamaSuccess,
     readFailures,
     alerts,
+    vetoFlag,
+    dailyDeclinePct,
+    bufferBreachActive: state.bufferBreachActive,
   };
 
   if (readFailures.length > 0) {

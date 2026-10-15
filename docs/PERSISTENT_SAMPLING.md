@@ -1,8 +1,8 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 04:52 UTC
-**Deployed commit:** `5ffe9d6`
-**Status:** ACTIVE — 11 daemons supervised and collecting
+**Last updated:** 2026-10-15, 06:01 UTC
+**Deployed commit:** (see git log for latest)
+**Status:** ACTIVE — 12 daemons supervised and collecting with PID-file duplicate prevention
 
 ## Overview
 
