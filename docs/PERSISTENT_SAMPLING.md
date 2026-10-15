@@ -1,9 +1,14 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 08:17 UTC
-**Latest repository commit:** `457d8f5` (CI green — verified by principal: https://github.com/Dannyednut/Edge-Engine/actions/runs/38703205136)
-**Code loaded by running processes:** `ffd5831` (processes started 08:04:12 UTC; `457d8f5` is docs-only — no daemon source affected)
-**Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention
+**Last updated:** 2026-10-15, 09:59 UTC
+
+**Revision terminology (distinct concepts):**
+- **Repository HEAD:** `4674ef5` — the latest commit on `main`. CI green: https://github.com/Dannyednut/Edge-Engine/actions/runs/38710180602
+- **Latest daemon-source revision:** `5b6d376` — the most recent commit that changed daemon source code (`limusd-monitor.ts`, `khype-cadence-sampler.ts`). All commits since (`ffd5831`, `457d8f5`, `5ca4f62`, `56327aa`, `f6c940f`, `4674ef5`) are docs-only or script-only and do not affect daemon behavior.
+- **Exporter revision:** `4674ef5` — the commit from which the evidence bundle exporter (`scripts/export-evidence-bundle.py`) was last run. Recorded in each bundle's manifest as `repository_head_at_export`.
+- **Manager-reported loaded revision:** `ffd5831` — the HEAD at the time daemon processes were started (2026-10-15T08:04:12Z). This is Manager-reported and has NOT been independently proven by EI. No contemporaneous tree hash was recorded at process start. The loaded revision is consistent with `5b6d376` (daemon source unchanged between `5b6d376` and `ffd5831`).
+
+**Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention. No restart since 08:04:12Z.
 
 ## Overview
 
