@@ -24,6 +24,7 @@ FILES = {
     'khype-cadence-sampler.log': 'logs/khype-cadence-sampler.log',
     'khype-timeseries.log': 'logs/khype-timeseries.log',
     'daemon-supervisor.log': 'logs/daemon-supervisor.log',
+    'window7-audit.json': 'data/evidence-bundles/window7-audit.json',
 }
 
 def sha256_file(filepath):
@@ -60,7 +61,11 @@ os.makedirs(BUNDLE_DIR, exist_ok=True)
 
 manifest = {
     'export_time': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'deployed_sha': os.popen(f'cd {REPO} && git rev-parse HEAD').read().strip(),
+    'repository_head_at_export': os.popen(f'cd {REPO} && git rev-parse HEAD').read().strip(),
+    'reported_loaded_revision': 'ffd5831',
+    'loaded_revision_qualification': 'Manager-reported. Processes started 2026-10-15T08:04:12Z when HEAD was ffd5831. No contemporaneous tree hash was recorded at process start. The loaded revision has not been independently proven by EI.',
+    'window7_start': '2026-10-15T08:04:12Z',
+    'window7_nominal_completion': '2026-10-16T08:04:12Z',
     'files': {},
 }
 
@@ -130,6 +135,29 @@ try:
 except: pass
 
 manifest['analysis'] = analysis
+
+# Capture timestamped process inventory
+import subprocess as sp
+ps_result = sp.run(['ps', '-eo', 'pid,lstart,args'], capture_output=True, text=True)
+process_inventory = []
+for line in ps_result.stdout.split('\n'):
+    if ('limusd-monitor' in line or 'khype-cadence' in line or 'daemon-supervisor' in line) and 'grep' not in line:
+        process_inventory.append({
+            'raw': line.strip()[:200],
+            'captured_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        })
+
+# Duplicate worker detection
+limusd_tsx = sum(1 for l in ps_result.stdout.split('\n') if 'cli.mjs' in l and 'limusd-monitor' in l and 'grep' not in l)
+cadence_tsx = sum(1 for l in ps_result.stdout.split('\n') if 'cli.mjs' in l and 'khype-cadence' in l and 'grep' not in l)
+manifest['process_inventory'] = process_inventory
+manifest['duplicate_worker_check'] = {
+    'limusd_monitor_tsx_processes': limusd_tsx,
+    'khype_cadence_tsx_processes': cadence_tsx,
+    'duplicate_detected': limusd_tsx > 1 or cadence_tsx > 1,
+    'captured_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'qualification': 'Manager-reported. Not independently verified by EI.',
+}
 
 with open(os.path.join(BUNDLE_DIR, 'manifest.json'), 'w') as f:
     json.dump(manifest, f, indent=2)
