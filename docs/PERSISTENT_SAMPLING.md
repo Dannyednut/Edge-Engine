@@ -1,9 +1,8 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 08:04 UTC
-**Latest repository commit:** `ffd5831` (docs-only, CI pending)
-**Prior CI-verified commit:** `5b6d376` — https://github.com/Dannyednut/Edge-Engine/actions/runs/38697902457
-**Code loaded by running processes:** `ffd5831` (processes started 08:04:12 UTC, HEAD at that time; docs-only changes since `5b6d376` do not affect daemon source)
+**Last updated:** 2026-10-15, 08:17 UTC
+**Latest repository commit:** `457d8f5` (CI green — verified by principal: https://github.com/Dannyednut/Edge-Engine/actions/runs/38703205136)
+**Code loaded by running processes:** `ffd5831` (processes started 08:04:12 UTC; `457d8f5` is docs-only — no daemon source affected)
 **Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention
 
 ## Overview
@@ -143,11 +142,12 @@ DAEMONS array. PID files in `run/<name>.pid`.
 **Window 6 (INVALIDATED):** Start `2026-10-15T07:18:37Z`. Container restart at ~08:01 UTC killed all processes. Not a controlled restart — the host environment restarted.
 **Window 7 (CURRENT):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Nominal completion: `2026-10-16T08:04:12Z`. Status: PENDING.
 
-Note: Windows 1-5 were invalidated by controlled restarts for code updates.
-Window 6 was invalidated by an environment/container restart (~08:01 UTC)
-that killed all processes. Window 7 is the current window. The daemons
-loaded commit `ffd5831` which is a docs-only change from the CI-verified
-`5b6d376` — no daemon source code was affected.
+Note: Window 1 was compromised by an observation gap (~10h). Windows 2–5
+were invalidated by controlled restarts for code updates. Window 6 was
+invalidated by an environment/container restart (~08:01 UTC) that killed
+all processes. Window 7 is the current window. The daemons loaded commit
+`ffd5831` (docs-only change from CI-verified `5b6d376` — no daemon source
+code affected). The latest repository commit is `457d8f5` (also docs-only).
 
 Startup/commit claim qualification (Window 6):
   Process start: 2026-10-15T07:18:37Z (ps -eo lstart)
