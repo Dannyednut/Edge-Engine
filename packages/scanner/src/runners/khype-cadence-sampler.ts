@@ -245,9 +245,18 @@ export function commitCadenceObservation(
     state.lastObservationAppended = true;
     saveStateFn(state);
   } else {
-    // Append failed — do NOT advance any state
+    // Append failed — do NOT advance any observation state.
+    // lastObservationAppended is set to false in memory for the current
+    // cycle's audit trail but is NOT persisted (no saveStateFn call).
+    // This means:
+    //   - On restart, lastObservationAppended reverts to its last-persisted value
+    //   - The failure is visible in the process log but not in the state file
+    //   - No counters, timestamps, or baselines are advanced
+    // This is an explicit, tested contract: a failed append has ZERO effect
+    // on persisted state. The in-memory false is ephemeral and does not
+    // survive a restart.
     state.lastObservationAppended = false;
-    // Do NOT save state with advanced counters on failure
+    // Do NOT call saveStateFn — nothing to persist on failure
   }
 
   return appendSuccess;

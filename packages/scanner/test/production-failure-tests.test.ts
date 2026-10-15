@@ -302,4 +302,56 @@ describe('commitCadenceObservation — production append-failure injection', () 
     expect(state.rewardStepCount).toBe(2);  // unchanged
     expect(state.lastTs).toBe('2026-10-15T06:30:00Z');  // unchanged
   });
+
+  it('append failure: saveStateFn is NOT called (no persisted state change)', () => {
+    const state = makeCadenceState({
+      lastTotalRewards: '571007910687725000001187',
+      lastTs: '2026-10-15T06:30:00Z',
+      rewardStepCount: 1,
+      lastObservationAppended: true,  // was true before this failed attempt
+    });
+    const obs = makeCadenceObs({ rewardStepDetected: true });
+    const staged: StagedCadenceState = {
+      lastTotalRewards: '571549423965112000001187',
+      lastAnchor: '1026506759389196609',
+      lastTs: '2026-10-15T07:00:00Z',
+      rewardStep: true,
+    };
+
+    let saveCallCount = 0;
+    const failAppend = () => { throw new Error('EIO'); };
+    const result = commitCadenceObservation(state, obs, staged, failAppend as any, () => { saveCallCount++; });
+
+    expect(result).toBe(false);
+    expect(saveCallCount).toBe(0);  // saveStateFn was NOT called
+    expect(state.lastObservationAppended).toBe(false);  // in-memory only
+    expect(state.rewardStepCount).toBe(1);  // unchanged
+    // On restart, state file would still have lastObservationAppended=true
+    // from the previous successful write — the in-memory false is ephemeral
+  });
+
+  it('append failure: LIMUSD saveStateFn is NOT called either', () => {
+    const state = makeLimusdState({
+      bufferBreachActive: false,
+      sharePriceBaseline: '1.035000',
+    });
+    const obs = makeLimusdObs();
+    const staged: StagedState = {
+      bufferBreachActive: true,
+      sharePriceBaseline: '1.035623',
+      sharePriceBaselineTs: '2026-10-15T07:00:00Z',
+      lastSharePrice: '1.035623',
+      lastSharePriceTs: '2026-10-15T07:00:00Z',
+      cooldowns: {},
+    };
+
+    let saveCallCount = 0;
+    const failAppend = () => { throw new Error('EIO'); };
+    const result = commitObservation(state, obs, staged, failAppend as any, () => { saveCallCount++; });
+
+    expect(result).toBe(false);
+    expect(saveCallCount).toBe(0);  // saveStateFn NOT called on failure
+    expect(state.bufferBreachActive).toBe(false);  // unchanged
+    expect(state.sharePriceBaseline).toBe('1.035000');  // unchanged
+  });
 });
