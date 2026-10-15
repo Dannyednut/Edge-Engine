@@ -1,8 +1,9 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 07:30 UTC
-**Latest repository commit:** `5b6d376` (CI green — verified by principal: https://github.com/Dannyednut/Edge-Engine/actions/runs/38697902457)
-**Code loaded by running processes:** Working tree identical to `5b6d376` (processes started 07:18:37Z, commit created 07:18:45Z — 8s gap, no edits between start and commit, `git status` clean post-commit)
+**Last updated:** 2026-10-15, 08:04 UTC
+**Latest repository commit:** `ffd5831` (docs-only, CI pending)
+**Prior CI-verified commit:** `5b6d376` — https://github.com/Dannyednut/Edge-Engine/actions/runs/38697902457
+**Code loaded by running processes:** `ffd5831` (processes started 08:04:12 UTC, HEAD at that time; docs-only changes since `5b6d376` do not affect daemon source)
 **Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention
 
 ## Overview
@@ -137,13 +138,26 @@ DAEMONS array. PID files in `run/<name>.pid`.
 **Window 1 (COMPROMISED):** Start `2026-10-14T16:36:56Z`. Gap `18:47:59Z → 04:51:31Z` (~10h). FAIL.
 **Window 2 (INVALIDATED):** Start `2026-10-15T04:51:31Z`. Controlled restart at `06:36:56Z` (code update to `2337e45`).
 **Window 3 (INVALIDATED):** Start `2026-10-15T06:36:56Z`. Controlled restart at `06:52:24Z` (code update to `232137c`).
+**Window 4 (INVALIDATED):** Start `2026-10-15T06:52:24Z`. Controlled restart at `07:07:46Z` (code update to `e836183`).
 **Window 5 (INVALIDATED):** Start `2026-10-15T07:07:46Z`. Controlled restart at `07:18:37Z` (code update to working tree subsequently committed as `5b6d376`).
-**Window 6 (CURRENT):** Start `2026-10-15T07:18:37Z` (confirmed from `ps -eo lstart` + startup log). Working tree at start = commit `5b6d376` (created 07:18:45Z, 8s later — no edits in gap, `git status` clean). Nominal completion: `2026-10-16T07:18:37Z`. Status: PENDING.
+**Window 6 (INVALIDATED):** Start `2026-10-15T07:18:37Z`. Container restart at ~08:01 UTC killed all processes. Not a controlled restart — the host environment restarted.
+**Window 7 (CURRENT):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Nominal completion: `2026-10-16T08:04:12Z`. Status: PENDING.
 
-Note: Each controlled restart invalidated the prior window because the
-running process was killed and restarted with new code. The daemons did
-not crash — these were intentional restarts to load corrected source code.
-Window 6 is the current window. No further restarts are planned.
+Note: Windows 1-5 were invalidated by controlled restarts for code updates.
+Window 6 was invalidated by an environment/container restart (~08:01 UTC)
+that killed all processes. Window 7 is the current window. The daemons
+loaded commit `ffd5831` which is a docs-only change from the CI-verified
+`5b6d376` — no daemon source code was affected.
+
+Startup/commit claim qualification (Window 6):
+  Process start: 2026-10-15T07:18:37Z (ps -eo lstart)
+  Commit 5b6d376: 2026-10-15T07:18:45Z (git log --format=%cI)
+  8s gap: processes started from working tree 8s before commit.
+  Evidence: git status clean post-commit (0 uncommitted files).
+  Qualification: Manager-reported. No contemporaneous tree hash was
+  recorded at process start. The clean working tree is consistent with
+  but does not independently prove the loaded source matched the commit.
+  This claim has not been independently verified by EI.
 
 ### Pass criteria
 1. No gaps > 60 minutes in observation timestamps
