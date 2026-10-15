@@ -16,6 +16,7 @@ DAEMONS=(
   "wallet-funding-alert:scripts-explore/wallet-funding-alert.mts:"
   "realtime-spread-monitor:scripts-explore/realtime-spread-monitor.mts:"
   "khype-timeseries:packages/scanner/src/runners/khype-timeseries.ts:"
+  "khype-cadence-sampler:packages/scanner/src/runners/khype-cadence-sampler.ts:"
   "limusd-monitor:packages/scanner/src/runners/limusd-monitor.ts:"
 )
 
