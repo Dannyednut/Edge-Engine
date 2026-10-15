@@ -157,7 +157,7 @@ DAEMONS array. PID files in `run/<name>.pid`.
 **Window 5 (INVALIDATED):** Start `2026-10-15T07:07:46Z`. Controlled restart at `07:18:37Z` (code update to working tree subsequently committed as `5b6d376`).
 **Window 6 (INVALIDATED):** Start `2026-10-15T07:18:37Z`. Container restart at ~08:01 UTC killed all processes. Not a controlled restart — the host environment restarted.
 **Window 7 (INVALIDATED):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Environment restart between sessions killed all processes. Not a controlled restart.
-**Window 8 (CURRENT):** Start upon daemon restart (see below). Status: PENDING.
+**Window 8 (CURRENT):** Start 2026-10-15T12:22:09Z (confirmed from ps -eo lstart). HEAD at start: 5d58e46 (docs-only from 5b6d376, no daemon source affected). Nominal completion: 2026-10-16T12:22:09Z. Status: PENDING.
 
 Note: Window 1 was compromised by an observation gap (~10h). Windows 2–5
 were invalidated by controlled restarts for code updates. Window 6 was
