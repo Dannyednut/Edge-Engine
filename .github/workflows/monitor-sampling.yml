@@ -1,0 +1,164 @@
+name: Monitor Sampling (Prototype — Not Scheduled)
+
+# PROTOTYPE: This workflow is on a feature branch and is NOT enabled for
+# scheduled production runs. It will only trigger on manual dispatch or
+# push to the feature branch. Do not enable the schedule until reviewed.
+#
+# Design:
+#   - LIMUSD monitor: every 10 minutes (cron: */10 * * * *)
+#   - kHYPE cadence + DefiLlama: every 30 minutes (cron: */30 * * * *)
+#   - Observation JSONL and state files persisted on 'monitor-data' branch
+#   - Each job checks out monitor-data, runs one-shot sampler, commits back
+#   - GITHUB_TOKEN restricted to contents:write for the monitor-data branch
+#   - No secrets, no .env, no wallet access — zero-capital read-only research
+#
+# Usage estimate (free tier: 2000 min/month for private repos, unlimited for public):
+#   - LIMUSD: 6 jobs/hour × 24h × 30d = 4320 jobs/month × ~1 min = ~4320 min
+#   - kHYPE: 2 jobs/hour × 24h × 30d = 1440 jobs/month × ~1 min = ~1440 min
+#   - Total: ~5760 min/month (public repo = free, private = exceeds 2000 free min)
+#   - Repo is public, so this is FREE.
+#
+# Limitations:
+#   - GitHub Actions cron is not exact — may delay up to 15-30 min during peak
+#   - 6-hour max job duration (not an issue — jobs take ~1 min)
+#   - No persistent process — each job is a fresh container
+#   - monitor-data branch grows over time — needs periodic cleanup
+#   - Concurrent runs possible if GitHub delays and then catches up
+#     (mitigated by concurrency group below)
+
+on:
+  # PROTOTYPE: Only manual dispatch for testing. Do NOT enable schedule yet.
+  workflow_dispatch:
+    inputs:
+      sampler:
+        description: 'Which sampler to run'
+        required: true
+        type: choice
+        options:
+          - limusd
+          - khype-cadence
+          - khype-defillama
+          - all
+  # When ready for production, uncomment the schedule:
+  # schedule:
+  #   - cron: '*/10 * * * *'  # LIMUSD every 10 min
+  #   - cron: '*/30 * * * *'  # kHYPE every 30 min
+
+permissions:
+  contents: write  # needed to push to monitor-data branch
+
+jobs:
+  sample-limusd:
+    name: LIMUSD Monitor Sample
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && (inputs.sampler == 'limusd' || inputs.sampler == 'all')
+    # When scheduled: if: github.event_name == 'schedule'
+    concurrency:
+      group: limusd-monitor
+      cancel-in-progress: false
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        # No version key — reads from packageManager in package.json
+      - run: pnpm install --frozen-lockfile
+
+      # Checkout monitor-data branch for observation files
+      - name: Checkout monitor-data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-branches --add origin monitor-data || true
+          git fetch origin monitor-data || true
+          git checkout monitor-data || git checkout -b monitor-data
+          # Copy observation files to working tree
+          mkdir -p data/limusd-study data/khope-study logs
+          git checkout origin/monitor-data -- data/limusd-study/ data/khope-study/ || true
+
+      - name: Run LIMUSD monitor (one-shot)
+        run: ./node_modules/.bin/tsx packages/scanner/src/runners/limusd-monitor.ts --once
+
+      - name: Commit observations to monitor-data branch
+        run: |
+          git add data/limusd-study/
+          git commit -m "monitor: LIMUSD sample $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes"
+          git push origin monitor-data
+
+  sample-khype-cadence:
+    name: kHYPE Cadence Sample
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && (inputs.sampler == 'khype-cadence' || inputs.sampler == 'all')
+    concurrency:
+      group: khype-cadence-monitor
+      cancel-in-progress: false
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+
+      - name: Checkout monitor-data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-branches --add origin monitor-data || true
+          git fetch origin monitor-data || true
+          git checkout monitor-data || git checkout -b monitor-data
+          mkdir -p data/limusd-study data/khope-study logs
+          git checkout origin/monitor-data -- data/khope-study/ || true
+
+      - name: Run kHYPE cadence sampler (one-shot)
+        run: ./node_modules/.bin/tsx packages/scanner/src/runners/khype-cadence-sampler.ts --once
+
+      - name: Commit observations to monitor-data branch
+        run: |
+          git add data/khope-study/cadence-observations.jsonl data/khope-study/cadence-state.json
+          git commit -m "monitor: kHYPE cadence sample $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes"
+          git push origin monitor-data
+
+  sample-khype-defillama:
+    name: kHYPE DefiLlama Sample
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && (inputs.sampler == 'khype-defillama' || inputs.sampler == 'all')
+    concurrency:
+      group: khype-defillama-monitor
+      cancel-in-progress: false
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+
+      - name: Checkout monitor-data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-branches --add origin monitor-data || true
+          git fetch origin monitor-data || true
+          git checkout monitor-data || git checkout -b monitor-data
+          mkdir -p data/limusd-study data/khope-study logs
+          git checkout origin/monitor-data -- data/khope-study/ || true
+
+      - name: Run kHYPE DefiLlama collector (one-shot)
+        run: ./node_modules/.bin/tsx packages/scanner/src/runners/khype-timeseries.ts --once
+
+      - name: Commit observations to monitor-data branch
+        run: |
+          git add data/khope-study/observations.jsonl
+          git commit -m "monitor: kHYPE DefiLlama sample $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes"
+          git push origin monitor-data

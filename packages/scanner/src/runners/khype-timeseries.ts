@@ -281,14 +281,21 @@ function appendObservation(obs: Observation): void {
 }
 
 async function main() {
+  const oneShot = process.argv.includes('--once');
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / kHYPE Time-Series Collector (hardened)');
   console.log(`  Data file:  ${DATA_FILE}`);
-  console.log(`  Poll:       every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Mode:       ${oneShot ? 'ONE-SHOT (exits after 1 sample)' : `continuous (poll every ${POLL_INTERVAL_MS / 1000}s)`}`);
   console.log(`  Zero-capital: no .env, no wallet, public DefiLlama data only`);
   console.log(`  Overlap guard: enabled`);
   console.log(`  Pool identity: full metadata recorded per sample`);
   console.log('═══════════════════════════════════════════════════');
+
+  if (oneShot) {
+    await collectOnce();
+    console.log('[kHYPE] one-shot complete, exiting');
+    process.exit(0);
+  }
 
   await collectOnce();
   setInterval(collectOnce, POLL_INTERVAL_MS);

@@ -387,7 +387,8 @@ async function main() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / kHYPE On-Chain Cadence Sampler');
   console.log(`  Data file:  ${DATA_FILE}`);
-  console.log(`  Poll:       every ${POLL_INTERVAL_MS / 1000}s`);
+  const oneShot = process.argv.includes('--once');
+  console.log(`  Mode:       ${oneShot ? 'ONE-SHOT (exits after 1 sample)' : `continuous (poll every ${POLL_INTERVAL_MS / 1000}s)`}`);
   console.log(`  Zero-capital: no transactions, no wallet, read-only RPC`);
   console.log(`  Accountant: ${ACCOUNTANT_ADDR}`);
   console.log(`  StakingMgr: ${STAKING_MANAGER_ADDR}`);
@@ -398,6 +399,12 @@ async function main() {
   console.log(`              totalSupply=${TOTAL_SUPPLY_SELECTOR}`);
   console.log(`  Cadence:    UNRESOLVED until ≥3 distinct reward-step timestamps`);
   console.log('═══════════════════════════════════════════════════');
+
+  if (oneShot) {
+    await collectOnce();
+    console.log('[khype-cadence] one-shot complete, exiting');
+    process.exit(0);
+  }
 
   await collectOnce();
   setInterval(collectOnce, POLL_INTERVAL_MS);

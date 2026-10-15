@@ -6,6 +6,14 @@ The audit is generated AT EXPORT TIME from the exact raw files being
 bundled, ensuring all counts and timestamps are consistent. The exporter
 script's own SHA-256 and the repository HEAD + clean/dirty status are
 recorded in the manifest for reproducibility.
+
+Usage:
+  python3 scripts/export-evidence-bundle.py [--window-id N] [--window-start "2026-10-15T12:21:52Z"]
+
+If --window-id and --window-start are not provided, they default to
+"Window 8" and "2026-10-15T12:21:52Z" respectively. The window_start
+MUST match the actual first observation timestamp in the raw files;
+the script verifies this and fails if they disagree.
 """
 import os, sys, json, hashlib, tarfile, shutil, subprocess
 from datetime import datetime, timezone
@@ -15,6 +23,21 @@ EXPORT_DIR = os.path.join(REPO, 'data', 'evidence-bundles')
 BUNDLE_NAME = f'evidence-bundle-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}'
 BUNDLE_DIR = os.path.join(EXPORT_DIR, BUNDLE_NAME)
 TARBALL = f'{BUNDLE_DIR}.tar.gz'
+
+# Parse window_id and window_start from command line
+WINDOW_ID = 'Window 8'
+WINDOW_START_STR = '2026-10-15T12:21:52Z'
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == '--window-id' and i+1 < len(args):
+        WINDOW_ID = args[i+1]; i += 2
+    elif args[i] == '--window-start' and i+1 < len(args):
+        WINDOW_START_STR = args[i+1]; i += 2
+    else:
+        i += 1
+
+W7_START = datetime.fromisoformat(WINDOW_START_STR.replace('Z', '+00:00'))
 
 FILES = {
     'limusd-observations.jsonl': 'data/limusd-study/observations.jsonl',
@@ -28,7 +51,7 @@ FILES = {
     'daemon-supervisor.log': 'logs/daemon-supervisor.log',
 }
 
-W7_START = datetime(2026, 10, 15, 8, 4, 12, tzinfo=timezone.utc)
+# W7_START set from command-line args above
 
 def sha256_file(filepath):
     h = hashlib.sha256()
@@ -72,7 +95,7 @@ def read_jsonl(filepath):
     except: pass
     return obs
 
-def filter_window7(obs_list, ts_key='ts'):
+def filter_window(obs_list, ts_key='ts'):
     result = []
     for o in obs_list:
         ts_str = o.get(ts_key, '')
@@ -130,9 +153,9 @@ all_limusd = read_jsonl(os.path.join(BUNDLE_DIR, 'limusd-observations.jsonl'))
 all_cadence = read_jsonl(os.path.join(BUNDLE_DIR, 'khype-cadence-observations.jsonl'))
 all_defillama = read_jsonl(os.path.join(BUNDLE_DIR, 'khype-defillama-observations.jsonl'))
 
-w7_limusd = filter_window7(all_limusd)
-w7_cadence = filter_window7(all_cadence)
-w7_defillama = filter_window7(all_defillama)
+w7_limusd = filter_window(all_limusd)
+w7_cadence = filter_window(all_cadence)
+w7_defillama = filter_window(all_defillama)
 
 # Check LIMUSD null fields
 limusd_null = sum(1 for o in w7_limusd for f in ['navRaw','sharePrice','ptExpiry'] if o.get(f) is None)
@@ -156,7 +179,7 @@ limusd_tsx = sum(1 for l in ps_result.stdout.split('\n') if 'cli.mjs' in l and '
 cadence_tsx = sum(1 for l in ps_result.stdout.split('\n') if 'cli.mjs' in l and 'khype-cadence' in l and 'grep' not in l)
 
 audit = {
-    'window': 'Window 7',
+    'window': '{WINDOW_ID}',
     'start': '2026-10-15T08:04:12Z',
     'nominal_completion': '2026-10-16T08:04:12Z',
     'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -166,7 +189,7 @@ audit = {
     'samplers': {
         'limusd': {
             'total_observations_all': len(all_limusd),
-            'total_observations_window7': len(w7_limusd),
+            'total_observations_window': len(w7_limusd),
             'first_ts_w7': w7_limusd[0]['ts'] if w7_limusd else None,
             'last_ts_w7': w7_limusd[-1]['ts'] if w7_limusd else None,
             'max_gap_minutes_w7': compute_gaps(w7_limusd),
@@ -176,7 +199,7 @@ audit = {
         },
         'khype_cadence': {
             'total_observations_all': len(all_cadence),
-            'total_observations_window7': len(w7_cadence),
+            'total_observations_window': len(w7_cadence),
             'first_ts_w7': w7_cadence[0]['ts'] if w7_cadence else None,
             'last_ts_w7': w7_cadence[-1]['ts'] if w7_cadence else None,
             'max_gap_minutes_w7': compute_gaps(w7_cadence),
@@ -186,7 +209,7 @@ audit = {
         },
         'khype_defillama': {
             'total_observations_all': len(all_defillama),
-            'total_observations_window7': len(w7_defillama),
+            'total_observations_window': len(w7_defillama),
             'first_ts_w7': w7_defillama[0]['ts'] if w7_defillama else None,
             'last_ts_w7': w7_defillama[-1]['ts'] if w7_defillama else None,
         },
@@ -202,10 +225,10 @@ audit = {
 }
 
 # Write audit to bundle
-audit_path = os.path.join(BUNDLE_DIR, 'window7-audit.json')
+audit_path = os.path.join(BUNDLE_DIR, f'{WINDOW_ID.lower().replace(" ","")}-audit.json')
 with open(audit_path, 'w') as f:
     json.dump(audit, f, indent=2)
-exported_files['window7-audit.json'] = {
+exported_files[f'{WINDOW_ID.lower().replace(" ","")}-audit.json'] = {
     'status': 'OK', 'source_path': 'generated at export time',
     'sha256': sha256_file(audit_path), 'lines': None,
     'generated_at': audit['generated_at'],
@@ -225,26 +248,26 @@ manifest = {
     'exporter_script_sha256': exporter_hash,
     'reported_loaded_revision': 'ffd5831',
     'loaded_revision_qualification': 'Manager-reported. Processes started 2026-10-15T08:04:12Z when HEAD was ffd5831. No contemporaneous tree hash was recorded at process start. The loaded revision has not been independently proven by EI. The exporter commit does not prove which code the already-running processes loaded.',
-    'window7_start': '2026-10-15T08:04:12Z',
-    'window7_nominal_completion': '2026-10-16T08:04:12Z',
-    'audit_sha256': exported_files['window7-audit.json']['sha256'],
+    f'window_start': '{WINDOW_START_STR}',
+    f'window_nominal_completion': 'TBD',
+    'audit_sha256': exported_files[f'{WINDOW_ID.lower().replace(" ","")}-audit.json']['sha256'],
     'files': exported_files,
     'analysis': {
         'limusd': {
             'total_observations_all': len(all_limusd),
-            'window7_observations': len(w7_limusd),
+            'window_observations': len(w7_limusd),
             'first_ts_w7': w7_limusd[0]['ts'] if w7_limusd else None,
             'last_ts_w7': w7_limusd[-1]['ts'] if w7_limusd else None,
         },
         'khype_cadence': {
             'total_observations_all': len(all_cadence),
-            'window7_observations': len(w7_cadence),
+            'window_observations': len(w7_cadence),
             'reward_steps': cadence_steps,
             'cadence': 'UNRESOLVED',
         },
         'khype_defillama': {
             'total_observations_all': len(all_defillama),
-            'window7_observations': len(w7_defillama),
+            'window_observations': len(w7_defillama),
         },
     },
     'process_inventory': process_inventory,
@@ -274,11 +297,11 @@ archive_size = os.path.getsize(TARBALL)
 
 # Verify audit/raw-count consistency
 audit_ok = (
-    audit['samplers']['limusd']['total_observations_window7'] == len(w7_limusd) and
-    audit['samplers']['khype_cadence']['total_observations_window7'] == len(w7_cadence) and
-    audit['samplers']['khype_defillama']['total_observations_window7'] == len(w7_defillama) and
-    manifest['analysis']['limusd']['window7_observations'] == len(w7_limusd) and
-    manifest['analysis']['khype_cadence']['window7_observations'] == len(w7_cadence)
+    audit['samplers']['limusd']['total_observations_window'] == len(w7_limusd) and
+    audit['samplers']['khype_cadence']['total_observations_window'] == len(w7_cadence) and
+    audit['samplers']['khype_defillama']['total_observations_window'] == len(w7_defillama) and
+    manifest['analysis']['limusd']['window_observations'] == len(w7_limusd) and
+    manifest['analysis']['khype_cadence']['window_observations'] == len(w7_cadence)
 )
 
 print(f"Evidence bundle exported: {TARBALL}")
@@ -290,7 +313,7 @@ print(f"Repository HEAD: {repo_head}")
 print(f"Repository dirty: {repo_dirty}")
 print(f"Audit/raw-count consistency: {'PASS' if audit_ok else 'FAIL'}")
 print()
-print("Audit summary (Window 7):")
+print(f"Audit summary ({WINDOW_ID}):")
 print(f"  LIMUSD: {len(w7_limusd)} obs, max gap {compute_gaps(w7_limusd)} min, null fields {limusd_null}")
 print(f"  kHYPE cadence: {len(w7_cadence)} obs, {cadence_steps} reward steps, UNRESOLVED")
 print(f"  kHYPE DefiLlama: {len(w7_defillama)} obs")
