@@ -1,11 +1,18 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 09:59 UTC
+**Last updated:** 2026-10-15, 10:27 UTC
+
+**Time provenance:** All timestamps in observations, logs, commits, and
+evidence bundles use the Manager host's system clock set to UTC. The
+review context's "09:34 UTC" is the EI reviewer's local observation time;
+the Manager's system clock reads ~10:00–10:27 UTC during this session.
+There is no discrepancy within Manager-side evidence — all UTC timestamps
+are internally consistent and derived from the same system clock.
 
 **Revision terminology (distinct concepts):**
-- **Repository HEAD:** `4674ef5` — the latest commit on `main`. CI green: https://github.com/Dannyednut/Edge-Engine/actions/runs/38710180602
-- **Latest daemon-source revision:** `5b6d376` — the most recent commit that changed daemon source code (`limusd-monitor.ts`, `khype-cadence-sampler.ts`). All commits since (`ffd5831`, `457d8f5`, `5ca4f62`, `56327aa`, `f6c940f`, `4674ef5`) are docs-only or script-only and do not affect daemon behavior.
-- **Exporter revision:** `4674ef5` — the commit from which the evidence bundle exporter (`scripts/export-evidence-bundle.py`) was last run. Recorded in each bundle's manifest as `repository_head_at_export`.
+- **Repository HEAD (current `main`):** See `git log --oneline -1` for the latest commit. Each evidence bundle's manifest records `repository_head_at_export` as the HEAD at the time that specific bundle was exported.
+- **Latest daemon-source revision:** `5b6d376` — the most recent commit that changed daemon source code (`limusd-monitor.ts`, `khype-cadence-sampler.ts`). All commits since are docs-only or script-only and do not affect daemon behavior.
+- **Exporter revision:** Recorded in each bundle's manifest as `repository_head_at_export`. May differ from the current `main` HEAD if new commits have been pushed after the bundle was exported.
 - **Manager-reported loaded revision:** `ffd5831` — the HEAD at the time daemon processes were started (2026-10-15T08:04:12Z). This is Manager-reported and has NOT been independently proven by EI. No contemporaneous tree hash was recorded at process start. The loaded revision is consistent with `5b6d376` (daemon source unchanged between `5b6d376` and `ffd5831`).
 
 **Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention. No restart since 08:04:12Z.
