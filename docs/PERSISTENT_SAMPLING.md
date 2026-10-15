@@ -1,13 +1,17 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 10:27 UTC
+**Last updated:** 2026-10-15, 12:20 UTC
 
 **Time provenance:** All timestamps in observations, logs, commits, and
 evidence bundles use the Manager host's system clock set to UTC. The
-review context's "09:34 UTC" is the EI reviewer's local observation time;
-the Manager's system clock reads ~10:00–10:27 UTC during this session.
-There is no discrepancy within Manager-side evidence — all UTC timestamps
-are internally consistent and derived from the same system clock.
+review context may reference a timestamp (e.g., "09:34 UTC") that
+reflects when the EI reviewer composed their message; this is not the
+same as the Manager's system clock at the time of bundle export. The
+Manager's system clock and git commit timestamps are internally
+consistent. Each evidence bundle's `export_time` field records the
+exact system-clock UTC timestamp at which that bundle was generated.
+Do not assume a bundle is contemporaneous with a review message unless
+the `export_time` and the review timestamp agree.
 
 **Revision terminology (distinct concepts):**
 - **Repository HEAD (current `main`):** See `git log --oneline -1` for the latest commit. Each evidence bundle's manifest records `repository_head_at_export` as the HEAD at the time that specific bundle was exported.
@@ -152,14 +156,16 @@ DAEMONS array. PID files in `run/<name>.pid`.
 **Window 4 (INVALIDATED):** Start `2026-10-15T06:52:24Z`. Controlled restart at `07:07:46Z` (code update to `e836183`).
 **Window 5 (INVALIDATED):** Start `2026-10-15T07:07:46Z`. Controlled restart at `07:18:37Z` (code update to working tree subsequently committed as `5b6d376`).
 **Window 6 (INVALIDATED):** Start `2026-10-15T07:18:37Z`. Container restart at ~08:01 UTC killed all processes. Not a controlled restart — the host environment restarted.
-**Window 7 (CURRENT):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Nominal completion: `2026-10-16T08:04:12Z`. Status: PENDING.
+**Window 7 (INVALIDATED):** Start `2026-10-15T08:04:12Z` (confirmed from `ps -eo lstart`). HEAD at start: `ffd5831` (docs-only change from `5b6d376` — no daemon source affected). Environment restart between sessions killed all processes. Not a controlled restart.
+**Window 8 (CURRENT):** Start upon daemon restart (see below). Status: PENDING.
 
 Note: Window 1 was compromised by an observation gap (~10h). Windows 2–5
 were invalidated by controlled restarts for code updates. Window 6 was
 invalidated by an environment/container restart (~08:01 UTC) that killed
-all processes. Window 7 is the current window. The daemons loaded commit
-`ffd5831` (docs-only change from CI-verified `5b6d376` — no daemon source
-code affected). The latest repository commit is `457d8f5` (also docs-only).
+all processes. Window 7 was invalidated by an environment restart between
+sessions. Window 8 is the current window. The daemons loaded commit
+`f7aeb04` (docs-only change from CI-verified `5b6d376` — no daemon source
+code affected). The latest repository commit at the time of writing is `f7aeb04` (also docs-only).
 
 Startup/commit claim qualification (Window 6):
   Process start: 2026-10-15T07:18:37Z (ps -eo lstart)
