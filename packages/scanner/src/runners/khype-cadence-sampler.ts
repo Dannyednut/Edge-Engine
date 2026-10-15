@@ -246,8 +246,10 @@ async function collectOnce(): Promise<void> {
       if (delta > 0n) {
         // Positive delta = reward credit (a reward step)
         rewardStepDetected = true;
-        state.rewardStepCount++;
-        console.log(`[khype-cadence] REWARD STEP DETECTED: delta=${bigToDecimalString(delta, 18)} HYPE (cumulative steps: ${state.rewardStepCount})`);
+        // STAGE the step count — do NOT mutate state.rewardStepCount yet.
+        // It will be committed only after the JSONL append succeeds.
+        // (EI-S008 P1: state-commit ordering fix)
+        console.log(`[khype-cadence] REWARD STEP DETECTED (pending commit): delta=${bigToDecimalString(delta, 18)} HYPE (staged count: ${state.rewardStepCount + 1})`);
       } else if (delta < 0n) {
         // Negative delta = anomaly (totalRewards should only increase)
         // Do NOT count as a reward step — flag as anomaly
@@ -309,12 +311,20 @@ async function collectOnce(): Promise<void> {
       if (totalRewards !== null) state.lastTotalRewards = totalRewards.toString();
       if (anchorRate !== null) state.lastAnchor = anchorRate.toString();
       state.lastTs = ts;
+      // Commit the staged step count ONLY after the observation is recorded
+      if (rewardStepDetected) {
+        state.rewardStepCount++;
+        console.log(`[khype-cadence] reward step committed (cumulative: ${state.rewardStepCount})`);
+      }
       state.lastObservationAppended = true;
       saveState(state);
     } else {
       state.lastObservationAppended = false;
-      // Still save state to record the failure, but don't advance lastTotalRewards/lastTs
-      saveState(state);
+      // Do NOT save state with advanced counters or baselines on append failure.
+      // Save only the failure flag for audit — lastTotalRewards/lastTs remain unchanged.
+      // (EI-S008 P1: failed append must not consume a step or advance the baseline)
+      const failState = { ...state, lastObservationAppended: false };
+      saveState(failState);
     }
 
     console.log(`[khype-cadence] next sample in ${POLL_INTERVAL_MS / 1000}s`);

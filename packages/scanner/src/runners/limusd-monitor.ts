@@ -525,15 +525,18 @@ async function collectOnce(): Promise<void> {
   }
 
   // 8. Redemption buffer alert (true transition-based, EI-S008 §A)
+  // STAGE state changes — do NOT mutate state directly. Commit only after append.
   let redemptionBufferUsd: number | null = null;
+  let stagedBufferBreachActive = state.bufferBreachActive; // staged copy
   if (redemptionBufferRaw !== null) {
     redemptionBufferUsd = Number(redemptionBufferRaw) / 1e6;
     const bufferResult = evaluateBufferTransition(redemptionBufferUsd, state);
     alerts.push(...bufferResult.alerts);
-    // Update the breach state for next sample
-    state.bufferBreachActive = redemptionBufferUsd < REDEMPTION_BUFFER_THRESHOLD_USD;
+    // STAGE the breach state — commit after append
+    stagedBufferBreachActive = redemptionBufferUsd < REDEMPTION_BUFFER_THRESHOLD_USD;
   } else {
     // RPC read failed — distinguish from a true zero balance
+    // Apply cooldown to read-failed alerts (does NOT suppress buffer transitions)
     if (shouldAlert(state, 'redemption_buffer_read_failed')) {
       alerts.push(`Redemption buffer RPC read FAILED (not zero — distinguish from real zero)`);
       recordAlert(state, 'redemption_buffer_read_failed');
@@ -541,33 +544,45 @@ async function collectOnce(): Promise<void> {
   }
 
   // 9. Share-price daily decline alert (time-aware, EI-S008 §B)
+  // Apply 1h cooldown to share-price decline alerts
   let dailyDeclinePct: number | null = null;
   if (sharePrice) {
     const declineResult = evaluateSharePriceDecline(
       sharePrice, state.lastSharePrice, ts, state.lastSharePriceTs,
     );
-    alerts.push(...declineResult.alerts);
+    if (declineResult.alerts.length > 0 && shouldAlert(state, 'share_price_decline')) {
+      alerts.push(...declineResult.alerts);
+      recordAlert(state, 'share_price_decline');
+    }
     dailyDeclinePct = declineResult.dailyDeclinePct;
   }
 
   // 10. Share-price 2% baseline veto (EI-S008 §C)
+  // Apply 1h cooldown to veto alerts (but always set vetoFlag in observation)
   let vetoFlag = false;
+  let stagedBaseline = state.sharePriceBaseline;
+  let stagedBaselineTs = state.sharePriceBaselineTs;
   if (sharePrice) {
     // Set baseline on first observation (or if baseline was lost on restart)
-    if (!state.sharePriceBaseline) {
-      state.sharePriceBaseline = sharePrice;
-      state.sharePriceBaselineTs = ts;
-      console.log(`[limusd] share-price baseline set: ${sharePrice} at ${ts}`);
+    if (!stagedBaseline) {
+      stagedBaseline = sharePrice;
+      stagedBaselineTs = ts;
+      console.log(`[limusd] share-price baseline set (staged): ${sharePrice} at ${ts}`);
     }
-    const vetoResult = evaluateBaselineVeto(sharePrice, state.sharePriceBaseline);
-    alerts.push(...vetoResult.alerts);
+    const vetoResult = evaluateBaselineVeto(sharePrice, stagedBaseline);
     vetoFlag = vetoResult.vetoFlag;
+    if (vetoResult.alerts.length > 0 && shouldAlert(state, 'baseline_veto')) {
+      alerts.push(...vetoResult.alerts);
+      recordAlert(state, 'baseline_veto');
+    }
   }
 
-  // Update state with current share price
+  // STAGE share-price state — commit after append
+  let stagedLastSharePrice = state.lastSharePrice;
+  let stagedLastSharePriceTs = state.lastSharePriceTs;
   if (sharePrice) {
-    state.lastSharePrice = sharePrice;
-    state.lastSharePriceTs = ts;
+    stagedLastSharePrice = sharePrice;
+    stagedLastSharePriceTs = ts;
   }
 
   // 10. Build observation
@@ -606,10 +621,14 @@ async function collectOnce(): Promise<void> {
     obs.note = `Read failures: ${readFailures.join(', ')}`;
   }
 
-  // 11. Append to JSONL
+  // 11. Append to JSONL FIRST — only commit state if append succeeds
+  // (EI-S008 P1: state-commit ordering — failed append must not consume
+  // an alert transition or advance the last-recorded observation state)
+  let appendSuccess = false;
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
     appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
+    appendSuccess = true;
     console.log(`[limusd] sample saved: block=${blockNumber} limUSD=${obs.limUsdTotalSupply} PT=${obs.ptTotalSupply} sharePrice=${sharePrice ?? 'n/a'} buffer=$${redemptionBufferUsd?.toFixed(2) ?? 'n/a'}`);
     if (alerts.length > 0) {
       for (const a of alerts) console.log(`[limusd] ALERT: ${a}`);
@@ -618,7 +637,22 @@ async function collectOnce(): Promise<void> {
     console.error(`[limusd] failed to write observation: ${err?.message ?? err}`);
   }
 
-  saveState(state);
+  // 12. Commit staged state ONLY after successful append
+  if (appendSuccess) {
+    state.bufferBreachActive = stagedBufferBreachActive;
+    state.sharePriceBaseline = stagedBaseline;
+    state.sharePriceBaselineTs = stagedBaselineTs;
+    state.lastSharePrice = stagedLastSharePrice;
+    state.lastSharePriceTs = stagedLastSharePriceTs;
+    saveState(state);
+  } else {
+    // Append failed — do NOT commit any staged state changes.
+    // Save only the alert cooldown times (which were already mutated for
+    // read-failed alerts) but preserve the observation baseline.
+    // (EI-S008 P1: a failed append must not silently consume a transition)
+    saveState(state); // saves cooldown updates but NOT staged observation state
+  }
+
   console.log(`[limusd] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
   } finally {
