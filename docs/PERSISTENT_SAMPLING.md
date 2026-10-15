@@ -1,7 +1,8 @@
 # Persistent Sampling Infrastructure
 
-**Last updated:** 2026-10-15, 06:51 UTC
-**Deployed commit:** `2337e45` (CI green — verified by principal)
+**Last updated:** 2026-10-15, 07:04 UTC
+**Deployed commit:** `232137c` (CI green — verified by principal: https://github.com/Dannyednut/Edge-Engine/actions/runs/38695117845)
+**Running processes loaded:** commit at time of last controlled restart (06:52 UTC)
 **Status:** ACTIVE — 12 daemons supervised with PID-file duplicate prevention
 
 ## Overview
@@ -134,8 +135,9 @@ DAEMONS array. PID files in `run/<name>.pid`.
 
 ### Window history
 **Window 1 (COMPROMISED):** Start `2026-10-14T16:36:56Z`. Gap `18:47:59Z → 04:51:31Z` (~10h). FAIL.
-**Window 2 (RESTARTED):** Start `2026-10-15T04:51:31Z`. Controlled restart at `06:36:56Z` (code update). New window starts at `06:36:56Z`.
-**Window 3 (CURRENT):** Start `2026-10-15T06:36:56Z`. Nominal completion: `2026-10-16T06:36:56Z`. Status: PENDING.
+**Window 2 (RESTARTED):** Start `2026-10-15T04:51:31Z`. Controlled restart at `06:36:56Z` (code update). Invalidated.
+**Window 3 (RESTARTED):** Start `2026-10-15T06:36:56Z`. Controlled restart at `06:52:24Z` (code update). Invalidated.
+**Window 4 (CURRENT):** Start `2026-10-15T06:52:24Z`. Nominal completion: `2026-10-16T06:52:24Z`. Status: PENDING.
 
 ### Pass criteria
 1. No gaps > 60 minutes in observation timestamps

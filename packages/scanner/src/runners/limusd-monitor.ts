@@ -446,6 +446,80 @@ function saveState(state: MonitorState): void {
   }
 }
 
+// ─── Production commit helper (exported for DI testing) ────────────
+
+/** Staged state to be committed after a successful observation append. */
+export interface StagedState {
+  bufferBreachActive: boolean;
+  sharePriceBaseline: string | null;
+  sharePriceBaselineTs: string | null;
+  lastSharePrice: string | null;
+  lastSharePriceTs: string | null;
+  cooldowns: Record<string, number>;
+}
+
+/**
+ * Type of the append function — injectable for testing.
+ * In production, this calls appendFileSync. In tests, it can throw
+ * to simulate a write failure.
+ */
+export type AppendFn = (obs: Observation) => void;
+
+/** Default production append function. */
+const defaultAppend: AppendFn = (obs: Observation) => {
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+  appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
+};
+
+/**
+ * Commit an observation and its staged state.
+ *
+ * This is the PRODUCTION commit path — tests inject a failing appendFn
+ * to verify that failed writes do not advance any state.
+ *
+ * Ordering:
+ *   1. Append observation to JSONL (via appendFn)
+ *   2. If append succeeds: commit ALL staged state to the state object + saveState
+ *   3. If append fails: do NOT mutate state at all — no cooldowns, no transitions, no baselines
+ *
+ * @returns true if the observation was committed, false if the append failed.
+ */
+export function commitObservation(
+  state: MonitorState,
+  obs: Observation,
+  staged: StagedState,
+  appendFn: AppendFn = defaultAppend,
+  saveStateFn: (s: MonitorState) => void = saveState,
+): boolean {
+  let appendSuccess = false;
+  try {
+    appendFn(obs);
+    appendSuccess = true;
+    console.log(`[limusd] sample saved: block=${obs.blockNumber} sharePrice=${obs.sharePrice ?? 'n/a'} buffer=$${obs.redemptionBufferUsd?.toFixed(2) ?? 'n/a'}`);
+    if (obs.alerts.length > 0) {
+      for (const a of obs.alerts) console.log(`[limusd] ALERT: ${a}`);
+    }
+  } catch (err: any) {
+    console.error(`[limusd] failed to write observation: ${err?.message ?? err}`);
+  }
+
+  if (appendSuccess) {
+    // Commit ALL staged state
+    state.bufferBreachActive = staged.bufferBreachActive;
+    state.sharePriceBaseline = staged.sharePriceBaseline;
+    state.sharePriceBaselineTs = staged.sharePriceBaselineTs;
+    state.lastSharePrice = staged.lastSharePrice;
+    state.lastSharePriceTs = staged.lastSharePriceTs;
+    for (const [key, ts_val] of Object.entries(staged.cooldowns)) {
+      state.lastAlertTime[key] = ts_val;
+    }
+    saveStateFn(state);
+  }
+  // On failure: NO state mutation at all.
+
+  return appendSuccess;
+}
+
 function shouldAlert(state: MonitorState, alertKey: string): boolean {
   const last = state.lastAlertTime[alertKey] ?? 0;
   return (Date.now() - last) >= ALERT_COOLDOWN_MS;
@@ -623,42 +697,19 @@ async function collectOnce(): Promise<void> {
     obs.note = `Read failures: ${readFailures.join(', ')}`;
   }
 
-  // 11. Append to JSONL FIRST — only commit state if append succeeds
-  // (EI-S008 P1: state-commit ordering — failed append must not consume
-  // an alert transition, advance the last-recorded observation state,
-  // or persist cooldown timestamps for alerts that were not recorded)
-  let appendSuccess = false;
-  try {
-    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-    appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
-    appendSuccess = true;
-    console.log(`[limusd] sample saved: block=${blockNumber} limUSD=${obs.limUsdTotalSupply} PT=${obs.ptTotalSupply} sharePrice=${sharePrice ?? 'n/a'} buffer=$${redemptionBufferUsd?.toFixed(2) ?? 'n/a'}`);
-    if (alerts.length > 0) {
-      for (const a of alerts) console.log(`[limusd] ALERT: ${a}`);
-    }
-  } catch (err: any) {
-    console.error(`[limusd] failed to write observation: ${err?.message ?? err}`);
-  }
-
-  // 12. Commit staged state ONLY after successful append
-  if (appendSuccess) {
-    state.bufferBreachActive = stagedBufferBreachActive;
-    state.sharePriceBaseline = stagedBaseline;
-    state.sharePriceBaselineTs = stagedBaselineTs;
-    state.lastSharePrice = stagedLastSharePrice;
-    state.lastSharePriceTs = stagedLastSharePriceTs;
-    // Commit staged cooldowns
-    for (const [key, ts_val] of Object.entries(stagedCooldowns)) {
-      state.lastAlertTime[key] = ts_val;
-    }
-    saveState(state);
-  } else {
-    // Append failed — do NOT commit any staged state or cooldowns.
-    // The observation was not recorded, so its alerts must not consume
-    // their cooldowns. No state mutation at all.
-    // (EI-S008 P1: failed append must not silently consume an alert
-    // transition or advance cooldown timestamps)
-  }
+  // 11. Commit observation + staged state via the production commit helper.
+  // (EI-S008 P1: commitObservation handles append-then-commit ordering.
+  // On append failure: NO state mutation — no cooldowns, no transitions,
+  // no baselines are consumed.)
+  const staged: StagedState = {
+    bufferBreachActive: stagedBufferBreachActive,
+    sharePriceBaseline: stagedBaseline,
+    sharePriceBaselineTs: stagedBaselineTs,
+    lastSharePrice: stagedLastSharePrice,
+    lastSharePriceTs: stagedLastSharePriceTs,
+    cooldowns: stagedCooldowns,
+  };
+  commitObservation(state, obs, staged);
 
   console.log(`[limusd] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 

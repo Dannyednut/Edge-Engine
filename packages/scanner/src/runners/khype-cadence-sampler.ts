@@ -190,6 +190,69 @@ function saveState(state: CadenceState): void {
   }
 }
 
+// ─── Production commit helper (exported for DI testing) ────────────
+
+/** Staged cadence state to be committed after a successful observation append. */
+export interface StagedCadenceState {
+  lastTotalRewards: string | null;
+  lastAnchor: string | null;
+  lastTs: string;
+  rewardStep: boolean;  // true if a reward step was detected (positive delta)
+}
+
+/** Type of the append function — injectable for testing. */
+export type CadenceAppendFn = (obs: Observation) => void;
+
+/** Default production append function. */
+const defaultCadenceAppend: CadenceAppendFn = (obs: Observation) => {
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+  appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
+};
+
+/**
+ * Commit a cadence observation and its staged state.
+ *
+ * Production commit path — tests inject a failing appendFn to verify
+ * that failed writes do not advance rewardStepCount, lastTotalRewards,
+ * lastAnchor, or lastTs.
+ *
+ * @returns true if committed, false if append failed.
+ */
+export function commitCadenceObservation(
+  state: CadenceState,
+  obs: Observation,
+  staged: StagedCadenceState,
+  appendFn: CadenceAppendFn = defaultCadenceAppend,
+  saveStateFn: (s: CadenceState) => void = saveState,
+): boolean {
+  let appendSuccess = false;
+  try {
+    appendFn(obs);
+    appendSuccess = true;
+    console.log(`[khype-cadence] sample saved: block=${obs.blockNumber} totalRewards=${obs.totalRewards} anchor=${obs.anchorExchangeRate} step=${obs.rewardStepDetected} secsSincePrev=${obs.secsSincePrevSample}`);
+  } catch (err: any) {
+    console.error(`[khype-cadence] failed to write observation: ${err?.message ?? err}`);
+  }
+
+  if (appendSuccess) {
+    state.lastTotalRewards = staged.lastTotalRewards;
+    state.lastAnchor = staged.lastAnchor;
+    state.lastTs = staged.lastTs;
+    if (staged.rewardStep) {
+      state.rewardStepCount++;
+      console.log(`[khype-cadence] reward step committed (cumulative: ${state.rewardStepCount})`);
+    }
+    state.lastObservationAppended = true;
+    saveStateFn(state);
+  } else {
+    // Append failed — do NOT advance any state
+    state.lastObservationAppended = false;
+    // Do NOT save state with advanced counters on failure
+  }
+
+  return appendSuccess;
+}
+
 // ─── Collection ─────────────────────────────────────────────────────
 
 let collecting = false;
@@ -293,39 +356,15 @@ async function collectOnce(): Promise<void> {
       obs.note = `Read failures: ${readFailures.join(', ')}`;
     }
 
-    // 5. Append to JSONL FIRST — only update state if append succeeds
-    // (EI-S008 §3.3: step counters must not advance if JSONL append fails)
-    let appendSuccess = false;
-    try {
-      if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-      appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
-      appendSuccess = true;
-      console.log(`[khype-cadence] sample saved: block=${blockNumber} totalRewards=${obs.totalRewards} anchor=${obs.anchorExchangeRate} step=${rewardStepDetected} secsSincePrev=${secsSincePrevSample}`);
-    } catch (err: any) {
-      console.error(`[khype-cadence] failed to write observation: ${err?.message ?? err}`);
-      // Do NOT update state — the observation was not recorded
-    }
-
-    // 6. Update state ONLY after successful append
-    if (appendSuccess) {
-      if (totalRewards !== null) state.lastTotalRewards = totalRewards.toString();
-      if (anchorRate !== null) state.lastAnchor = anchorRate.toString();
-      state.lastTs = ts;
-      // Commit the staged step count ONLY after the observation is recorded
-      if (rewardStepDetected) {
-        state.rewardStepCount++;
-        console.log(`[khype-cadence] reward step committed (cumulative: ${state.rewardStepCount})`);
-      }
-      state.lastObservationAppended = true;
-      saveState(state);
-    } else {
-      state.lastObservationAppended = false;
-      // Do NOT save state with advanced counters or baselines on append failure.
-      // Save only the failure flag for audit — lastTotalRewards/lastTs remain unchanged.
-      // (EI-S008 P1: failed append must not consume a step or advance the baseline)
-      const failState = { ...state, lastObservationAppended: false };
-      saveState(failState);
-    }
+    // 5. Commit observation + staged state via the production commit helper.
+    // (EI-S008 P1: commitCadenceObservation handles append-then-commit ordering.)
+    const staged: StagedCadenceState = {
+      lastTotalRewards: totalRewards?.toString() ?? state.lastTotalRewards,
+      lastAnchor: anchorRate?.toString() ?? state.lastAnchor,
+      lastTs: ts,
+      rewardStep: rewardStepDetected,
+    };
+    commitCadenceObservation(state, obs, staged);
 
     console.log(`[khype-cadence] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
