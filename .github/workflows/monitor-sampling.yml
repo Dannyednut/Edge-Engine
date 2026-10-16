@@ -1,15 +1,16 @@
 name: Monitor Sampling (Prototype — Not Scheduled)
 
 # PROTOTYPE: This workflow is on a feature branch and is NOT enabled for
-# scheduled production runs. It triggers only on manual dispatch.
-# Do not enable the schedule until reviewed and approved.
+# scheduled production runs. It triggers on push to feature/gh-actions-sampling
+# (for validation) and on manual dispatch. Do not enable the schedule until
+# reviewed and approved.
 #
 # Design: Single serialized writer with source/data branch separation
-#   - Source code: always from main (reviewed revision)
-#   - Observation data: persisted on monitor-data branch
+#   - Source code: from the triggering commit (github.sha) on feature branch
+#   - Observation data: persisted on monitor-data-validation branch (temporary)
 #   - One job every 10 minutes (when schedule is enabled)
 #   - Runs LIMUSD every time; kHYPE when 30 min elapsed since last sample
-#   - data/ is gitignored on main — uses git add -f to track on monitor-data
+#   - data/ is gitignored on main — uses git add -f to track on data branch
 #
 # Cost (public repo = free GitHub Actions):
 #   - Single writer every 10 min = 4,320 runs/month
@@ -29,9 +30,22 @@ on:
         required: false
         type: boolean
         default: false
+  push:
+    branches:
+      - feature/gh-actions-sampling
+    paths:
+      - '.github/workflows/monitor-sampling.yml'
+      - 'packages/scanner/src/runners/limusd-monitor.ts'
+      - 'packages/scanner/src/runners/khype-cadence-sampler.ts'
+      - 'packages/scanner/src/runners/khype-timeseries.ts'
   # When ready for production, uncomment:
   # schedule:
   #   - cron: '*/10 * * * *'
+
+# Use the validation data branch — NOT the canonical monitor-data branch
+# This prevents validation runs from contaminating production evidence
+env:
+  DATA_BRANCH: monitor-data-validation
 
 permissions:
   contents: write
@@ -45,11 +59,12 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 10
     steps:
-      # Step 1: Checkout SOURCE from main (reviewed revision)
-      - name: Checkout source (main branch)
+      # Step 1: Checkout SOURCE from the triggering commit (NOT main)
+      # This ensures feature-branch validation runs the code on this branch
+      - name: Checkout source (triggering commit)
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Setup Node.js + pnpm
@@ -63,39 +78,62 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies (from main source)
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Step 2: Fetch observation DATA from monitor-data branch
-      # Do NOT switch the worktree — keep source from main.
-      # Only extract data/ files from the monitor-data branch.
-      - name: Fetch observation data from monitor-data branch
+      # Step 2: Fetch observation DATA from the validation data branch
+      # Do NOT switch the worktree — keep source from the triggering commit.
+      # Only extract data/ files from the data branch.
+      # FAIL CLOSED on any unexpected error — distinguish genuine first-run
+      # (branch absent) from fetch/checkout/permission failures.
+      - name: Fetch observation data from ${{ env.DATA_BRANCH }} branch
+        id: data_fetch
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           mkdir -p data/limusd-study data/khope-study
 
-          # Check if monitor-data branch exists on remote
-          if git ls-remote --heads origin monitor-data | grep -q monitor-data; then
-            echo "monitor-data branch exists — fetching data files"
-            git fetch origin monitor-data || {
-              echo "ERROR: Failed to fetch monitor-data branch"
+          # Check if data branch exists on remote
+          BRANCH_EXISTS=$(git ls-remote --heads origin "${{ env.DATA_BRANCH }}" | wc -l)
+
+          if [ "$BRANCH_EXISTS" -eq 0 ]; then
+            echo "CASE: Branch ${{ env.DATA_BRANCH }} does not exist — genuine first run"
+            echo "data_status=first_run" >> $GITHUB_OUTPUT
+          else
+            echo "CASE: Branch ${{ env.DATA_BRANCH }} exists — fetching"
+            git fetch origin "${{ env.DATA_BRANCH }}" || {
+              echo "ERROR: Failed to fetch ${{ env.DATA_BRANCH }} branch (network/auth error)"
               exit 1
             }
-            # Extract data/ files from monitor-data without switching branches
-            git checkout origin/monitor-data -- data/limusd-study/ data/khope-study/ || echo "No existing data files (first run or no data on branch)"
-          else
-            echo "monitor-data branch does not exist — first run, no existing data"
-          fi
 
-          # Verify data files are present (or empty for first run)
-          ls -la data/limusd-study/ data/khope-study/ 2>/dev/null || true
+            # Try to extract data/ files from the data branch
+            # If no data files exist on the branch yet, this is an empty-data case
+            if git checkout origin/${{ env.DATA_BRANCH }} -- data/limusd-study/ data/khope-study/ 2>/dev/null; then
+              echo "CASE: Data files successfully fetched from ${{ env.DATA_BRANCH }}"
+              echo "data_status=fetched" >> $GITHUB_OUTPUT
+
+              # Verify the files are actually present
+              if [ -f data/limusd-study/observations.jsonl ]; then
+                LIMUSD_COUNT=$(wc -l < data/limusd-study/observations.jsonl)
+                echo "LIMUSD observations: $LIMUSD_COUNT lines"
+              fi
+              if [ -f data/khope-study/cadence-observations.jsonl ]; then
+                CADENCE_COUNT=$(wc -l < data/khope-study/cadence-observations.jsonl)
+                echo "kHYPE cadence observations: $CADENCE_COUNT lines"
+              fi
+            else
+              echo "CASE: Branch exists but no data files found — empty data branch"
+              echo "data_status=empty_branch" >> $GITHUB_OUTPUT
+            fi
+          fi
 
       # Step 3: Check if kHYPE 30-min interval is due
       - name: Check if kHYPE 30-min interval is due
         id: khype_due
         run: |
+          set -euo pipefail
           if [ -f data/khope-study/cadence-observations.jsonl ] && [ -s data/khope-study/cadence-observations.jsonl ]; then
             LAST_TS=$(tail -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
             if [ -n "$LAST_TS" ]; then
@@ -116,9 +154,10 @@ jobs:
             echo "No cadence file — first run"
           fi
 
-      # Step 4: Run samplers (source from main, data in worktree)
+      # Step 4: Run samplers (source from triggering commit, data in worktree)
       - name: Run LIMUSD monitor (one-shot)
         run: |
+          set -euo pipefail
           ./node_modules/.bin/tsx packages/scanner/src/runners/limusd-monitor.ts --once
           if [ ! -f data/limusd-study/observations.jsonl ] || [ ! -s data/limusd-study/observations.jsonl ]; then
             echo "ERROR: LIMUSD observation file is missing or empty"
@@ -129,6 +168,7 @@ jobs:
       - name: Run kHYPE cadence sampler (one-shot, if due)
         if: steps.khype_due.outputs.due == 'true'
         run: |
+          set -euo pipefail
           ./node_modules/.bin/tsx packages/scanner/src/runners/khype-cadence-sampler.ts --once
           if [ ! -f data/khope-study/cadence-observations.jsonl ] || [ ! -s data/khope-study/cadence-observations.jsonl ]; then
             echo "ERROR: kHYPE cadence observation file is missing or empty"
@@ -138,31 +178,34 @@ jobs:
       - name: Run kHYPE DefiLlama collector (one-shot, if due)
         if: steps.khype_due.outputs.due == 'true'
         run: |
+          set -euo pipefail
           ./node_modules/.bin/tsx packages/scanner/src/runners/khype-timeseries.ts --once
           if [ ! -f data/khope-study/observations.jsonl ] || [ ! -s data/khope-study/observations.jsonl ]; then
             echo "ERROR: kHYPE DefiLlama observation file is missing or empty"
             exit 1
           fi
 
-      # Step 5: Persist observations to monitor-data branch
-      # data/ is gitignored on main, so use -f to force-track on monitor-data
-      - name: Persist observations to monitor-data branch
+      # Step 5: Persist observations to the validation data branch
+      # data/ is gitignored on the source branch, so use -f to force-track
+      - name: Persist observations to ${{ env.DATA_BRANCH }} branch
         run: |
-          # Create or switch to monitor-data branch
-          if git ls-remote --heads origin monitor-data | grep -q monitor-data; then
-            git checkout -B monitor-data origin/monitor-data
+          set -euo pipefail
+
+          # Create or switch to the data branch
+          if git ls-remote --heads origin "${{ env.DATA_BRANCH }}" | grep -q "${{ env.DATA_BRANCH }}"; then
+            git checkout -B "${{ env.DATA_BRANCH }}" "origin/${{ env.DATA_BRANCH }}"
           else
-            git checkout -b monitor-data
+            git checkout -b "${{ env.DATA_BRANCH }}"
           fi
 
-          # Force-add observation and state files (they're gitignored on main)
+          # Force-add observation and state files (they're gitignored on the source branch)
           git add -f data/limusd-study/observations.jsonl
           git add -f data/limusd-study/monitor-state.json
           git add -f data/khope-study/cadence-observations.jsonl
           git add -f data/khope-study/cadence-state.json
           git add -f data/khope-study/observations.jsonl
 
-          # Verify files are staged
+          # Verify files are staged — FAIL if nothing staged
           STAGED=$(git diff --cached --name-only)
           if [ -z "$STAGED" ]; then
             echo "ERROR: No observation changes staged — persistence failed"
@@ -170,12 +213,57 @@ jobs:
           fi
           echo "Staged files: $STAGED"
 
-          git commit -m "monitor: scheduled sample $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push origin monitor-data
+          git commit -m "monitor: validation sample $(date -u +%Y-%m-%dT%H:%M:%SZ) [sha=${{ github.sha }}]"
+          git push origin "${{ env.DATA_BRANCH }}"
 
-          echo "Observations committed and pushed to monitor-data branch"
+          echo "Observations committed and pushed to ${{ env.DATA_BRANCH }} branch"
 
-      # Step 6: Gap detector
+      # Step 6: Remote readback verification — fetch the branch we just pushed
+      # and verify the pushed commit contains the expected files
+      - name: Verify remote persistence (readback)
+        run: |
+          set -euo pipefail
+          echo "Verifying remote persistence by fetching ${{ env.DATA_BRANCH }} back..."
+
+          # Fetch the data branch we just pushed
+          git fetch origin "${{ env.DATA_BRANCH }}" || {
+            echo "ERROR: Failed to fetch ${{ env.DATA_BRANCH }} back for readback verification"
+            exit 1
+          }
+
+          # Get the latest commit on the remote data branch
+          REMOTE_SHA=$(git rev-parse "origin/${{ env.DATA_BRANCH }}")
+          echo "Remote ${{ env.DATA_BRANCH }} HEAD: $REMOTE_SHA"
+
+          # Verify expected files exist on the remote branch
+          REQUIRED_FILES=(
+            "data/limusd-study/observations.jsonl"
+            "data/khope-study/cadence-observations.jsonl"
+            "data/khope-study/observations.jsonl"
+          )
+
+          for f in "${REQUIRED_FILES[@]}"; do
+            if git cat-file -e "origin/${{ env.DATA_BRANCH }}:$f" 2>/dev/null; then
+              LINE_COUNT=$(git show "origin/${{ env.DATA_BRANCH }}:$f" | wc -l)
+              echo "  VERIFIED: $f exists on remote ($LINE_COUNT lines)"
+            else
+              echo "ERROR: Required file $f NOT found on remote ${{ env.DATA_BRANCH }}"
+              exit 1
+            fi
+          done
+
+          # Verify observation timestamps are sequential (newer than previous)
+          LATEST_LIMUSD_TS=$(git show "origin/${{ env.DATA_BRANCH }}:data/limusd-study/observations.jsonl" | tail -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+          echo "Latest LIMUSD observation timestamp: $LATEST_LIMUSD_TS"
+
+          if [ -z "$LATEST_LIMUSD_TS" ]; then
+            echo "ERROR: Could not read latest LIMUSD timestamp from remote"
+            exit 1
+          fi
+
+          echo "Remote persistence verification: PASS"
+
+      # Step 7: Gap detector
       - name: Gap detector — verify no >60min gap in LIMUSD observations
         run: |
           python3 -c "
