@@ -11,21 +11,28 @@ Usage:
   python3 scripts/export-evidence-bundle.py \
     --window-id "Window 8" \
     --window-start "2026-10-15T12:21:52Z" \
-    --window-completion "2026-10-16T12:21:52Z"
+    --window-completion "2026-10-16T12:21:52Z" \
+    [--output-dir /path/to/output] \
+    [--data-root /path/to/repo/root]
 
-All three arguments are REQUIRED. The script does not default to any window.
+All three window arguments are REQUIRED. The script does not default to any window.
+Repository root is derived from the script's location by default, or overridden via --data-root.
+Output directory defaults to <repo-root>/data/evidence-bundles, or overridden via --output-dir.
 """
 import os, sys, json, hashlib, tarfile, shutil, subprocess, argparse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-REPO = '/home/z/my-project/edge-engine'
-EXPORT_DIR = os.path.join(REPO, 'data', 'evidence-bundles')
+# Derive REPO from script location (portable — no hardcoded paths)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_REPO = os.path.dirname(SCRIPT_DIR)  # scripts/ -> repo root
 
 def parse_args():
     p = argparse.ArgumentParser(description='Export evidence bundle')
     p.add_argument('--window-id', required=True, help='Window identifier (e.g., "Window 8")')
     p.add_argument('--window-start', required=True, help='Window start timestamp (ISO 8601 UTC, e.g., "2026-10-15T12:21:52Z")')
     p.add_argument('--window-completion', required=True, help='Nominal completion timestamp (ISO 8601 UTC)')
+    p.add_argument('--data-root', default=DEFAULT_REPO, help='Repository root (default: derived from script location)')
+    p.add_argument('--output-dir', default=None, help='Output directory for tarball (default: <data-root>/data/evidence-bundles)')
     return p.parse_args()
 
 def sha256_file(filepath):
@@ -72,7 +79,8 @@ def read_jsonl(filepath):
                     print(f"ERROR: malformed JSON at {filepath}:{line_num}: {e}", file=sys.stderr)
                     sys.exit(1)
     except FileNotFoundError:
-        print(f"WARN: {filepath} not found", file=sys.stderr)
+        print(f"ERROR: required file not found: {filepath}", file=sys.stderr)
+        sys.exit(1)
     return obs
 
 def parse_ts(ts_str):
@@ -83,8 +91,9 @@ def parse_ts(ts_str):
         print(f"ERROR: invalid timestamp '{ts_str}': {e}", file=sys.stderr)
         sys.exit(1)
 
-def filter_window(obs_list, window_start_dt, ts_key='ts'):
-    """Filter observations to window. Fail on missing timestamps."""
+def filter_window(obs_list, window_start_dt, window_completion_dt, ts_key='ts'):
+    """Filter observations to window: start <= ts <= completion.
+    Fail on missing timestamps."""
     result = []
     for o in obs_list:
         ts_str = o.get(ts_key, '')
@@ -92,7 +101,7 @@ def filter_window(obs_list, window_start_dt, ts_key='ts'):
             print(f"ERROR: observation missing '{ts_key}' field: {json.dumps(o)[:100]}", file=sys.stderr)
             sys.exit(1)
         ts = parse_ts(ts_str)
-        if ts >= window_start_dt:
+        if window_start_dt <= ts <= window_completion_dt:
             result.append(o)
     return result
 
@@ -114,6 +123,9 @@ def main():
     window_id = args.window_id
     window_start_str = args.window_start
     window_completion_str = args.window_completion
+    repo = args.data_root
+    output_dir = args.output_dir or os.path.join(repo, 'data', 'evidence-bundles')
+
     # Validate timestamps are UTC (must end with Z) — check BEFORE parsing
     for label, ts_str in [('window_start', window_start_str), ('window_completion', window_completion_str)]:
         if not ts_str.endswith('Z'):
@@ -129,7 +141,7 @@ def main():
         sys.exit(1)
 
     bundle_name = f'evidence-bundle-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}'
-    bundle_dir = os.path.join(EXPORT_DIR, bundle_name)
+    bundle_dir = os.path.join(output_dir, bundle_name)
     tarball = f'{bundle_dir}.tar.gz'
     os.makedirs(bundle_dir, exist_ok=True)
 
@@ -148,7 +160,7 @@ def main():
     # --- Export raw files ---
     exported_files = {}
     for export_name, src_path in FILES.items():
-        full_src = os.path.join(REPO, src_path)
+        full_src = os.path.join(repo, src_path)
         dest = os.path.join(bundle_dir, export_name)
         if not os.path.exists(full_src):
             exported_files[export_name] = {'status': 'NOT_FOUND', 'path': src_path}
@@ -177,15 +189,25 @@ def main():
         if not os.path.exists(req_path):
             print(f"ERROR: required file missing from bundle: {req}", file=sys.stderr)
             sys.exit(1)
+        # Fail on empty required files
+        if os.path.getsize(req_path) == 0:
+            print(f"ERROR: required file is empty: {req}", file=sys.stderr)
+            sys.exit(1)
 
     all_limusd = read_jsonl(os.path.join(bundle_dir, 'limusd-observations.jsonl'))
     all_cadence = read_jsonl(os.path.join(bundle_dir, 'khype-cadence-observations.jsonl'))
     all_defillama = read_jsonl(os.path.join(bundle_dir, 'khype-defillama-observations.jsonl'))
 
-    # Filter observations to the defined window only
-    w_limusd = filter_window(all_limusd, window_start_dt)
-    w_cadence = filter_window(all_cadence, window_start_dt)
-    w_defillama = filter_window(all_defillama, window_start_dt)
+    # Filter observations to the defined window: start <= ts <= completion
+    w_limusd = filter_window(all_limusd, window_start_dt, window_completion_dt)
+    w_cadence = filter_window(all_cadence, window_start_dt, window_completion_dt)
+    w_defillama = filter_window(all_defillama, window_start_dt, window_completion_dt)
+
+    # Fail if no observations in the requested window
+    total_window_obs = len(w_limusd) + len(w_cadence) + len(w_defillama)
+    if total_window_obs == 0:
+        print(f"ERROR: no observations found in window {window_start_str} to {window_completion_str}", file=sys.stderr)
+        sys.exit(1)
 
     # Validate window_start against first observation — FAIL if mismatch >5 min
     first_obs_ts = None
@@ -221,9 +243,9 @@ def main():
     cadence_tsx = sum(1 for l in ps_result.stdout.split('\n') if 'cli.mjs' in l and 'khype-cadence' in l and 'grep' not in l)
 
     # --- Generate audit ---
-    repo_head = subprocess.run(['git', '-C', REPO, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
-    repo_dirty = bool(subprocess.run(['git', '-C', REPO, 'status', '--short'], capture_output=True, text=True).stdout.strip())
-    exporter_script = os.path.join(REPO, 'scripts', 'export-evidence-bundle.py')
+    repo_head = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    repo_dirty = bool(subprocess.run(['git', '-C', repo, 'status', '--short'], capture_output=True, text=True).stdout.strip())
+    exporter_script = os.path.abspath(__file__)
     exporter_hash = sha256_file(exporter_script)
 
     audit = {
@@ -335,8 +357,11 @@ def main():
     with tarfile.open(tarball, 'w:gz') as tar:
         tar.add(bundle_dir, arcname=bundle_name)
 
-    download_dest = f'/home/z/my-project/download/{os.path.basename(tarball)}'
-    shutil.copy2(tarball, download_dest)
+    # Copy to output dir if different from default
+    if args.output_dir:
+        download_dest = os.path.join(args.output_dir, os.path.basename(tarball))
+        if download_dest != tarball:
+            shutil.copy2(tarball, download_dest)
 
     # --- Verify end-to-end ---
     archive_hash = sha256_file(tarball)
@@ -351,11 +376,13 @@ def main():
         manifest['window_id'] == window_id and
         audit['window_id'] == window_id and
         manifest['window_start'] == window_start_str and
-        audit['window_start'] == window_start_str
+        audit['window_start'] == window_start_str and
+        manifest['window_nominal_completion'] == window_completion_str and
+        audit['window_nominal_completion'] == window_completion_str and
+        total_window_obs > 0
     )
 
     print(f"Evidence bundle exported: {tarball}")
-    print(f"Copied to: {download_dest}")
     print(f"Archive SHA-256: {archive_hash}")
     print(f"Archive size: {archive_size} bytes")
     print(f"Exporter script SHA-256: {exporter_hash}")
@@ -376,10 +403,6 @@ def main():
     print(f"  kHYPE cadence: {len(w_cadence)} obs, {cadence_steps} reward steps, UNRESOLVED")
     print(f"  kHYPE DefiLlama: {len(w_defillama)} obs")
     print(f"  Duplicate workers: {'NONE' if not audit['duplicate_workers']['duplicate_detected'] else 'DETECTED'}")
-    print()
-    print("Manifest files:")
-    for name, info in exported_files.items():
-        print(f"  {name}: {info.get('sha256','?')[:16]}... lines={info.get('lines','?')}")
 
 if __name__ == '__main__':
     main()

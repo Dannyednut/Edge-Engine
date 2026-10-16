@@ -58,6 +58,11 @@ jobs:
           node-version: '22'
       - uses: pnpm/action-setup@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies (from main source)
         run: pnpm install --frozen-lockfile
 
@@ -74,11 +79,12 @@ jobs:
           # Check if monitor-data branch exists on remote
           if git ls-remote --heads origin monitor-data | grep -q monitor-data; then
             echo "monitor-data branch exists — fetching data files"
-            git fetch origin monitor-data
-
+            git fetch origin monitor-data || {
+              echo "ERROR: Failed to fetch monitor-data branch"
+              exit 1
+            }
             # Extract data/ files from monitor-data without switching branches
-            # Use git checkout to pull specific paths from the remote branch
-            git checkout origin/monitor-data -- data/limusd-study/ data/khope-study/ || echo "No existing data files (first run)"
+            git checkout origin/monitor-data -- data/limusd-study/ data/khope-study/ || echo "No existing data files (first run or no data on branch)"
           else
             echo "monitor-data branch does not exist — first run, no existing data"
           fi
