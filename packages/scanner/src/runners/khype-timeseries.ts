@@ -259,7 +259,11 @@ async function collectOnce(): Promise<boolean> {
   }
 }
 
-function appendObservation(obs: Observation): boolean {
+/** Type of the append function — injectable for testing. */
+export type DefiLlamaAppendFn = (obs: Observation) => boolean;
+
+/** Default production append function. */
+const defaultDefiLlamaAppend: DefiLlamaAppendFn = (obs: Observation): boolean => {
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
     appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
@@ -268,6 +272,18 @@ function appendObservation(obs: Observation): boolean {
     console.error(`[kHYPE] FAILED to write observation: ${err?.message ?? err}`);
     return false;
   }
+};
+
+// Injectable append function — tests can override this
+let appendFn: DefiLlamaAppendFn = defaultDefiLlamaAppend;
+
+/** Set the append function (for testing). */
+export function setAppendFn(fn: DefiLlamaAppendFn): void {
+  appendFn = fn;
+}
+
+function appendObservation(obs: Observation): boolean {
+  return appendFn(obs);
 }
 
 async function main() {
