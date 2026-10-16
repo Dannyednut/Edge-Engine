@@ -1,0 +1,623 @@
+name: Monitor Sampling (Prototype — Not Scheduled)
+
+# PROTOTYPE: This workflow is on a feature branch and is NOT enabled for
+# scheduled production runs. It triggers on push to feature/gh-actions-sampling
+# (for validation) and on manual dispatch. Do not enable the schedule until
+# reviewed and approved.
+#
+# Design: Single serialized writer with source/data branch separation
+#   - Source code: from the triggering commit (github.sha) on feature branch
+#   - Observation data: persisted on monitor-data-validation branch (temporary)
+#   - Collection and persistence are separated: samplers write to a staging
+#     directory, then persistence copies staged files to a separate worktree
+#     for the data branch — never overwrites collected files
+#   - Remote readback verification after every push
+#
+# Fail-closed branch detection:
+#   - Uses scripts/gha/check-remote-branch.sh which distinguishes
+#     "branch absent" (successful lookup, no match) from "remote lookup
+#     failed" (network/auth/git error). The previous `2>/dev/null | grep -q`
+#     pattern collapsed both into "absent", risking clobbering existing data
+#     on a transient remote failure.
+#
+# Cost (public repo = free GitHub Actions):
+#   - Single writer every 10 min = 4,320 runs/month
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_khype:
+        description: 'Force run kHYPE samplers regardless of 30-min interval'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - feature/gh-actions-sampling
+    paths:
+      - '.github/workflows/monitor-sampling.yml'
+      - 'packages/scanner/src/runners/limusd-monitor.ts'
+      - 'packages/scanner/src/runners/khype-cadence-sampler.ts'
+      - 'packages/scanner/src/runners/khype-timeseries.ts'
+      - 'scripts/gha/check-remote-branch.sh'
+  # When ready for production, uncomment:
+  # schedule:
+  #   - cron: '*/10 * * * *'
+
+env:
+  DATA_BRANCH: monitor-data-validation
+
+permissions:
+  contents: write
+
+jobs:
+  sample:
+    name: Monitor Sample (Serialized)
+    runs-on: ubuntu-latest
+    concurrency:
+      group: monitor-sampling
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      # Step 1: Checkout SOURCE from the triggering commit (NOT main)
+      - name: Checkout source (triggering commit)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node.js + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Step 2: Fetch existing observation DATA from the validation data branch.
+      # Uses the fail-closed helper to distinguish three outcomes:
+      #   "present" → branch exists, fetch + checkout paths
+      #   "absent"  → genuine first-run case (branch does not exist on remote)
+      #   "error"   → git ls-remote FAILED (network/auth/git) — must NOT enter
+      #               first-run creation path; fail the workflow instead.
+      - name: Fetch existing observation data (fail-closed)
+        id: data_fetch
+        run: |
+          set -euo pipefail
+          mkdir -p data/limusd-study data/khope-study
+
+          # Source the fail-closed helper
+          source scripts/gha/check-remote-branch.sh
+
+          # Capture helper output and exit code independently.
+          # The helper prints one of: present | absent | error
+          # and exits 0 for present/absent, 1 for error.
+          set +e
+          BRANCH_STATE=$(check_remote_branch origin "${{ env.DATA_BRANCH }}" 2>/tmp/check-branch-err)
+          HELPER_EXIT=$?
+          set -e
+
+          if [ "$HELPER_EXIT" -ne 0 ]; then
+            echo "ERROR: remote branch lookup FAILED — refusing to enter first-run path"
+            echo "  This is NOT a genuine first-run case. The remote lookup itself failed"
+            echo "  (network, auth, or git error). Entering the first-run path here could"
+            echo "  clobber existing remote data on a subsequent successful fetch."
+            cat /tmp/check-branch-err >&2 || true
+            rm -f /tmp/check-branch-err
+            exit 1
+          fi
+          rm -f /tmp/check-branch-err
+          echo "Branch state: $BRANCH_STATE"
+
+          if [ "$BRANCH_STATE" = "absent" ]; then
+            echo "CASE: Branch ${{ env.DATA_BRANCH }} does not exist — genuine first run"
+            echo "data_status=first_run" >> $GITHUB_OUTPUT
+          elif [ "$BRANCH_STATE" = "present" ]; then
+            echo "CASE: Branch ${{ env.DATA_BRANCH }} exists — fetching"
+            git fetch origin "${{ env.DATA_BRANCH }}" || {
+              echo "ERROR: Failed to fetch ${{ env.DATA_BRANCH }} (network/auth error)"
+              exit 1
+            }
+
+            # Check if data/ paths exist on the remote branch tree.
+            # Use git ls-tree to inspect the branch without checking out.
+            HAS_LIMUSD_DATA=$(git ls-tree -r --name-only "origin/${{ env.DATA_BRANCH }}" -- data/limusd-study/ 2>/dev/null | wc -l)
+            HAS_KHYPE_DATA=$(git ls-tree -r --name-only "origin/${{ env.DATA_BRANCH }}" -- data/khope-study/ 2>/dev/null | wc -l)
+
+            if [ "$HAS_LIMUSD_DATA" -eq 0 ] && [ "$HAS_KHYPE_DATA" -eq 0 ]; then
+              echo "CASE: Branch exists but no data files — empty data branch"
+              echo "data_status=empty_branch" >> $GITHUB_OUTPUT
+            else
+              echo "CASE: Data files found on remote — extracting to worktree"
+
+              # Extract files using git checkout (path-specific, no branch switch).
+              # This is safe because we're checking out specific paths, not switching branches.
+              # Fail-closed: any error here is NOT an empty-branch case.
+              git checkout "origin/${{ env.DATA_BRANCH }}" -- data/limusd-study/ data/khope-study/ || {
+                echo "ERROR: git checkout of data paths failed unexpectedly"
+                echo "  This is NOT an empty-branch case — the files exist in the tree but checkout failed."
+                echo "  Aborting rather than risking data loss."
+                exit 1
+              }
+
+              echo "data_status=fetched" >> $GITHUB_OUTPUT
+
+              # Verify the files are actually present and non-empty
+              if [ -f data/limusd-study/observations.jsonl ]; then
+                LIMUSD_COUNT=$(wc -l < data/limusd-study/observations.jsonl)
+                echo "LIMUSD observations: $LIMUSD_COUNT lines"
+              fi
+              if [ -f data/khope-study/cadence-observations.jsonl ]; then
+                CADENCE_COUNT=$(wc -l < data/khope-study/cadence-observations.jsonl)
+                echo "kHYPE cadence observations: $CADENCE_COUNT lines"
+              fi
+            fi
+          else
+            echo "ERROR: unexpected branch state from helper: $BRANCH_STATE"
+            exit 1
+          fi
+
+      # Step 3: Record BEFORE counts (for append verification)
+      - name: Record BEFORE counts
+        id: before_counts
+        run: |
+          set -euo pipefail
+          LIMUSD_BEFORE=0
+          CADENCE_BEFORE=0
+          DEFILLAMA_BEFORE=0
+          LIMUSD_FIRST_TS=""
+          LIMUSD_LAST_TS=""
+          CADENCE_FIRST_TS=""
+          CADENCE_LAST_TS=""
+          DEFILLAMA_FIRST_TS=""
+          DEFILLAMA_LAST_TS=""
+          if [ -f data/limusd-study/observations.jsonl ]; then
+            LIMUSD_BEFORE=$(wc -l < data/limusd-study/observations.jsonl)
+            LIMUSD_FIRST_TS=$(head -1 data/limusd-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+            LIMUSD_LAST_TS=$(tail -1 data/limusd-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+          fi
+          if [ -f data/khope-study/cadence-observations.jsonl ]; then
+            CADENCE_BEFORE=$(wc -l < data/khope-study/cadence-observations.jsonl)
+            CADENCE_FIRST_TS=$(head -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+            CADENCE_LAST_TS=$(tail -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+          fi
+          if [ -f data/khope-study/observations.jsonl ]; then
+            DEFILLAMA_BEFORE=$(wc -l < data/khope-study/observations.jsonl)
+            DEFILLAMA_FIRST_TS=$(head -1 data/khope-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+            DEFILLAMA_LAST_TS=$(tail -1 data/khope-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))" 2>/dev/null || echo "")
+          fi
+          echo "limusd_before=$LIMUSD_BEFORE" >> $GITHUB_OUTPUT
+          echo "cadence_before=$CADENCE_BEFORE" >> $GITHUB_OUTPUT
+          echo "defillama_before=$DEFILLAMA_BEFORE" >> $GITHUB_OUTPUT
+          echo "limusd_first_ts=$LIMUSD_FIRST_TS" >> $GITHUB_OUTPUT
+          echo "limusd_last_ts=$LIMUSD_LAST_TS" >> $GITHUB_OUTPUT
+          echo "cadence_first_ts=$CADENCE_FIRST_TS" >> $GITHUB_OUTPUT
+          echo "cadence_last_ts=$CADENCE_LAST_TS" >> $GITHUB_OUTPUT
+          echo "defillama_first_ts=$DEFILLAMA_FIRST_TS" >> $GITHUB_OUTPUT
+          echo "defillama_last_ts=$DEFILLAMA_LAST_TS" >> $GITHUB_OUTPUT
+          echo "BEFORE counts: LIMUSD=$LIMUSD_BEFORE cadence=$CADENCE_BEFORE defillama=$DEFILLAMA_BEFORE"
+
+      # Step 4: Check if kHYPE 30-min interval is due
+      - name: Check if kHYPE 30-min interval is due
+        id: khype_due
+        run: |
+          set -euo pipefail
+          if [ -f data/khope-study/cadence-observations.jsonl ] && [ -s data/khope-study/cadence-observations.jsonl ]; then
+            LAST_TS=$(tail -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+            if [ -n "$LAST_TS" ]; then
+              NOW_EPOCH=$(date -u +%s)
+              LAST_EPOCH=$(date -u -d "$LAST_TS" +%s 2>/dev/null || echo 0)
+              ELAPSED=$((NOW_EPOCH - LAST_EPOCH))
+              echo "Last kHYPE cadence: $LAST_TS ($ELAPSED seconds ago)"
+              if [ "$ELAPSED" -ge 1800 ] || [ "${{ inputs.run_khype }}" == "true" ]; then
+                echo "due=true" >> $GITHUB_OUTPUT
+              else
+                echo "due=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "due=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "due=true" >> $GITHUB_OUTPUT
+            echo "No cadence file — first run"
+          fi
+
+      # Step 5: Run samplers — they write to data/ in the worktree
+      - name: Run LIMUSD monitor (one-shot)
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/tsx packages/scanner/src/runners/limusd-monitor.ts --once
+          if [ ! -f data/limusd-study/observations.jsonl ] || [ ! -s data/limusd-study/observations.jsonl ]; then
+            echo "ERROR: LIMUSD observation file is missing or empty"
+            exit 1
+          fi
+          echo "LIMUSD observation appended successfully"
+
+      - name: Run kHYPE cadence sampler (one-shot, if due)
+        id: run_cadence
+        if: steps.khype_due.outputs.due == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/tsx packages/scanner/src/runners/khype-cadence-sampler.ts --once
+          if [ ! -f data/khope-study/cadence-observations.jsonl ] || [ ! -s data/khope-study/cadence-observations.jsonl ]; then
+            echo "ERROR: kHYPE cadence observation file is missing or empty"
+            exit 1
+          fi
+          echo "ran=true" >> $GITHUB_OUTPUT
+
+      - name: Fail if kHYPE cadence sampler errored when due
+        if: steps.khype_due.outputs.due == 'true' && steps.run_cadence.outcome == 'failure'
+        run: |
+          echo "ERROR: kHYPE cadence sampler was due but failed (exit non-zero)."
+          echo "  The workflow must fail rather than silently skip a due sampler."
+          exit 1
+
+      - name: Run kHYPE DefiLlama collector (one-shot, if due)
+        id: run_defillama
+        if: steps.khype_due.outputs.due == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/tsx packages/scanner/src/runners/khype-timeseries.ts --once
+          if [ ! -f data/khope-study/observations.jsonl ] || [ ! -s data/khope-study/observations.jsonl ]; then
+            echo "ERROR: kHYPE DefiLlama observation file is missing or empty"
+            exit 1
+          fi
+          echo "ran=true" >> $GITHUB_OUTPUT
+
+      - name: Fail if kHYPE DefiLlama collector errored when due
+        if: steps.khype_due.outputs.due == 'true' && steps.run_defillama.outcome == 'failure'
+        run: |
+          echo "ERROR: kHYPE DefiLlama collector was due but failed (exit non-zero)."
+          echo "  The workflow must fail rather than silently skip a due sampler."
+          exit 1
+
+      # Step 6: Record AFTER counts
+      - name: Record AFTER counts
+        id: after_counts
+        run: |
+          set -euo pipefail
+          LIMUSD_AFTER=$(wc -l < data/limusd-study/observations.jsonl)
+          CADENCE_AFTER=$(wc -l < data/khope-study/cadence-observations.jsonl 2>/dev/null || echo 0)
+          DEFILLAMA_AFTER=$(wc -l < data/khope-study/observations.jsonl 2>/dev/null || echo 0)
+          echo "limusd_after=$LIMUSD_AFTER" >> $GITHUB_OUTPUT
+          echo "cadence_after=$CADENCE_AFTER" >> $GITHUB_OUTPUT
+          echo "defillama_after=$DEFILLAMA_AFTER" >> $GITHUB_OUTPUT
+          echo "AFTER counts: LIMUSD=$LIMUSD_AFTER cadence=$CADENCE_AFTER defillama=$DEFILLAMA_AFTER"
+
+          LIMUSD_BEFORE=${{ steps.before_counts.outputs.limusd_before }}
+          CADENCE_BEFORE=${{ steps.before_counts.outputs.cadence_before }}
+          DEFILLAMA_BEFORE=${{ steps.before_counts.outputs.defillama_before }}
+          KHYPE_DUE=${{ steps.khype_due.outputs.due }}
+
+          # LIMUSD must ALWAYS append (runs every cycle)
+          if [ "$LIMUSD_AFTER" -le "$LIMUSD_BEFORE" ]; then
+            echo "ERROR: LIMUSD count did not increase (before=$LIMUSD_BEFORE after=$LIMUSD_AFTER)"
+            exit 1
+          fi
+          echo "Append verified: LIMUSD $LIMUSD_BEFORE → $LIMUSD_AFTER"
+
+          # kHYPE cadence: AFTER > BEFORE if due, AFTER == BEFORE if skipped
+          if [ "$KHYPE_DUE" = "true" ]; then
+            if [ "$CADENCE_AFTER" -le "$CADENCE_BEFORE" ]; then
+              echo "ERROR: kHYPE cadence was due but count did not increase (before=$CADENCE_BEFORE after=$CADENCE_AFTER)"
+              exit 1
+            fi
+            echo "Append verified: cadence $CADENCE_BEFORE → $CADENCE_AFTER (due, ran)"
+          else
+            if [ "$CADENCE_AFTER" -ne "$CADENCE_BEFORE" ]; then
+              echo "ERROR: kHYPE cadence was NOT due but count changed (before=$CADENCE_BEFORE after=$CADENCE_AFTER)"
+              exit 1
+            fi
+            echo "Skip verified: cadence $CADENCE_BEFORE (not due, unchanged)"
+          fi
+
+          # kHYPE DefiLlama: same rule
+          if [ "$KHYPE_DUE" = "true" ]; then
+            if [ "$DEFILLAMA_AFTER" -le "$DEFILLAMA_BEFORE" ]; then
+              echo "ERROR: kHYPE DefiLlama was due but count did not increase (before=$DEFILLAMA_BEFORE after=$DEFILLAMA_AFTER)"
+              exit 1
+            fi
+            echo "Append verified: defillama $DEFILLAMA_BEFORE → $DEFILLAMA_AFTER (due, ran)"
+          else
+            if [ "$DEFILLAMA_AFTER" -ne "$DEFILLAMA_BEFORE" ]; then
+              echo "ERROR: kHYPE DefiLlama was NOT due but count changed (before=$DEFILLAMA_BEFORE after=$DEFILLAMA_AFTER)"
+              exit 1
+            fi
+            echo "Skip verified: defillama $DEFILLAMA_BEFORE (not due, unchanged)"
+          fi
+
+          # Record timestamp ranges for all three samplers
+          FIRST_LIMUSD_TS=$(head -1 data/limusd-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          LAST_LIMUSD_TS=$(tail -1 data/limusd-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          echo "limusd_first_ts=$FIRST_LIMUSD_TS" >> $GITHUB_OUTPUT
+          echo "limusd_last_ts=$LAST_LIMUSD_TS" >> $GITHUB_OUTPUT
+          echo "LIMUSD timestamp range: $FIRST_LIMUSD_TS → $LAST_LIMUSD_TS"
+
+          if [ -s data/khope-study/cadence-observations.jsonl ]; then
+            FIRST_CAD_TS=$(head -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+            LAST_CAD_TS=$(tail -1 data/khope-study/cadence-observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+            echo "cadence_first_ts=$FIRST_CAD_TS" >> $GITHUB_OUTPUT
+            echo "cadence_last_ts=$LAST_CAD_TS" >> $GITHUB_OUTPUT
+            echo "cadence timestamp range: $FIRST_CAD_TS → $LAST_CAD_TS"
+          fi
+
+          if [ -s data/khope-study/observations.jsonl ]; then
+            FIRST_DL_TS=$(head -1 data/khope-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+            LAST_DL_TS=$(tail -1 data/khope-study/observations.jsonl | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+            echo "defillama_first_ts=$FIRST_DL_TS" >> $GITHUB_OUTPUT
+            echo "defillama_last_ts=$LAST_DL_TS" >> $GITHUB_OUTPUT
+            echo "defillama timestamp range: $FIRST_DL_TS → $LAST_DL_TS"
+          fi
+
+      # Step 7: Persist observations using a SEPARATE worktree.
+      # Uses the fail-closed helper (same as Step 2) to distinguish
+      # "branch absent" from "remote lookup failed".
+      - name: Persist observations to ${{ env.DATA_BRANCH }} branch
+        id: persist
+        run: |
+          set -euo pipefail
+
+          # Stage the collected data in a temp directory
+          STAGING=$(mktemp -d)
+          echo "Staging directory: $STAGING"
+          cp -r data/limusd-study "$STAGING/"
+          cp -r data/khope-study "$STAGING/"
+
+          # Create a separate worktree for the data branch
+          WORKTREE=$(mktemp -d)
+          echo "Data branch worktree: $WORKTREE"
+
+          # Use the fail-closed helper for branch detection
+          source scripts/gha/check-remote-branch.sh
+
+          set +e
+          BRANCH_STATE=$(check_remote_branch origin "${{ env.DATA_BRANCH }}" 2>/tmp/check-branch-err-persist)
+          HELPER_EXIT=$?
+          set -e
+
+          if [ "$HELPER_EXIT" -ne 0 ]; then
+            echo "ERROR: remote branch lookup FAILED during persistence — refusing to create orphan branch"
+            cat /tmp/check-branch-err-persist >&2 || true
+            rm -f /tmp/check-branch-err-persist
+            exit 1
+          fi
+          rm -f /tmp/check-branch-err-persist
+          echo "Branch state (persistence): $BRANCH_STATE"
+
+          if [ "$BRANCH_STATE" = "present" ]; then
+            echo "Data branch exists — creating worktree from remote"
+            git fetch origin "${{ env.DATA_BRANCH }}" || {
+              echo "ERROR: Failed to fetch ${{ env.DATA_BRANCH }} during persistence"
+              exit 1
+            }
+            git worktree add "$WORKTREE" "origin/${{ env.DATA_BRANCH }}" || {
+              echo "ERROR: git worktree add failed for existing branch"
+              exit 1
+            }
+            cd "$WORKTREE"
+            git checkout -B "${{ env.DATA_BRANCH }}" "origin/${{ env.DATA_BRANCH }}"
+          elif [ "$BRANCH_STATE" = "absent" ]; then
+            echo "Data branch does not exist — creating new orphan branch"
+            git worktree add --detach "$WORKTREE"
+            cd "$WORKTREE"
+            git checkout --orphan "${{ env.DATA_BRANCH }}"
+            git rm -rf . 2>/dev/null || true
+          else
+            echo "ERROR: unexpected branch state from helper: $BRANCH_STATE"
+            exit 1
+          fi
+
+          # Copy staged observations into the data worktree
+          mkdir -p data/limusd-study data/khope-study
+          cp "$STAGING/limusd-study/observations.jsonl" data/limusd-study/observations.jsonl
+          cp "$STAGING/limusd-study/monitor-state.json" data/limusd-study/monitor-state.json
+          cp "$STAGING/khope-study/cadence-observations.jsonl" data/khope-study/cadence-observations.jsonl
+          cp "$STAGING/khope-study/cadence-state.json" data/khope-study/cadence-state.json
+          cp "$STAGING/khope-study/observations.jsonl" data/khope-study/observations.jsonl
+
+          # Force-add (data/ is gitignored on source branch, but this is the data worktree)
+          git add -f data/limusd-study/observations.jsonl
+          git add -f data/limusd-study/monitor-state.json
+          git add -f data/khope-study/cadence-observations.jsonl
+          git add -f data/khope-study/cadence-state.json
+          git add -f data/khope-study/observations.jsonl
+
+          # Verify files are staged — FAIL if nothing staged
+          STAGED=$(git diff --cached --name-only)
+          if [ -z "$STAGED" ]; then
+            echo "ERROR: No observation changes staged — persistence failed"
+            exit 1
+          fi
+          echo "Staged files: $STAGED"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "monitor: validation sample $(date -u +%Y-%m-%dT%H:%M:%SZ) [sha=${{ github.sha }}]"
+          LOCAL_COMMIT_SHA=$(git rev-parse HEAD)
+          git push origin "${{ env.DATA_BRANCH }}"
+
+          echo "Persisted commit SHA: $LOCAL_COMMIT_SHA"
+          # Modern $GITHUB_OUTPUT syntax (NOT deprecated ::set-output)
+          echo "local_commit_sha=$LOCAL_COMMIT_SHA" >> $GITHUB_OUTPUT
+
+          # Clean up worktree
+          cd "$GITHUB_WORKSPACE"
+          git worktree remove "$WORKTREE" --force || true
+          rm -rf "$STAGING"
+
+      # Step 8: Remote readback verification — fetch the branch we just pushed,
+      # explicitly compare the fetched remote HEAD SHA with the commit SHA
+      # created by this run, verify all 5 required files exist on remote,
+      # and verify remote observation counts match AFTER counts for all 3 samplers.
+      - name: Verify remote persistence (readback)
+        run: |
+          set -euo pipefail
+          echo "Verifying remote persistence by fetching ${{ env.DATA_BRANCH }} back..."
+
+          git fetch origin "${{ env.DATA_BRANCH }}" || {
+            echo "ERROR: Failed to fetch ${{ env.DATA_BRANCH }} back for readback"
+            exit 1
+          }
+
+          REMOTE_SHA=$(git rev-parse "origin/${{ env.DATA_BRANCH }}")
+          LOCAL_SHA=${{ steps.persist.outputs.local_commit_sha }}
+          echo "Remote ${{ env.DATA_BRANCH }} HEAD: $REMOTE_SHA"
+          echo "Local persisted SHA:                $LOCAL_SHA"
+
+          if [ -z "$LOCAL_SHA" ] || [ "$LOCAL_SHA" = "null" ]; then
+            echo "ERROR: local_commit_sha step output is empty — persistence step did not record its SHA"
+            exit 1
+          fi
+
+          if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
+            echo "ERROR: remote HEAD ($REMOTE_SHA) != local persisted SHA ($LOCAL_SHA)"
+            echo "  This indicates a concurrent writer or a push race. Aborting."
+            exit 1
+          fi
+          echo "Commit identity: PASS (remote == local)"
+
+          # Verify ALL FIVE required files exist on the remote branch
+          REQUIRED_FILES=(
+            "data/limusd-study/observations.jsonl"
+            "data/limusd-study/monitor-state.json"
+            "data/khope-study/cadence-observations.jsonl"
+            "data/khope-study/cadence-state.json"
+            "data/khope-study/observations.jsonl"
+          )
+
+          for f in "${REQUIRED_FILES[@]}"; do
+            if git cat-file -e "origin/${{ env.DATA_BRANCH }}:$f" 2>/dev/null; then
+              LINE_COUNT=$(git show "origin/${{ env.DATA_BRANCH }}:$f" | wc -l)
+              echo "  VERIFIED: $f exists on remote ($LINE_COUNT lines)"
+            else
+              echo "ERROR: Required file $f NOT found on remote ${{ env.DATA_BRANCH }}"
+              exit 1
+            fi
+          done
+
+          # Compare remote observation counts with AFTER counts for ALL THREE samplers
+          REMOTE_LIMUSD_COUNT=$(git show "origin/${{ env.DATA_BRANCH }}:data/limusd-study/observations.jsonl" | wc -l)
+          REMOTE_CADENCE_COUNT=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/cadence-observations.jsonl" | wc -l)
+          REMOTE_DEFILLAMA_COUNT=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/observations.jsonl" | wc -l)
+
+          LOCAL_LIMUSD_AFTER=${{ steps.after_counts.outputs.limusd_after }}
+          LOCAL_CADENCE_AFTER=${{ steps.after_counts.outputs.cadence_after }}
+          LOCAL_DEFILLAMA_AFTER=${{ steps.after_counts.outputs.defillama_after }}
+
+          echo "Remote vs local AFTER counts:"
+          echo "  LIMUSD:    remote=$REMOTE_LIMUSD_COUNT  local=$LOCAL_LIMUSD_AFTER"
+          echo "  cadence:   remote=$REMOTE_CADENCE_COUNT  local=$LOCAL_CADENCE_AFTER"
+          echo "  defillama: remote=$REMOTE_DEFILLAMA_COUNT  local=$LOCAL_DEFILLAMA_AFTER"
+
+          if [ "$REMOTE_LIMUSD_COUNT" -ne "$LOCAL_LIMUSD_AFTER" ]; then
+            echo "ERROR: Remote LIMUSD count ($REMOTE_LIMUSD_COUNT) != local AFTER ($LOCAL_LIMUSD_AFTER)"
+            exit 1
+          fi
+          if [ "$REMOTE_CADENCE_COUNT" -ne "$LOCAL_CADENCE_AFTER" ]; then
+            echo "ERROR: Remote cadence count ($REMOTE_CADENCE_COUNT) != local AFTER ($LOCAL_CADENCE_AFTER)"
+            exit 1
+          fi
+          if [ "$REMOTE_DEFILLAMA_COUNT" -ne "$LOCAL_DEFILLAMA_AFTER" ]; then
+            echo "ERROR: Remote defillama count ($REMOTE_DEFILLAMA_COUNT) != local AFTER ($LOCAL_DEFILLAMA_AFTER)"
+            exit 1
+          fi
+          echo "Count equality: PASS (all 3 samplers)"
+
+          # Verify BEFORE counts are preserved on remote (prior records not lost)
+          LIMUSD_BEFORE=${{ steps.before_counts.outputs.limusd_before }}
+          CADENCE_BEFORE=${{ steps.before_counts.outputs.cadence_before }}
+          DEFILLAMA_BEFORE=${{ steps.before_counts.outputs.defillama_before }}
+
+          if [ "$REMOTE_LIMUSD_COUNT" -lt "$LIMUSD_BEFORE" ]; then
+            echo "ERROR: Remote LIMUSD count ($REMOTE_LIMUSD_COUNT) < BEFORE ($LIMUSD_BEFORE) — prior records lost!"
+            exit 1
+          fi
+          if [ "$REMOTE_CADENCE_COUNT" -lt "$CADENCE_BEFORE" ]; then
+            echo "ERROR: Remote cadence count ($REMOTE_CADENCE_COUNT) < BEFORE ($CADENCE_BEFORE) — prior records lost!"
+            exit 1
+          fi
+          if [ "$REMOTE_DEFILLAMA_COUNT" -lt "$DEFILLAMA_BEFORE" ]; then
+            echo "ERROR: Remote defillama count ($REMOTE_DEFILLAMA_COUNT) < BEFORE ($DEFILLAMA_BEFORE) — prior records lost!"
+            exit 1
+          fi
+          echo "Prior-record preservation: PASS"
+
+          # Verify timestamp ranges on remote for all three samplers
+          REMOTE_LIMUSD_FIRST=$(git show "origin/${{ env.DATA_BRANCH }}:data/limusd-study/observations.jsonl" | head -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          REMOTE_LIMUSD_LAST=$(git show "origin/${{ env.DATA_BRANCH }}:data/limusd-study/observations.jsonl" | tail -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          echo "Remote LIMUSD timestamp range:    $REMOTE_LIMUSD_FIRST → $REMOTE_LIMUSD_LAST"
+
+          REMOTE_CAD_FIRST=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/cadence-observations.jsonl" | head -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          REMOTE_CAD_LAST=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/cadence-observations.jsonl" | tail -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          echo "Remote cadence timestamp range:   $REMOTE_CAD_FIRST → $REMOTE_CAD_LAST"
+
+          REMOTE_DL_FIRST=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/observations.jsonl" | head -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          REMOTE_DL_LAST=$(git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/observations.jsonl" | tail -1 | python3 -c "import sys,json; print(json.load(sys.stdin).get('ts',''))")
+          echo "Remote defillama timestamp range: $REMOTE_DL_FIRST → $REMOTE_DL_LAST"
+
+          # Cross-check the BEFORE first-timestamp is preserved on remote
+          # (i.e. the first record we had locally before this run is still the first record remotely)
+          LOCAL_LIMUSD_FIRST_TS="${{ steps.before_counts.outputs.limusd_first_ts }}"
+          if [ -n "$LOCAL_LIMUSD_FIRST_TS" ]; then
+            if [ "$REMOTE_LIMUSD_FIRST" != "$LOCAL_LIMUSD_FIRST_TS" ]; then
+              echo "ERROR: Remote LIMUSD first ts ($REMOTE_LIMUSD_FIRST) != local BEFORE first ts ($LOCAL_LIMUSD_FIRST_TS)"
+              echo "  This indicates prior records were not preserved on remote."
+              exit 1
+            fi
+            echo "LIMUSD first-timestamp preservation: PASS"
+          fi
+
+          # Verify state files contain valid JSON (parse to confirm not corrupted)
+          git show "origin/${{ env.DATA_BRANCH }}:data/limusd-study/monitor-state.json" | python3 -c "import sys,json; json.load(sys.stdin); print('  monitor-state.json: valid JSON')"
+          git show "origin/${{ env.DATA_BRANCH }}:data/khope-study/cadence-state.json" | python3 -c "import sys,json; json.load(sys.stdin); print('  cadence-state.json: valid JSON')"
+
+          echo ""
+          echo "=== Remote persistence verification: ALL CHECKS PASS ==="
+          echo "  Commit identity: $REMOTE_SHA"
+          echo "  Files verified: 5/5"
+          echo "  Count equality: 3/3 samplers"
+          echo "  Prior-record preservation: PASS"
+          echo "  State file JSON validity: PASS"
+
+      # Step 9: Gap detector
+      - name: Gap detector
+        run: |
+          python3 -c "
+          import json
+          from datetime import datetime, timezone
+
+          obs = []
+          with open('data/limusd-study/observations.jsonl') as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      obs.append(json.loads(line))
+
+          if len(obs) < 2:
+              print('Only %d observations — gap check skipped' % len(obs))
+              exit(0)
+
+          max_gap = 0
+          prev = None
+          for o in obs:
+              ts = datetime.fromisoformat(o['ts'].replace('Z', '+00:00'))
+              if prev:
+                  delta = (ts - prev).total_seconds() / 60
+                  if delta > max_gap:
+                      max_gap = delta
+              prev = ts
+
+          print('Max LIMUSD gap: %.1f minutes' % max_gap)
+          if max_gap > 60:
+              print('WARNING: Gap exceeds 60 minutes')
+          else:
+              print('Gap check: PASS (max %.1f min)' % max_gap)
+          "
