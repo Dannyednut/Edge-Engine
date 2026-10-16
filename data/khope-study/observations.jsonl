@@ -1,0 +1,1 @@
+{"ts":"2026-10-16T05:53:53Z","source":"defillama","apiStatus":"ok","fetchMs":1579,"totalPoolsScanned":16593,"matchedPools":1,"pools":[{"label":"khype_staking","poolId":"9f25a954-db87-4bb2-a8b2-4be0b843a44c","chain":"Hyperliquid L1","project":"kinetiq-khype","symbol":"KHYPE","apy":1.93316,"apyBase":1.93316,"apyReward":null,"tvlUsd":840451931}]}

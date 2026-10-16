@@ -1,0 +1,9 @@
+{
+  "lastAlertTime": {},
+  "bufferBreachActive": true,
+  "sharePriceBaseline": "1.036196",
+  "sharePriceBaselineTs": "2026-10-16T05:53:50Z",
+  "lastSharePrice": "1.036196",
+  "lastSharePriceTs": "2026-10-16T05:53:50Z",
+  "preexistingBreaches": {}
+}
