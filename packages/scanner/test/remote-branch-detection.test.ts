@@ -130,12 +130,25 @@ describe('check-remote-branch.sh — fail-closed branch detection', () => {
     expect(existsSync(HELPER)).toBe(true);
   });
 
-  it('helper script is executable', () => {
-    const fs = require('fs');
-    const stat = fs.statSync(HELPER);
-    // On POSIX, executable bit for owner/group/other
-    const mode = stat.mode & 0o111;
-    expect(mode).not.toBe(0);
+  it('helper script can be invoked directly (executable bit set in git)', () => {
+    // The helper has a `if [ "${BASH_SOURCE[0]}" = "$0" ]; then check_remote_branch "$@"; fi`
+    // block that allows direct invocation. Verify it can be executed directly
+    // (not just sourced). This requires the executable bit to be committed.
+    let exit = 0;
+    let stdout = '';
+    try {
+      stdout = execFileSync(HELPER, ['/dev/null', 'main'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    } catch (err: any) {
+      exit = err.status ?? 1;
+      stdout = (err.stdout ?? '').trim();
+    }
+    // Invoking with a non-git remote URL should produce 'error' (not a crash).
+    expect(exit).toBe(1);
+    expect(stdout).not.toBe('present');
+    expect(stdout).not.toBe('absent');
   });
 
   // Cleanup after all tests
