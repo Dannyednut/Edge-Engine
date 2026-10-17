@@ -11,31 +11,48 @@
  *   2. Aave V3     — 0.05% fee, single-token, fallback
  *
  * Anti-MEV:
- *   - EVM atomic arbs can be submitted via Flashbots Protect (not public mempool)
- *   - This prevents sandwich attacks on our swap legs
- *   - NOTE: As of this commit, the Flashbots Protect path is implemented via
- *     submitViaFlashbotsProtect() but is NOT wired into EvmExecutor.execute()
- *     or the flashloan methods. Those methods use walletClient.sendTransaction()
- *     which goes to the public mempool. Wiring Flashbots into the executor
- *     requires a signed-transaction path (sign once, submit to Protect relay)
- *     which is left as a future task. The useFlashbots flag is currently
- *     stored but does not change execution behavior.
+ *   - A standalone submitViaFlashbotsProtect() helper exists for submitting
+ *     signed transactions to the Flashbots Protect relay.
+ *   - As of this commit, the Flashbots Protect path is NOT wired into
+ *     EvmExecutor.execute() or the flashloan methods. All execution methods
+ *     use walletClient.sendTransaction() which submits to the PUBLIC MEMPOOL.
+ *     There is no `useFlashbots` option — if Flashbots is needed, the caller
+ *     must use the sign-then-submit flow explicitly. See the "Remaining
+ *     limitations" section in PR #2 for details.
  *
  * Gas:
  *   - All EVM txs use EIP-1559 (maxFeePerGas + maxPriorityFeePerGas)
  *   - Gas price cap enforced in RiskGuard: refuse to submit if >3× chain median
  *
- * Fail-closed semantics (EI-S008 executor hardening):
- *   - execute() and flashloan methods return a ExecutionResult that distinguishes
- *     'submitted' (tx hash obtained, receipt not yet confirmed) from 'confirmed'
- *     (receipt fetched, status=1) from 'reverted' (receipt fetched, status=0)
- *     from 'error' (RPC or receipt-fetch failure).
- *   - A tx hash alone is NEVER reported as success. Callers must check
- *     result.status === 'confirmed' before treating execution as successful.
- *   - If waitForReceipt is true (default), the method blocks until the receipt
- *     is available or receiptTimeoutMs elapses. On timeout, status='submitted'.
- *   - If waitForReceipt is false, the method returns immediately with
- *     status='submitted' and the caller is responsible for confirming.
+ * Fail-closed semantics:
+ *   - execute() and flashloan methods return an ExecutionResult whose `status`
+ *     field is the AUTHORITATIVE indicator of outcome. A tx hash alone is
+ *     NEVER reported as success.
+ *
+ *   Status semantics (exhaustive):
+ *     - 'submitted':  sendTransaction returned a tx hash, but the receipt is
+ *                     NOT yet available. This happens when:
+ *                       (a) waitForReceipt=false (caller chose not to wait), OR
+ *                       (b) waitForReceipt=true but the receipt did not arrive
+ *                           within receiptTimeoutMs (timeout).
+ *                     In both cases the tx MAY still be mined, revert, or be
+ *                     dropped. The caller CANNOT assume success. To confirm,
+ *                     the caller must separately fetch the receipt.
+ *     - 'confirmed':  receipt fetched, status=1. The tx was mined and did NOT
+ *                     revert. This is the ONLY status that means "success".
+ *     - 'reverted':   receipt fetched, status=0. The tx was mined but reverted.
+ *                     gasUsed and blockNumber are populated; reason contains
+ *                     a generic "transaction reverted" message (the EVM does
+ *                     not return the revert reason in the receipt itself;
+ *                     decoding it requires a separate eth_call trace).
+ *     - 'error':      sendTransaction itself failed (e.g., insufficient funds,
+ *                     RPC error, nonce too low). No tx hash was obtained.
+ *                     txHash is null. The tx was NOT submitted.
+ *
+ *   IMPORTANT: status='submitted' does NOT mean 'confirmed'. It means
+ *   "submitted but unconfirmed". A timeout is NOT an error — it is a
+ *   'submitted' result with a reason explaining the timeout. An RPC failure
+ *   during sendTransaction is an 'error', not a 'submitted'.
  */
 
 import type { ChainId } from '@edge/types';
@@ -73,17 +90,25 @@ export const BALANCER_VAULT_ADDRESS: Record<ChainId, `0x${string}` | null> = {
 };
 
 // ─── Aave V3 Pool addresses ────────────────────────────────────────────
+// Source: bgd-labs/aave-address-book (canonical Aave governance registry)
+// https://github.com/bgd-labs/aave-address-book
+//
+// NOTE: This map is an AVAILABILITY GATE, not a transaction destination.
+// The executor checks `aaveV3PoolAddress !== null` to decide whether the
+// Aave flashloan path is available on a given chain. The AgentVault
+// contract stores its own `aaveV3Pool` immutable address set at deploy
+// time; the executor does NOT send transactions to this address directly.
 
 export const AAVE_V3_POOL_ADDRESS: Record<ChainId, `0x${string}` | null> = {
-  ethereum:  '0x87870Bca3F3f6D5b4017c7e233794f7d7e233794f7',  // mainnet
-  arbitrum:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // Arbitrum
-  base:      '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // Base (same as Arbitrum — Aave V3 is deployed cross-chain with same address)
-  optimism:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-  polygon:   '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-  bsc:       null,  // Aave V3 not on BSC (Aave V3 only on Ethereum L1 + L2s)
-  zksync:    null,
-  solana:    null,
-  hyperevm:  null,  // Aave V3 not on HyperEVM (use HyperLend instead)
+  ethereum:  '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',  // AaveV3Ethereum.sol
+  arbitrum:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Arbitrum.sol
+  base:      '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',  // AaveV3Base.sol (NOT same as Arbitrum)
+  optimism:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Optimism.sol
+  polygon:   '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Polygon.sol
+  bsc:       '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',  // AaveV3BNB.sol
+  zksync:    '0x78e30497a3c7527d953c6B1E3541b021A98Ac43c',  // AaveV3ZkSync.sol
+  solana:    null,   // not an EVM chain
+  hyperevm:  null,   // Aave V3 not on HyperEVM (use HyperLend instead)
 };
 
 // ─── AgentVault ABI (subset — the functions the executor calls) ────────
@@ -204,10 +229,6 @@ export interface EvmExecutorOptions {
   agentPrivateKey: `0x${string}`;
   agentVaultAddress: `0x${string}`;
   rpcUrl: string;
-  /** Submit via Flashbots Protect (default: true).
-   *  NOTE: As of this commit, this flag is stored but not yet wired into
-   *  the execution path. See module-level comment for details. */
-  useFlashbots?: boolean;
   /** Whether to block until the tx receipt is available (default: true). */
   waitForReceipt?: boolean;
   /** Receipt fetch timeout in ms (default: 60000 = 60s). */
@@ -223,7 +244,6 @@ export class EvmExecutor {
   readonly publicClient: PublicClient;
   readonly account: PrivateKeyAccount;
   readonly agentVaultAddress: `0x${string}`;
-  readonly useFlashbots: boolean;
   readonly waitForReceipt: boolean;
   readonly receiptTimeoutMs: number;
   readonly receiptPollMs: number;
@@ -238,7 +258,6 @@ export class EvmExecutor {
 
     this.account = privateKeyToAccount(opts.agentPrivateKey);
     this.agentVaultAddress = opts.agentVaultAddress;
-    this.useFlashbots = opts.useFlashbots ?? true;
     this.waitForReceipt = opts.waitForReceipt ?? true;
     this.receiptTimeoutMs = opts.receiptTimeoutMs ?? 60_000;
     this.receiptPollMs = opts.receiptPollMs ?? 2_000;

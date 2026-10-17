@@ -23,6 +23,8 @@ import {
   AGENT_VAULT_ABI,
   EvmExecutor,
   submitViaFlashbotsProtect,
+  AAVE_V3_POOL_ADDRESS,
+  BALANCER_VAULT_ADDRESS,
   type ExecutionResult,
 } from '../src/index.js';
 import { keccak256, encodeFunctionData, encodeAbiParameters } from 'viem';
@@ -523,5 +525,218 @@ describe('AGENT_VAULT_ABI — matches contract source', () => {
     expect(fn).toBeDefined();
     expect(fn?.outputs.map(o => o.type)).toEqual(['bool']);
     expect(fn?.stateMutability).toBe('view');
+  });
+});
+
+// ─── Aave V3 Pool address registry — per-chain correctness ───────────
+
+describe('AAVE_V3_POOL_ADDRESS — per-chain registry (bgd-labs/aave-address-book)', () => {
+  // Source: https://github.com/bgd-labs/aave-address-book
+  // These are the canonical Pool addresses from Aave's governance registry.
+
+  it('ethereum has correct Pool address', () => {
+    expect(AAVE_V3_POOL_ADDRESS.ethereum).toBe('0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2');
+  });
+
+  it('arbitrum has correct Pool address', () => {
+    expect(AAVE_V3_POOL_ADDRESS.arbitrum).toBe('0x794a61358D6845594F94dc1DB02A252b5b4814aD');
+  });
+
+  it('base has its OWN Pool address (NOT Arbitrum\'s)', () => {
+    // Base has a DIFFERENT Pool address from Arbitrum — this was a bug in
+    // the previous version which used Arbitrum's address for Base.
+    expect(AAVE_V3_POOL_ADDRESS.base).toBe('0xA238Dd80C259a72e81d7e4664a9801593F98d1c5');
+    expect(AAVE_V3_POOL_ADDRESS.base).not.toBe(AAVE_V3_POOL_ADDRESS.arbitrum);
+  });
+
+  it('optimism has correct Pool address', () => {
+    expect(AAVE_V3_POOL_ADDRESS.optimism).toBe('0x794a61358D6845594F94dc1DB02A252b5b4814aD');
+  });
+
+  it('polygon has correct Pool address', () => {
+    expect(AAVE_V3_POOL_ADDRESS.polygon).toBe('0x794a61358D6845594F94dc1DB02A252b5b4814aD');
+  });
+
+  it('bsc (BNB Chain) has correct Pool address (was incorrectly null)', () => {
+    // Aave V3 IS deployed on BNB Chain. Previous version incorrectly marked it null.
+    expect(AAVE_V3_POOL_ADDRESS.bsc).toBe('0x6807dc923806fE8Fd134338EABCA509979a7e0cB');
+    expect(AAVE_V3_POOL_ADDRESS.bsc).not.toBeNull();
+  });
+
+  it('zksync has correct Pool address (was incorrectly null)', () => {
+    // Aave V3 IS deployed on zkSync Era. Previous version incorrectly marked it null.
+    expect(AAVE_V3_POOL_ADDRESS.zksync).toBe('0x78e30497a3c7527d953c6B1E3541b021A98Ac43c');
+    expect(AAVE_V3_POOL_ADDRESS.zksync).not.toBeNull();
+  });
+
+  it('solana is null (not an EVM chain)', () => {
+    expect(AAVE_V3_POOL_ADDRESS.solana).toBeNull();
+  });
+
+  it('hyperevm is null (Aave V3 not deployed on HyperEVM)', () => {
+    expect(AAVE_V3_POOL_ADDRESS.hyperevm).toBeNull();
+  });
+
+  it('all addresses are valid 20-byte hex or null', () => {
+    for (const [chain, addr] of Object.entries(AAVE_V3_POOL_ADDRESS)) {
+      if (addr === null) continue;
+      expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    }
+  });
+});
+
+// ─── Balancer V2 address registry — per-chain correctness ────────────
+
+describe('BALANCER_VAULT_ADDRESS — per-chain registry', () => {
+  it('ethereum has correct Balancer Vault address', () => {
+    expect(BALANCER_VAULT_ADDRESS.ethereum).toBe('0xBA12222222228d8Ba445958a75a0704d566BF2C8');
+  });
+
+  it('bsc is null (Balancer V2 not on BSC)', () => {
+    expect(BALANCER_VAULT_ADDRESS.bsc).toBeNull();
+  });
+
+  it('hyperevm is null (Balancer V2 not on HyperEVM)', () => {
+    expect(BALANCER_VAULT_ADDRESS.hyperevm).toBeNull();
+  });
+});
+
+// ─── Receipt status distinction: submission vs timeout vs RPC failure ─
+
+describe('ExecutionResult status distinction — submission vs timeout vs RPC failure', () => {
+  it('status=submitted when waitForReceipt=false (explicit submission, no wait)', async () => {
+    const txHash = '0x' + 'aa'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => txHash,
+      waitForReceipt: false,
+    });
+
+    const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(result.txHash).toBe(txHash);
+    expect(result.status).toBe('submitted');
+    // No 'reason' field when waitForReceipt=false (it's an explicit choice, not a timeout)
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('status=submitted with reason when receipt times out (timeout, not error)', async () => {
+    const txHash = '0x' + 'bb'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => txHash,
+      getTransactionReceipt: async () => {
+        throw new Error('transaction not found');
+      },
+      receiptTimeoutMs: 30,
+      receiptPollMs: 5,
+    });
+
+    const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(result.txHash).toBe(txHash);
+    expect(result.status).toBe('submitted');
+    // 'reason' IS populated on timeout to explain why it's 'submitted' not 'confirmed'
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toContain('timeout');
+    // txHash is non-null because sendTransaction succeeded
+    expect(result.txHash).not.toBeNull();
+  });
+
+  it('status=error when sendTransaction fails (RPC failure, not submission)', async () => {
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => {
+        throw new Error('insufficient funds for gas * price + value');
+      },
+    });
+
+    const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(result.status).toBe('error');
+    // txHash is null because sendTransaction never returned a hash
+    expect(result.txHash).toBeNull();
+    expect(result.reason).toContain('insufficient funds');
+  });
+
+  it('status=error is distinct from status=submitted — no tx hash on error', async () => {
+    const { executor: errExecutor } = makeExecutorWithMocks({
+      sendTransaction: async () => { throw new Error('nonce too low'); },
+    });
+    const txHash = '0x' + 'cc'.repeat(32) as `0x${string}`;
+    const { executor: subExecutor } = makeExecutorWithMocks({
+      sendTransaction: async () => txHash,
+      waitForReceipt: false,
+    });
+
+    const errResult = await errExecutor.execute({ target: TARGET, data: DUMMY_DATA });
+    const subResult = await subExecutor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    // Error: no tx hash, status='error'
+    expect(errResult.txHash).toBeNull();
+    expect(errResult.status).toBe('error');
+
+    // Submitted: has tx hash, status='submitted'
+    expect(subResult.txHash).toBe(txHash);
+    expect(subResult.status).toBe('submitted');
+
+    // The two are distinct
+    expect(errResult.status).not.toBe(subResult.status);
+  });
+
+  it('status=confirmed is the ONLY status that means success', async () => {
+    const txHash = '0x' + 'dd'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => txHash,
+      getTransactionReceipt: async () => ({
+        status: 'success',
+        gasUsed: 21000n,
+        blockNumber: 100n,
+      }),
+    });
+
+    const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(result.status).toBe('confirmed');
+    // Only 'confirmed' has gasUsed + blockNumber without a 'reason'
+    expect(result.gasUsed).toBe(21000n);
+    expect(result.blockNumber).toBe(100n);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('status=reverted has gasUsed + blockNumber + reason (not just a hash)', async () => {
+    const txHash = '0x' + 'ee'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => txHash,
+      getTransactionReceipt: async () => ({
+        status: 'reverted',
+        gasUsed: 18000n,
+        blockNumber: 101n,
+      }),
+    });
+
+    const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(result.status).toBe('reverted');
+    expect(result.gasUsed).toBe(18000n);
+    expect(result.blockNumber).toBe(101n);
+    expect(result.reason).toContain('reverted');
+    // A reverted tx still has a hash — it was mined, just failed
+    expect(result.txHash).toBe(txHash);
+  });
+});
+
+// ─── useFlashbots option has been removed ─────────────────────────────
+
+describe('EvmExecutor — no useFlashbots option', () => {
+  it('constructor does not accept useFlashbots', () => {
+    // The useFlashbots option was removed because it was misleading — it
+    // stored the flag but never changed execution behavior. All execution
+    // uses walletClient.sendTransaction() (public mempool).
+    const executor = new EvmExecutor({
+      chainId: 'ethereum',
+      agentPrivateKey: TEST_PRIVATE_KEY,
+      agentVaultAddress: AGENT_VAULT,
+      rpcUrl: 'http://localhost:0',
+    });
+    // useFlashbots is not a property on the executor
+    expect((executor as unknown as { useFlashbots?: boolean }).useFlashbots).toBeUndefined();
   });
 });
