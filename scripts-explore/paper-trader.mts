@@ -1,17 +1,29 @@
-// Paper Trading Simulator
-// Simulates our 6 strategies with live market data — NO REAL CAPITAL
-// Tracks simulated P&L so principal can validate before deploying
+// Paper Trading Simulator V2 — Integrated with @edge/scanner accounting engine
+// Simulates strategies with live market data — NO REAL CAPITAL
 //
-// Run continuously, logging simulated trades + daily P&L
+// V2 state/log files are separate from V1. V1 files are preserved as
+// unaudited historical records. V2 starts with a clean $100k baseline.
+//
+// Fee semantics: Funding position fees are "settled at close" — they
+// are estimated at open time (logged as estimatedFee) but only incurred
+// in feesTotal and deducted from P&L when the position closes.
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import {
+  type AccountingState,
+  type VooiResponse,
+  validateState,
+  getSummary,
+} from '../packages/scanner/src/lib/paper-trader-accounting.js';
+import { runScan, createV2InitialState } from '../packages/scanner/src/lib/paper-trader-engine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..');
 
+// Load .env (for PAPER_HLP_APR / PAPER_KHYPE_APR config vars)
 try {
   const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
   for (const line of env.split('\n')) {
@@ -22,21 +34,16 @@ try {
   }
 } catch {}
 
-const HL_API = 'https://api.hyperliquid.xyz/info';
+// ─── V2 state/log paths (configurable for testing) ────────────────────
+const V1_STATE = '/home/z/my-project/download/paper-trading-state.json';
+const V1_LOG   = '/home/z/my-project/download/paper-trading-log.jsonl';
+
+const V2_STATE = process.env.PAPER_V2_STATE ?? '/home/z/my-project/download/paper-trading-state-v2.json';
+const V2_LOG   = process.env.PAPER_V2_LOG   ?? '/home/z/my-project/download/paper-trading-log-v2.jsonl';
+
 const VOI_API = 'https://perps-api.vooi.io';
-const PAPER_LOG = '/home/z/my-project/download/paper-trading-log.jsonl';
-const PAPER_STATE = '/home/z/my-project/download/paper-trading-state.json';
 
-async function hlInfo(body: any): Promise<any> {
-  const res = await fetch(HL_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
-
-async function vooiScan(params: any): Promise<any> {
+async function vooiScan(params: Record<string, unknown>): Promise<VooiResponse> {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) q.set(k, String(v));
@@ -47,287 +54,159 @@ async function vooiScan(params: any): Promise<any> {
   return res.json();
 }
 
-interface Trade {
-  ts: number;
-  strategy: string;
-  asset: string;
-  side: 'long' | 'short' | 'buy' | 'sell';
-  notionalUsd: number;
-  entryPrice: number;
-  exitPrice?: number;
-  profitUsd?: number;
-  feesUsd?: number;
-  netProfitUsd?: number;
-  status: 'open' | 'closed';
-  closeReason?: string;
-}
+// ─── V2 State I/O (fail-closed) ───────────────────────────────────────
 
-interface PaperState {
-  startingCapital: number;
-  currentCapital: number;
-  realizedPnl: number;
-  unrealizedPnl: number;
-  totalTrades: number;
-  winningTrades: number;
-  losingTrades: number;
-  totalFees: number;
-  openPositions: Trade[];
-  closedPositions: Trade[];
-  lastUpdate: number;
-}
-
-function loadState(): PaperState {
-  if (existsSync(PAPER_STATE)) {
-    return JSON.parse(readFileSync(PAPER_STATE, 'utf8'));
+function loadV2State(): AccountingState | null {
+  if (!existsSync(V2_STATE)) {
+    return null; // no existing state — engine will create fresh
   }
-  return {
-    startingCapital: 100_000,
-    currentCapital: 100_000,
-    realizedPnl: 0,
-    unrealizedPnl: 0,
-    totalTrades: 0,
-    winningTrades: 0,
-    losingTrades: 0,
-    totalFees: 0,
-    openPositions: [],
-    closedPositions: [],
-    lastUpdate: Date.now(),
-  };
-}
-
-function saveState(state: PaperState) {
-  state.lastUpdate = Date.now();
-  writeFileSync(PAPER_STATE, JSON.stringify(state, null, 2));
-}
-
-function logTrade(trade: Trade) {
-  const line = JSON.stringify(trade) + '\n';
+  const raw = readFileSync(V2_STATE, 'utf8');
+  let parsed: unknown;
   try {
-    const existing = readFileSync(PAPER_LOG, 'utf8').split('\n').filter(l => l.trim());
-    existing.push(JSON.stringify(trade));
-    writeFileSync(PAPER_LOG, existing.map(l => l).join('\n') + '\n');
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    // State file is corrupted JSON — fail closed
+    // Create a diagnostic copy, then abort
+    const diagPath = V2_STATE + `.corrupt-${Date.now()}`;
+    try { copyFileSync(V2_STATE, diagPath); } catch {}
+    console.error(`FATAL: V2 state file is corrupted JSON. Original preserved at ${V2_STATE}. Diagnostic copy at ${diagPath}.`);
+    console.error(`Not overwriting the original. Aborting.`);
+    process.exit(1);
+  }
+
+  const state = parsed as AccountingState;
+
+  // Check for missing opportunityHistory (legacy V2 state predating this field).
+  //
+  // SAFETY: An older V2 state may have been created BEFORE opportunityHistory
+  // was added. That state has real captures that are NOT reflected in any
+  // history structure. Setting opportunityHistory to empty would let those
+  // captures be re-credited at full spread — bypassing cooldown and max-capture
+  // limits. That is unsafe.
+  //
+  // We cannot reconstruct the historical capture counts from the state alone.
+  // The closedPositions array was removed in V2 (replaced by the log file).
+  // The log file may have entries, but parsing it to reconstruct counts is
+  // complex and error-prone.
+  //
+  // FAIL-CLOSED POLICY: If opportunityHistory is missing, we cannot safely
+  // determine which opportunities have already been captured. Rather than
+  // pretending unknown history is empty (which would allow duplicate
+  // crediting), we abort with a diagnostic. The user must either:
+  //   (a) Manually inspect the V2 log file and reconstruct the history, OR
+  //   (b) Archive the old state and start a new V2 accounting period with
+  //       a fresh $100k baseline (explicitly accepting that the old V2
+  //       P&L is a separate, closed accounting period).
+  if (!state.opportunityHistory) {
+    const diagPath = V2_STATE + `.legacy-migration-${Date.now()}`;
+    try { copyFileSync(V2_STATE, diagPath); } catch {}
+    console.error(`FATAL: V2 state predates opportunityHistory field.`);
+    console.error(`  This state has real captures that cannot be safely reconstructed.`);
+    console.error(`  Setting opportunityHistory to empty would bypass cooldown and capture limits.`);
+    console.error(`  Original preserved at ${V2_STATE}. Diagnostic copy at ${diagPath}.`);
+    console.error(`  To resolve: (a) manually reconstruct history from the V2 log, OR`);
+    console.error(`  (b) archive this state and start a new V2 accounting period.`);
+    console.error(`  Aborting to prevent duplicate crediting.`);
+    process.exit(1);
+  }
+
+  // Validate — fail closed on invalid state
+  try {
+    validateState(state);
+  } catch (e) {
+    // State is invalid — do NOT silently replace with a new baseline.
+    // Create a diagnostic copy, then abort.
+    const diagPath = V2_STATE + `.invalid-${Date.now()}`;
+    try { copyFileSync(V2_STATE, diagPath); } catch {}
+    console.error(`FATAL: V2 state validation failed. Original preserved at ${V2_STATE}. Diagnostic copy at ${diagPath}.`);
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`Not overwriting the original state. Aborting to prevent data loss.`);
+    process.exit(1);
+  }
+
+  return state;
+}
+
+function saveV2State(state: AccountingState): void {
+  const dir = dirname(V2_STATE);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(V2_STATE, JSON.stringify(state, null, 2));
+}
+
+function logV2Trade(entry: Record<string, unknown>): void {
+  const dir = dirname(V2_LOG);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const line = JSON.stringify({ ts: Date.now(), ...entry }) + '\n';
+  try {
+    const existing = readFileSync(V2_LOG, 'utf8').split('\n').filter(l => l.trim());
+    existing.push(JSON.stringify({ ts: Date.now(), ...entry }));
+    writeFileSync(V2_LOG, existing.map(l => l).join('\n') + '\n');
   } catch {
-    writeFileSync(PAPER_LOG, line);
+    writeFileSync(V2_LOG, line);
   }
 }
+
+// ─── Main ─────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('═══════════════════════════════════════════════════');
-  console.log('  Paper Trading Simulator');
+  console.log('  Paper Trading Simulator V2 (accounting-integrated)');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const state = loadState();
-  console.log(`Starting capital: $${state.startingCapital.toLocaleString()}`);
-  console.log(`Current capital: $${state.currentCapital.toLocaleString()}`);
-  console.log(`Realized P&L: $${state.realizedPnl.toFixed(2)}`);
-  console.log(`Open positions: ${state.openPositions.length}`);
-  console.log(`Closed positions: ${state.closedPositions.length}`);
-  console.log(`Total trades: ${state.totalTrades}`);
-  console.log('');
+  const result = await runScan({
+    fetchPriceSpreadArbs: () => vooiScan({ limit: 10, orderBy: 'priceSpread', orderDirection: 'desc', minPriceSpread: 0.005 }),
+    fetchFundingArbs: () => vooiScan({ limit: 10, orderBy: 'fundingSpread1h', orderDirection: 'desc', minFundingSpread: 0.0005 }),
+    now: () => Date.now(),
+    loadState: loadV2State,
+    saveState: saveV2State,
+    logTrade: logV2Trade,
+    creditUnverified: process.env.PAPER_CREDIT_UNVERIFIED === 'true',
+    scanIntervalMs: 5 * 60 * 1000,
+  });
 
-  // Opportunity tracking — prevents re-counting same opportunity
-  const seenOpportunities = new Map<string, number>(); // key -> last captured timestamp
-  const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown per opportunity
-  const MAX_CAPTURES_PER_OPP = 3; // max times same opportunity can be captured
-
-  // 1. Get top VOOI price spread arb opportunities
-  console.log('── Scanning VOOI Price Spread Arb ──');
-  const vooiResp = await vooiScan({ limit: 10, orderBy: 'priceSpread', orderDirection: 'desc', minPriceSpread: 0.005 });
-  let vooiArbsFound = 0;
-  let vooiProfitSimulated = 0;
-  for (const item of (vooiResp?.items || [])) {
-    if (vooiArbsFound >= 3) break;
-    for (const p of (item.pairs || [])) {
-      if (vooiArbsFound >= 3) break;
-      const spread = (p.priceSpread || 0) * 100;
-      if (spread < 0.5) continue;
-
-      // DEDUP: Check if this opportunity was recently captured
-      const oppKey = `price|${item.asset}|${p.long?.exchange}|${p.short?.exchange}`;
-      const lastSeen = seenOpportunities.get(oppKey) || 0;
-      const captureCount = state.closedPositions.filter(t =>
-        t.strategy === 'VOOI Price Spread Arb' &&
-        t.asset === item.asset
-      ).length;
-
-      if (Date.now() - lastSeen < COOLDOWN_MS) {
-        console.log(`  [SKIP] ${item.asset} — cooldown active (${Math.floor((COOLDOWN_MS - (Date.now() - lastSeen)) / 60000)}min left)`);
-        continue;
-      }
-      if (captureCount >= MAX_CAPTURES_PER_OPP) {
-        console.log(`  [SKIP] ${item.asset} — max captures reached (${MAX_CAPTURES_PER_OPP})`);
-        continue;
-      }
-
-      // Simulate spread erosion — each capture reduces available spread by 30%
-      const erosionFactor = Math.pow(0.7, captureCount);
-      const effectiveSpread = spread * erosionFactor;
-      if (effectiveSpread < 0.3) {
-        console.log(`  [SKIP] ${item.asset} — spread eroded to ${effectiveSpread.toFixed(2)}%`);
-        continue;
-      }
-
-      // Simulate trade
-      const notional = 5000; // $5k per trade
-      const grossProfit = notional * effectiveSpread / 100;
-      // Slippage model: 20% of spread lost to adverse price movement
-      // between signal and execution (deterministic, not random).
-      // This is conservative — real slippage on thin order books can be
-      // higher. Capped at 0.15% to avoid unrealistic erosion on wide spreads.
-      const slippagePct = Math.min(0.15, effectiveSpread * 0.20);
-      const slippageUsd = notional * slippagePct / 100;
-      const fees = notional * 0.001; // 0.1% fees (VOOI atomic, not 0.3%)
-      const netProfit = grossProfit - slippageUsd - fees;
-      const trade: Trade = {
-        ts: Date.now(),
-        strategy: 'VOOI Price Spread Arb',
-        asset: item.asset,
-        side: 'buy',
-        notionalUsd: notional,
-        entryPrice: parseFloat(p.long?.price || '0'),
-        exitPrice: parseFloat(p.short?.price || '0'),
-        profitUsd: grossProfit,
-        feesUsd: fees,
-        netProfitUsd: netProfit,
-        status: 'closed',
-        closeReason: 'instant_capture',
-      };
-      state.realizedPnl += netProfit;
-      state.currentCapital += netProfit;
-      state.totalTrades++;
-      state.totalFees += fees;
-      if (netProfit > 0) state.winningTrades++;
-      else state.losingTrades++;
-      state.closedPositions.push(trade);
-      logTrade(trade);
-      seenOpportunities.set(oppKey, Date.now());
-      vooiArbsFound++;
-      vooiProfitSimulated += netProfit;
-      console.log(`  [VOOI] ${item.asset} spread=${effectiveSpread.toFixed(2)}% (orig ${spread.toFixed(2)}%, capture #${captureCount + 1})  net profit=$${netProfit.toFixed(2)}`);
-    }
-  }
-  if (vooiArbsFound === 0) {
-    console.log('  No VOOI arbs > 0.5% right now');
-  } else {
-    console.log(`  Subtotal: ${vooiArbsFound} trades, $${vooiProfitSimulated.toFixed(2)} simulated profit`);
-  }
-
-  // 2. Get top VOOI funding rate arb opportunities
-  console.log('\n── Scanning VOOI Funding Rate Arb ──');
-  const vooiFundingResp = await vooiScan({ limit: 10, orderBy: 'fundingSpread1h', orderDirection: 'desc', minFundingSpread: 0.0005 });
-  let fundingArbsFound = 0;
-  let fundingProfitSimulated = 0;
-  for (const item of (vooiFundingResp?.items || [])) {
-    if (fundingArbsFound >= 3) break;
-    for (const p of (item.pairs || [])) {
-      if (fundingArbsFound >= 3) break;
-      const spread = (p.fundingSpread1h || 0) * 100;
-      const annualApr = spread * 24 * 365;
-      if (annualApr < 70 || annualApr > 120) continue; // VOOI recommended range (tightened)
-      // Simulate opening a funding arb position (24h hold for profitability)
-      const notional = 5000;
-      // Adverse funding drift: the initial 1h funding rate is not sustained
-      // for 24h. Model 80% of initial rate as the average over the hold
-      // period (20% adverse drift — conservative; real drift can be higher
-      // as funding rates mean-revert).
-      const adverseDriftFactor = 0.80;
-      const adjustedSpread = spread * adverseDriftFactor;
-      // Funding rate reversal: ~15% of funding arbs experience a full
-      // reversal over 24h (spread flips negative). Deterministic based
-      // on asset name hash — reproducible, not random. This models the
-      // real-world risk that funding rates can flip when sentiment shifts.
-      const reversalHash = item.asset.split('').reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
-      const reversed = (Math.abs(reversalHash) % 100) < 15; // ~15% reversal rate
-      const effectiveFundingSpread = reversed ? -adjustedSpread : adjustedSpread;
-      const fundingIncome = notional * effectiveFundingSpread / 100 * 24; // 24h hold
-      const fees = notional * 0.001; // 0.1% total (VOOI atomic, not 0.3%)
-      const netProfit = fundingIncome - fees;
-      // Removed the `if (netProfit <= 0) continue` skip per audit — losing
-      // trades must be recorded to produce a valid win rate.
-      const trade: Trade = {
-        ts: Date.now(),
-        strategy: 'VOOI Funding Rate Arb',
-        asset: item.asset,
-        side: 'long',
-        notionalUsd: notional,
-        entryPrice: parseFloat(p.long?.price || '0'),
-        profitUsd: fundingIncome,
-        feesUsd: fees,
-        netProfitUsd: netProfit,
-        status: 'closed',
-        closeReason: '24h_hold_complete',
-      };
-      state.realizedPnl += netProfit;
-      state.currentCapital += netProfit;
-      state.totalTrades++;
-      state.totalFees += fees;
-      if (netProfit > 0) state.winningTrades++;
-      else state.losingTrades++;
-      state.closedPositions.push(trade);
-      logTrade(trade);
-      fundingArbsFound++;
-      fundingProfitSimulated += netProfit;
-      console.log(`  [FUND] ${item.asset} 1h=${spread.toFixed(4)}% (${annualApr.toFixed(0)}%/yr, adj ${adjustedSpread.toFixed(4)}%${reversed ? ' REVERSED' : ''})  net=$${netProfit.toFixed(2)}/24h ${netProfit > 0 ? '✓' : '✗'}`);
-    }
-  }
-  if (fundingArbsFound === 0) {
-    console.log('  No funding arbs in 50-120% APR range right now');
-  } else {
-    console.log(`  Subtotal: ${fundingArbsFound} trades, $${fundingProfitSimulated.toFixed(2)} simulated profit`);
-  }
-
-  // 3. Simulate HLP vault passive yield (per scan = ~5 min)
-  // APR is configurable via env var. Default lowered from 100%→30% per
-  // docs/PAPER_PERFORMANCE_AUDIT.md — 100% was an unverified mid-estimate.
-  // HLP vault APRs are highly variable (-20% to +200% historically).
-  // The env var allows adjustment without code changes.
-  console.log('\n── Simulating HLP Vault Passive Yield ──');
-  const hlpCapital = 5000;
-  const hlpApr = Number(process.env.PAPER_HLP_APR ?? 0.30); // 30% APR (configurable)
-  const hlpDailyYield = hlpCapital * hlpApr / 365;
-  const hlpScanYield = hlpDailyYield / (24 * 60 / 5); // 5-min scan interval = 288 scans/day
-  state.realizedPnl += hlpScanYield;
-  state.currentCapital += hlpScanYield;
-  console.log(`  HLP deposit: $${hlpCapital} at ${hlpApr*100}% APR (SIMULATED, unverified)`);
-  console.log(`  Daily yield: $${hlpDailyYield.toFixed(2)}`);
-  console.log(`  This scan (+5 min): $${hlpScanYield.toFixed(4)}`);
-
-  // 4. Simulate kHYPE LST carry (per scan = ~5 min)
-  // APR corrected from 5.1%→1.93% per docs/PAPER_PERFORMANCE_AUDIT.md.
-  // The verified kHYPE staking yield is 1.93% (DefiLlama, 4 samples).
-  // The previous 5.1% was 2.6x the verified rate; with the false 3x
-  // leverage claim it was 7.9x inflated. Leverage removed — it would
-  // require borrowing against kHYPE which adds liquidation risk.
-  console.log('\n── Simulating kHYPE LST Carry ──');
-  const khypeCapital = 10000;
-  const khypeApr = Number(process.env.PAPER_KHYPE_APR ?? 0.0193); // 1.93% APR (verified)
-  const khypeDailyYield = khypeCapital * khypeApr / 365;
-  const khypeScanYield = khypeDailyYield / (24 * 60 / 5);
-  state.realizedPnl += khypeScanYield;
-  state.currentCapital += khypeScanYield;
-  console.log(`  kHYPE deposit: $${khypeCapital} at ${khypeApr*100}% APR (verified via DefiLlama)`);
-  console.log(`  Daily yield: $${khypeDailyYield.toFixed(2)}`);
-  console.log(`  This scan (+5 min): $${khypeScanYield.toFixed(4)}`);
-
-  // 5. Save state
-  saveState(state);
-
-  // 6. Print summary
-  console.log('\n═══════════════════════════════════════════════════');
-  console.log('  Paper Trading Summary');
+  const s = result.summary;
   console.log('═══════════════════════════════════════════════════');
-  console.log(`  Starting capital: $${state.startingCapital.toLocaleString()}`);
-  console.log(`  Current capital: $${state.currentCapital.toFixed(2)}`);
-  console.log(`  Realized P&L: $${state.realizedPnl.toFixed(2)}`);
-  console.log(`  Total trades: ${state.totalTrades}`);
-  console.log(`  Winning trades: ${state.winningTrades}`);
-  console.log(`  Losing trades: ${state.losingTrades}`);
-  console.log(`  Win rate: ${(state.winningTrades / Math.max(1, state.totalTrades) * 100).toFixed(1)}%`);
-  console.log(`  Total fees paid: $${state.totalFees.toFixed(2)}`);
-  console.log(`  ROI: ${((state.realizedPnl / state.startingCapital) * 100).toFixed(2)}%`);
+  console.log('  V2 Paper Trading Summary');
+  console.log('═══════════════════════════════════════════════════');
+  console.log(`  Starting capital:     $${s.startingCapital.toLocaleString()}`);
+  console.log(`  Total capital:        $${s.totalCapital.toFixed(2)}`);
+  console.log(`  Available capital:    $${s.availableCapital.toFixed(2)}`);
+  console.log(`  Reserved capital:     $${s.reservedCapital.toFixed(2)}`);
+  console.log(`  Allocated capital:    ${s.allocatedCapital.map(a => `${a.source}=$${a.amount}`).join(', ') || '(none)'}`);
   console.log('');
-  console.log(`  State saved: ${PAPER_STATE}`);
-  console.log(`  Trade log: ${PAPER_LOG}`);
+  console.log('  P&L Breakdown:');
+  console.log(`    Arb P&L:            $${s.pnl.arb.toFixed(2)}`);
+  console.log(`    Funding P&L:        $${s.pnl.funding.toFixed(2)}`);
+  console.log(`    Passive yield (est.):$${s.pnl.passiveYield.toFixed(2)}`);
+  console.log(`    TOTAL P&L:          $${s.pnl.total.toFixed(2)}`);
+  console.log(`    Fees paid:          $${s.fees.toFixed(2)}`);
+  console.log('');
+  console.log(`  Trades: ${s.trades.total} (W:${s.trades.winning} L:${s.trades.losing} WR:${(s.trades.winRate * 100).toFixed(1)}%)`);
+  console.log(`  Open funding positions: ${s.openFundingPositions}`);
+  console.log(`  ROI: ${(s.roi * 100).toFixed(4)}%`);
+  if (result.errors.length > 0) {
+    console.log('');
+    console.log('  Errors:');
+    for (const e of result.errors) {
+      console.log(`    ${e}`);
+    }
+  }
+  console.log('');
+  console.log(`  Scan: ${result.arbTradesExecuted} arb trades, ${result.fundingPositionsOpened} funding opened, ${result.fundingPositionsClosed} funding closed`);
+  console.log(`  Yield: ${result.yieldCredited.map(y => `${y.source}=$${y.amount.toFixed(4)}(${y.label})`).join(', ')}`);
+  console.log('');
+  console.log(`  V2 State: ${V2_STATE}`);
+  console.log(`  V2 Log:   ${V2_LOG}`);
+  console.log(`  V1 State (preserved, NOT modified): ${V1_STATE}`);
+  console.log(`  V1 Log   (preserved, NOT modified): ${V1_LOG}`);
+  console.log('');
+  console.log('  NOTE: V2 is a new accounting period with clean $100k baseline.');
+  console.log('  V1 P&L is NOT carried over. Do not combine V1 and V2 figures.');
+  console.log('  Passive yield is labeled as estimate — not realized income.');
+  console.log('  Funding position fees are settled at close (not at open).');
 }
 
-main().catch(console.error);
+main().catch(err => {
+  console.error('Paper trader V2 fatal error:', err);
+  process.exit(1);
+});
