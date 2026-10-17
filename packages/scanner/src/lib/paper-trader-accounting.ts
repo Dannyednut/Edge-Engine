@@ -91,6 +91,8 @@ export interface AccountingState {
   capital: CapitalAllocation;
   /** Yield source configurations. */
   yields: Record<YieldSource, YieldConfig>;
+  /** Epoch ms when state was last saved (set by the I/O layer, not by pure functions). */
+  lastUpdate?: number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────
@@ -583,4 +585,174 @@ export function createInitialState(
     },
     yields,
   };
+}
+
+// ─── Input validation ────────────────────────────────────────────────
+
+/**
+ * Check if a number is a valid positive finite financial amount.
+ */
+export function isValidPositiveAmount(n: number): boolean {
+  return typeof n === 'number' && Number.isFinite(n) && n > 0;
+}
+
+/**
+ * Check if a number is a valid non-negative finite financial amount.
+ */
+export function isValidNonNegativeAmount(n: number): boolean {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0;
+}
+
+/**
+ * Validate an AccountingState for financial invariants.
+ * Throws on invalid inputs.
+ */
+export function validateState(state: AccountingState): void {
+  if (!isValidNonNegativeAmount(state.startingCapital)) {
+    throw new Error(`Invalid startingCapital: ${state.startingCapital}`);
+  }
+  if (!isValidNonNegativeAmount(state.arbPnl)) {
+    throw new Error(`Invalid arbPnl: ${state.arbPnl}`);
+  }
+  // arbPnl can be negative (losing trades), so we check finiteness only
+  if (!Number.isFinite(state.arbPnl)) {
+    throw new Error(`Non-finite arbPnl: ${state.arbPnl}`);
+  }
+  if (!Number.isFinite(state.fundingPnl)) {
+    throw new Error(`Non-finite fundingPnl: ${state.fundingPnl}`);
+  }
+  if (!Number.isFinite(state.passiveYieldPnl)) {
+    throw new Error(`Non-finite passiveYieldPnl: ${state.passiveYieldPnl}`);
+  }
+  if (!isValidNonNegativeAmount(state.feesTotal)) {
+    throw new Error(`Invalid feesTotal: ${state.feesTotal}`);
+  }
+  if (!isValidNonNegativeAmount(state.capital.available)) {
+    throw new Error(`Invalid available capital: ${state.capital.available}`);
+  }
+  if (!isValidNonNegativeAmount(state.capital.reserved)) {
+    throw new Error(`Invalid reserved capital: ${state.capital.reserved}`);
+  }
+  for (const [source, amount] of Object.entries(state.capital.allocated)) {
+    if (!isValidNonNegativeAmount(amount)) {
+      throw new Error(`Invalid allocated amount for ${source}: ${amount}`);
+    }
+  }
+}
+
+/**
+ * Try to record an arb trade, checking available capital first.
+ * Returns { ok: true, state } on success, { ok: false, reason } if
+ * insufficient capital or invalid inputs.
+ *
+ * The notional is NOT reserved (arb trades are instant in/out), but we
+ * check that available capital is sufficient to cover the notional as
+ * a risk gate — if the trade goes to zero, the capital must exist.
+ */
+export function tryRecordArbTrade(
+  state: AccountingState,
+  trade: ArbTrade,
+): { ok: true; state: AccountingState } | { ok: false; reason: string } {
+  // Validate inputs
+  if (!isValidPositiveAmount(trade.notionalUsd)) {
+    return { ok: false, reason: `Invalid notionalUsd: ${trade.notionalUsd}` };
+  }
+  if (!Number.isFinite(trade.grossProfitUsd)) {
+    return { ok: false, reason: `Non-finite grossProfitUsd: ${trade.grossProfitUsd}` };
+  }
+  if (!Number.isFinite(trade.slippageUsd) || trade.slippageUsd < 0) {
+    return { ok: false, reason: `Invalid slippageUsd: ${trade.slippageUsd}` };
+  }
+  if (!isValidNonNegativeAmount(trade.feesUsd)) {
+    return { ok: false, reason: `Invalid feesUsd: ${trade.feesUsd}` };
+  }
+  if (!Number.isFinite(trade.netProfitUsd)) {
+    return { ok: false, reason: `Non-finite netProfitUsd: ${trade.netProfitUsd}` };
+  }
+
+  // Check available capital — the notional must be covered
+  if (state.capital.available < trade.notionalUsd) {
+    return {
+      ok: false,
+      reason: `Insufficient available capital: need $${trade.notionalUsd}, have $${state.capital.available}`,
+    };
+  }
+
+  return { ok: true, state: recordArbTrade(state, trade) };
+}
+
+/**
+ * Try to open a funding position, checking available capital first.
+ * Returns { ok: true, state, positionId } on success, { ok: false, reason } if
+ * insufficient capital or invalid inputs.
+ */
+export function tryOpenFundingPosition(
+  state: AccountingState,
+  pos: Omit<FundingPosition, 'id' | 'openedAt'>,
+  now: number,
+): { ok: true; state: AccountingState; positionId: string } | { ok: false; reason: string } {
+  // Validate inputs
+  if (!isValidPositiveAmount(pos.notionalUsd)) {
+    return { ok: false, reason: `Invalid notionalUsd: ${pos.notionalUsd}` };
+  }
+  if (!Number.isFinite(pos.entryFundingSpread1hPct)) {
+    return { ok: false, reason: `Non-finite entryFundingSpread1hPct: ${pos.entryFundingSpread1hPct}` };
+  }
+  if (!isValidNonNegativeAmount(pos.maturityMs)) {
+    return { ok: false, reason: `Invalid maturityMs: ${pos.maturityMs}` };
+  }
+  if (!Number.isFinite(pos.adverseDriftFactor) || pos.adverseDriftFactor < 0 || pos.adverseDriftFactor > 1) {
+    return { ok: false, reason: `Invalid adverseDriftFactor: ${pos.adverseDriftFactor}` };
+  }
+  if (!isValidNonNegativeAmount(pos.feesUsd)) {
+    return { ok: false, reason: `Invalid feesUsd: ${pos.feesUsd}` };
+  }
+  if (!Number.isFinite(now) || now < 0) {
+    return { ok: false, reason: `Invalid timestamp: ${now}` };
+  }
+
+  // Check available capital
+  if (state.capital.available < pos.notionalUsd) {
+    return {
+      ok: false,
+      reason: `Insufficient available capital: need $${pos.notionalUsd}, have $${state.capital.available}`,
+    };
+  }
+
+  // Check for duplicate position ID (shouldn't happen with timestamp-based IDs
+  // but guard against it)
+  const positionId = `fund-${now}-${pos.asset}`;
+  if (state.openFundingPositions.some(p => p.id === positionId)) {
+    return { ok: false, reason: `Duplicate position ID: ${positionId}` };
+  }
+
+  const result = openFundingPosition(state, pos, now);
+  return { ok: true, state: result.state, positionId: result.positionId };
+}
+
+/**
+ * Close all mature funding positions at the given time.
+ * Returns the updated state and a list of closed positions with their P&L.
+ */
+export function closeMatureFundingPositions(
+  state: AccountingState,
+  now: number,
+): { state: AccountingState; closed: { positionId: string; pnl: number; isMature: boolean; closeReason: string }[] } {
+  let currentState = state;
+  const closed: { positionId: string; pnl: number; isMature: boolean; closeReason: string }[] = [];
+
+  for (const pos of state.openFundingPositions) {
+    if (now >= pos.openedAt + pos.maturityMs) {
+      const result = closeFundingPosition(currentState, pos.id, now);
+      currentState = result.state;
+      closed.push({
+        positionId: pos.id,
+        pnl: result.pnl,
+        isMature: result.isMature,
+        closeReason: result.closeReason,
+      });
+    }
+  }
+
+  return { state: currentState, closed };
 }
