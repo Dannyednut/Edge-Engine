@@ -74,10 +74,40 @@ function loadV2State(): AccountingState | null {
     process.exit(1);
   }
 
-  // Check for missing opportunityHistory (backward compat with earlier V2 state)
   const state = parsed as AccountingState;
+
+  // Check for missing opportunityHistory (legacy V2 state predating this field).
+  //
+  // SAFETY: An older V2 state may have been created BEFORE opportunityHistory
+  // was added. That state has real captures that are NOT reflected in any
+  // history structure. Setting opportunityHistory to empty would let those
+  // captures be re-credited at full spread — bypassing cooldown and max-capture
+  // limits. That is unsafe.
+  //
+  // We cannot reconstruct the historical capture counts from the state alone.
+  // The closedPositions array was removed in V2 (replaced by the log file).
+  // The log file may have entries, but parsing it to reconstruct counts is
+  // complex and error-prone.
+  //
+  // FAIL-CLOSED POLICY: If opportunityHistory is missing, we cannot safely
+  // determine which opportunities have already been captured. Rather than
+  // pretending unknown history is empty (which would allow duplicate
+  // crediting), we abort with a diagnostic. The user must either:
+  //   (a) Manually inspect the V2 log file and reconstruct the history, OR
+  //   (b) Archive the old state and start a new V2 accounting period with
+  //       a fresh $100k baseline (explicitly accepting that the old V2
+  //       P&L is a separate, closed accounting period).
   if (!state.opportunityHistory) {
-    state.opportunityHistory = { entries: {} };
+    const diagPath = V2_STATE + `.legacy-migration-${Date.now()}`;
+    try { copyFileSync(V2_STATE, diagPath); } catch {}
+    console.error(`FATAL: V2 state predates opportunityHistory field.`);
+    console.error(`  This state has real captures that cannot be safely reconstructed.`);
+    console.error(`  Setting opportunityHistory to empty would bypass cooldown and capture limits.`);
+    console.error(`  Original preserved at ${V2_STATE}. Diagnostic copy at ${diagPath}.`);
+    console.error(`  To resolve: (a) manually reconstruct history from the V2 log, OR`);
+    console.error(`  (b) archive this state and start a new V2 accounting period.`);
+    console.error(`  Aborting to prevent duplicate crediting.`);
+    process.exit(1);
   }
 
   // Validate — fail closed on invalid state

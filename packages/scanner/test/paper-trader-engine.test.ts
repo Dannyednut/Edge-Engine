@@ -796,3 +796,102 @@ describe('Network call verification', () => {
     // networkCallCount, so this counter proves the mocks were used.
   });
 });
+
+// ─── 15. Legacy state migration safety ───────────────────────────────
+
+describe('15. Legacy state migration safety (opportunityHistory missing)', () => {
+  it('legacy state without opportunityHistory fails closed (not silently migrated)', async () => {
+    // Create a state WITHOUT opportunityHistory (simulating a legacy V2 state)
+    // that has already captured an opportunity.
+    let legacyState = createV2InitialState(0.30, 0.0193);
+    // Record an arb trade to simulate prior activity
+    const trade = {
+      strategy: 'VOOI Price Spread Arb', asset: 'BTC', notionalUsd: 5000,
+      grossProfitUsd: 50, slippageUsd: 10, feesUsd: 5, netProfitUsd: 35,
+    };
+    const tradeResult = tryRecordArbTrade(legacyState, trade);
+    if (!tradeResult.ok) return;
+    legacyState = tradeResult.state;
+
+    // Remove opportunityHistory to simulate legacy state
+    delete (legacyState as any).opportunityHistory;
+
+    // The engine's runScan should reject this state via validateState
+    // (which now requires opportunityHistory to exist)
+    const { deps } = makeMockDeps({
+      existingState: legacyState,
+      now: 1000000,
+    });
+
+    await expect(runScan(deps)).rejects.toThrow();
+  });
+
+  it('legacy state with empty opportunityHistory cannot bypass cooldown', () => {
+    // Simulate: a state that HAD captures but opportunityHistory was set to empty
+    // (the unsafe migration we're preventing)
+    let state = createV2InitialState(0.30, 0.0193);
+
+    // Manually record a capture
+    const oppKey = makeOpportunityKey('BTC', 'binance', 'bybit');
+    state = recordOpportunityCapture(state, oppKey, 1000000);
+
+    // Verify the capture exists
+    expect(state.opportunityHistory.entries[oppKey]).toBeDefined();
+    expect(state.opportunityHistory.entries[oppKey].captureCount).toBe(1);
+
+    // Now simulate the UNSAFE migration: replace history with empty
+    const unsafelyMigrated = {
+      ...state,
+      opportunityHistory: { entries: {} },
+    };
+
+    // Check: the cooldown check would now PASS (because history is empty)
+    // This proves why the unsafe migration is dangerous:
+    const check = checkOpportunityCapture(unsafelyMigrated, oppKey, 1000000 + 30 * 60 * 1000);
+    expect(check.allowed).toBe(true); // ← THIS IS THE BUG the fail-closed prevents
+
+    // With the REAL (non-migrated) state, the cooldown would block:
+    const safeCheck = checkOpportunityCapture(state, oppKey, 1000000 + 30 * 60 * 1000);
+    expect(safeCheck.allowed).toBe(false); // ← cooldown blocks correctly
+    expect(safeCheck.reason).toContain('cooldown');
+  });
+
+  it('legacy state with empty opportunityHistory cannot bypass max captures', () => {
+    let state = createV2InitialState(0.30, 0.0193);
+    const oppKey = makeOpportunityKey('ETH', 'okx', 'bitget');
+
+    // Capture 3 times (at max)
+    state = recordOpportunityCapture(state, oppKey, 1000000);
+    state = recordOpportunityCapture(state, oppKey, 1000000 + 70 * 60 * 1000);
+    state = recordOpportunityCapture(state, oppKey, 1000000 + 140 * 60 * 1000);
+    expect(state.opportunityHistory.entries[oppKey].captureCount).toBe(3);
+
+    // With the real state, max captures blocks:
+    const safeCheck = checkOpportunityCapture(state, oppKey, 1000000 + 210 * 60 * 1000);
+    expect(safeCheck.allowed).toBe(false);
+    expect(safeCheck.reason).toContain('max captures');
+
+    // With UNSAFE empty migration, max captures would NOT block:
+    const unsafelyMigrated = {
+      ...state,
+      opportunityHistory: { entries: {} },
+    };
+    const unsafeCheck = checkOpportunityCapture(unsafelyMigrated, oppKey, 1000000 + 210 * 60 * 1000);
+    expect(unsafeCheck.allowed).toBe(true); // ← THIS IS THE BUG the fail-closed prevents
+    expect(unsafeCheck.captureCount).toBe(0); // ← history was lost
+  });
+
+  it('validateState rejects state missing opportunityHistory', () => {
+    const state = createV2InitialState(0.30, 0.0193);
+    delete (state as any).opportunityHistory;
+    expect(() => validateState(state)).toThrow();
+  });
+
+  it('validateState accepts state with valid opportunityHistory', () => {
+    const state = createV2InitialState(0.30, 0.0193);
+    // opportunityHistory is initialized by createInitialState
+    expect(state.opportunityHistory).toBeDefined();
+    expect(state.opportunityHistory.entries).toEqual({});
+    expect(() => validateState(state)).not.toThrow();
+  });
+});

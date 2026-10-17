@@ -2,9 +2,12 @@
  * paper-trader-accounting.ts — Pure functions for paper-trader P&L accounting.
  * ─────────────────────────────────────────────────────────────────────
  * This module provides testable pure functions for the paper-trader's
- * calculation and accounting logic. The live daemon (scripts-explore/
- * paper-trader.mts) is NOT modified — these functions are designed to be
- * importable by a future refactor of that script.
+ * calculation and accounting logic. The live script (scripts-explore/
+ * paper-trader.mts) imports these functions via paper-trader-engine.ts,
+ * which provides the testable scan orchestration with injectable
+ * dependencies. Both pure-function tests (paper-trader-accounting.test.ts,
+ * 52 tests) and engine integration tests (paper-trader-engine.test.ts,
+ * 31 tests) verify the accounting logic end-to-end.
  *
  * Design principles:
  *   - All functions are pure (no side effects, no I/O, no Date.now()).
@@ -13,6 +16,11 @@
  *   - P&L categories are separated: arb, funding, passive yield.
  *   - Capital allocation is tracked: available / allocated / reserved.
  *   - Unverified yields are labeled, not silently credited.
+ *   - Opportunity history persists across restarts to prevent duplicate crediting.
+ *   - State validation is fail-closed: invalid state aborts, never silently replaced.
+ *   - P&L fields may be negative (losses are legitimate); capital/fees must be non-negative.
+ *   - Capital invariant enforced: available + allocated + reserved = startingCapital + totalPnl.
+ *   - Funding position fees are settled at close, not at open.
  */
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -725,6 +733,16 @@ export function validateState(state: AccountingState): void {
     if (!Number.isFinite(pos.openedAt) || pos.openedAt < 0) {
       throw new Error(`Invalid openedAt in funding position ${pos.id}: ${pos.openedAt}`);
     }
+  }
+
+  // Opportunity history — must exist (fail-closed on legacy states that
+  // predate this field; an empty history is valid but a missing one is not
+  // because it means historical captures were lost).
+  if (!state.opportunityHistory || typeof state.opportunityHistory !== 'object') {
+    throw new Error(`Missing or invalid opportunityHistory — legacy V2 state cannot be safely migrated`);
+  }
+  if (!state.opportunityHistory.entries || typeof state.opportunityHistory.entries !== 'object') {
+    throw new Error(`Missing or invalid opportunityHistory.entries`);
   }
 
   // Capital invariant: available + allocated_total + reserved should equal
