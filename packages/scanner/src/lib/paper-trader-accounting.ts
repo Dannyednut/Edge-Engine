@@ -72,6 +72,22 @@ export interface FundingPosition {
   feesUsd: number;
 }
 
+/** A captured opportunity in the history. */
+export interface CapturedOpportunity {
+  /** Stable key: `${asset}|${longVenue}|${shortVenue}` */
+  key: string;
+  /** Epoch ms of the last capture. */
+  lastCapturedAt: number;
+  /** Number of times this opportunity has been captured. */
+  captureCount: number;
+}
+
+/** Persistent opportunity tracking — survives restart. */
+export interface OpportunityHistory {
+  /** Map of opportunity key -> capture record. */
+  entries: Record<string, CapturedOpportunity>;
+}
+
 export interface AccountingState {
   startingCapital: number;
   /** P&L from arbitrage trades (VOOI price spread, etc.). */
@@ -93,6 +109,8 @@ export interface AccountingState {
   yields: Record<YieldSource, YieldConfig>;
   /** Epoch ms when state was last saved (set by the I/O layer, not by pure functions). */
   lastUpdate?: number;
+  /** Persistent opportunity tracking — survives restart to prevent duplicate crediting. */
+  opportunityHistory: OpportunityHistory;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────
@@ -584,6 +602,7 @@ export function createInitialState(
       reserved: 0,
     },
     yields,
+    opportunityHistory: { entries: {} },
   };
 }
 
@@ -604,39 +623,122 @@ export function isValidNonNegativeAmount(n: number): boolean {
 }
 
 /**
+ * Check if a number is a valid finite financial amount (may be negative).
+ * Used for P&L fields where losses are legitimate.
+ */
+export function isValidFiniteAmount(n: number): boolean {
+  return typeof n === 'number' && Number.isFinite(n);
+}
+
+/**
  * Validate an AccountingState for financial invariants.
  * Throws on invalid inputs.
+ *
+ * P&L fields (arbPnl, fundingPnl, passiveYieldPnl) may be negative —
+ * losses are legitimate. They must be finite.
+ *
+ * Capital balances, fees, allocations, and reserves must be non-negative
+ * finite. A negative available balance would mean the system lent money
+ * it doesn't have; a negative fee total is nonsensical.
  */
 export function validateState(state: AccountingState): void {
+  // P&L fields — finite but may be negative (losses are legitimate)
+  if (!isValidFiniteAmount(state.arbPnl)) {
+    throw new Error(`Invalid arbPnl: ${state.arbPnl} (must be finite, may be negative)`);
+  }
+  if (!isValidFiniteAmount(state.fundingPnl)) {
+    throw new Error(`Invalid fundingPnl: ${state.fundingPnl} (must be finite, may be negative)`);
+  }
+  if (!isValidFiniteAmount(state.passiveYieldPnl)) {
+    throw new Error(`Invalid passiveYieldPnl: ${state.passiveYieldPnl} (must be finite, may be negative)`);
+  }
+
+  // Non-negative fields
   if (!isValidNonNegativeAmount(state.startingCapital)) {
-    throw new Error(`Invalid startingCapital: ${state.startingCapital}`);
-  }
-  if (!isValidNonNegativeAmount(state.arbPnl)) {
-    throw new Error(`Invalid arbPnl: ${state.arbPnl}`);
-  }
-  // arbPnl can be negative (losing trades), so we check finiteness only
-  if (!Number.isFinite(state.arbPnl)) {
-    throw new Error(`Non-finite arbPnl: ${state.arbPnl}`);
-  }
-  if (!Number.isFinite(state.fundingPnl)) {
-    throw new Error(`Non-finite fundingPnl: ${state.fundingPnl}`);
-  }
-  if (!Number.isFinite(state.passiveYieldPnl)) {
-    throw new Error(`Non-finite passiveYieldPnl: ${state.passiveYieldPnl}`);
+    throw new Error(`Invalid startingCapital: ${state.startingCapital} (must be non-negative finite)`);
   }
   if (!isValidNonNegativeAmount(state.feesTotal)) {
-    throw new Error(`Invalid feesTotal: ${state.feesTotal}`);
+    throw new Error(`Invalid feesTotal: ${state.feesTotal} (must be non-negative finite)`);
   }
+  if (!Number.isInteger(state.totalTrades) || state.totalTrades < 0) {
+    throw new Error(`Invalid totalTrades: ${state.totalTrades} (must be non-negative integer)`);
+  }
+  if (!Number.isInteger(state.winningTrades) || state.winningTrades < 0) {
+    throw new Error(`Invalid winningTrades: ${state.winningTrades} (must be non-negative integer)`);
+  }
+  if (!Number.isInteger(state.losingTrades) || state.losingTrades < 0) {
+    throw new Error(`Invalid losingTrades: ${state.losingTrades} (must be non-negative integer)`);
+  }
+  if (state.winningTrades + state.losingTrades > state.totalTrades) {
+    throw new Error(`Trade count invariant violated: ${state.winningTrades}W + ${state.losingTrades}L > ${state.totalTrades} total`);
+  }
+
+  // Capital balances — must be non-negative
   if (!isValidNonNegativeAmount(state.capital.available)) {
-    throw new Error(`Invalid available capital: ${state.capital.available}`);
+    throw new Error(`Invalid available capital: ${state.capital.available} (must be non-negative finite)`);
   }
   if (!isValidNonNegativeAmount(state.capital.reserved)) {
-    throw new Error(`Invalid reserved capital: ${state.capital.reserved}`);
+    throw new Error(`Invalid reserved capital: ${state.capital.reserved} (must be non-negative finite)`);
   }
   for (const [source, amount] of Object.entries(state.capital.allocated)) {
     if (!isValidNonNegativeAmount(amount)) {
-      throw new Error(`Invalid allocated amount for ${source}: ${amount}`);
+      throw new Error(`Invalid allocated amount for ${source}: ${amount} (must be non-negative finite)`);
     }
+  }
+
+  // Yield configs — validate each source
+  for (const [source, config] of Object.entries(state.yields)) {
+    if (!isValidNonNegativeAmount(config.apr)) {
+      throw new Error(`Invalid APR for ${source}: ${config.apr} (must be non-negative finite)`);
+    }
+    if (!isValidNonNegativeAmount(config.capitalUsd)) {
+      throw new Error(`Invalid capitalUsd for ${source}: ${config.capitalUsd} (must be non-negative finite)`);
+    }
+    if (!isValidNonNegativeAmount(config.freshnessMs)) {
+      throw new Error(`Invalid freshnessMs for ${source}: ${config.freshnessMs} (must be non-negative finite)`);
+    }
+    if (config.verified && config.verifiedAt === null) {
+      throw new Error(`Yield ${source} marked verified but verifiedAt is null`);
+    }
+    if (config.verifiedAt !== null && (!Number.isFinite(config.verifiedAt) || config.verifiedAt < 0)) {
+      throw new Error(`Invalid verifiedAt for ${source}: ${config.verifiedAt}`);
+    }
+  }
+
+  // Open funding positions — validate each
+  for (const pos of state.openFundingPositions) {
+    if (!isValidPositiveAmount(pos.notionalUsd)) {
+      throw new Error(`Invalid notionalUsd in funding position ${pos.id}: ${pos.notionalUsd}`);
+    }
+    if (!isValidFiniteAmount(pos.entryFundingSpread1hPct)) {
+      throw new Error(`Invalid entryFundingSpread1hPct in funding position ${pos.id}: ${pos.entryFundingSpread1hPct}`);
+    }
+    if (!isValidNonNegativeAmount(pos.maturityMs)) {
+      throw new Error(`Invalid maturityMs in funding position ${pos.id}: ${pos.maturityMs}`);
+    }
+    if (!Number.isFinite(pos.adverseDriftFactor) || pos.adverseDriftFactor < 0 || pos.adverseDriftFactor > 1) {
+      throw new Error(`Invalid adverseDriftFactor in funding position ${pos.id}: ${pos.adverseDriftFactor}`);
+    }
+    if (!isValidNonNegativeAmount(pos.feesUsd)) {
+      throw new Error(`Invalid feesUsd in funding position ${pos.id}: ${pos.feesUsd}`);
+    }
+    if (!Number.isFinite(pos.openedAt) || pos.openedAt < 0) {
+      throw new Error(`Invalid openedAt in funding position ${pos.id}: ${pos.openedAt}`);
+    }
+  }
+
+  // Capital invariant: available + allocated_total + reserved should equal
+  // startingCapital + totalPnl. This catches state corruption where P&L
+  // was credited but capital wasn't updated (or vice versa).
+  const allocatedTotal = Object.values(state.capital.allocated).reduce((a, b) => a + b, 0);
+  const totalCapital = state.capital.available + allocatedTotal + state.capital.reserved;
+  const expectedCapital = state.startingCapital + state.arbPnl + state.fundingPnl + state.passiveYieldPnl;
+  // Use a small epsilon for floating-point comparison
+  if (Math.abs(totalCapital - expectedCapital) > 0.01) {
+    throw new Error(
+      `Capital invariant violated: available(${state.capital.available}) + allocated(${allocatedTotal}) + reserved(${state.capital.reserved}) = ${totalCapital}, ` +
+      `but startingCapital(${state.startingCapital}) + arbPnl(${state.arbPnl}) + fundingPnl(${state.fundingPnl}) + passiveYieldPnl(${state.passiveYieldPnl}) = ${expectedCapital}`
+    );
   }
 }
 
@@ -755,4 +857,67 @@ export function closeMatureFundingPositions(
   }
 
   return { state: currentState, closed };
+}
+
+// ─── Opportunity tracking helpers ─────────────────────────────────────
+
+/** Default cooldown per opportunity (1 hour). */
+export const DEFAULT_OPP_COOLDOWN_MS = 60 * 60 * 1000;
+
+/** Default max captures per opportunity. */
+export const DEFAULT_MAX_OPP_CAPTURES = 3;
+
+/**
+ * Build a stable opportunity key from asset and venue pair.
+ * Format: `${asset}|${longVenue}|${shortVenue}`
+ */
+export function makeOpportunityKey(asset: string, longVenue: string, shortVenue: string): string {
+  return `${asset}|${longVenue}|${shortVenue}`;
+}
+
+/**
+ * Check if an opportunity can be captured given its history.
+ * Returns { allowed: true, captureCount } or { allowed: false, reason }.
+ */
+export function checkOpportunityCapture(
+  state: AccountingState,
+  key: string,
+  now: number,
+  cooldownMs: number = DEFAULT_OPP_COOLDOWN_MS,
+  maxCaptures: number = DEFAULT_MAX_OPP_CAPTURES,
+): { allowed: true; captureCount: number } | { allowed: false; reason: string; captureCount: number } {
+  const entry = state.opportunityHistory.entries[key];
+  const captureCount = entry?.captureCount ?? 0;
+
+  if (entry && now - entry.lastCapturedAt < cooldownMs) {
+    const remaining = Math.ceil((cooldownMs - (now - entry.lastCapturedAt)) / 60000);
+    return { allowed: false, reason: `cooldown active (${remaining}min left)`, captureCount };
+  }
+  if (captureCount >= maxCaptures) {
+    return { allowed: false, reason: `max captures reached (${maxCaptures})`, captureCount };
+  }
+
+  return { allowed: true, captureCount };
+}
+
+/**
+ * Record that an opportunity was captured. Updates the history.
+ */
+export function recordOpportunityCapture(
+  state: AccountingState,
+  key: string,
+  now: number,
+): AccountingState {
+  const existing = state.opportunityHistory.entries[key];
+  const newEntry: CapturedOpportunity = {
+    key,
+    lastCapturedAt: now,
+    captureCount: (existing?.captureCount ?? 0) + 1,
+  };
+  return {
+    ...state,
+    opportunityHistory: {
+      entries: { ...state.opportunityHistory.entries, [key]: newEntry },
+    },
+  };
 }
