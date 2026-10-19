@@ -249,6 +249,7 @@ contract AgentVault is
     }
 
     function protectToken(address token, uint256 amount) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
         protectedPrincipal[token] += amount;
         // Auto-register the token so it's always in the effective check set
         if (!isRegistered[token]) {
@@ -267,7 +268,11 @@ contract AgentVault is
 
     /// @notice Register a token in the protected-token registry.
     ///         Registered tokens are ALWAYS included in the effective check set.
+    ///         Reverts for address(0) — native ETH profit routing is NOT
+    ///         supported via the registry. ETH is handled separately as gas
+    ///         reserve and is not auto-routed.
     function registerToken(address token) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
         if (isRegistered[token]) revert AlreadyRegistered(token);
         isRegistered[token] = true;
         registeredTokens.push(token);
@@ -549,7 +554,7 @@ contract AgentVault is
         }
 
         // Route profits using pre-loan baselines and projected balances
-        _routeProfitsWithProjectedBalances(effectiveTokens, preLoanBalances, projectedBalances, asset, owed);
+        _routeProfitsWithProjectedBalances(effectiveTokens, preLoanBalances, projectedBalances);
 
         // Assert protected principal using PROJECTED balances (not current,
         // because Aave hasn't pulled yet). For the borrowed asset, the projected
@@ -591,13 +596,13 @@ contract AgentVault is
 
     /// @dev Route profits using pre-loan baselines (borrowed principal excluded).
     ///      Used by Balancer callback where repayment already happened.
+    ///      Reverts on token/baseline length mismatch — never silently falls back to 0.
     function _routeProfitsWithBaselines(address[] memory tokens, uint256[] memory preLoanBalances) internal {
-        // Build a mapping from token to pre-loan balance
-        // preLoanBalances was snapshotted for effectiveTokens in order
+        require(tokens.length == preLoanBalances.length, "baseline length mismatch");
         for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];
             uint256 balanceNow = _balanceOf(token, address(this));
-            uint256 baseline = preLoanBalances.length > i ? preLoanBalances[i] : 0;
+            uint256 baseline = preLoanBalances[i];
             uint256 floor = protectedPrincipal[token] > baseline
                 ? protectedPrincipal[token]
                 : baseline;
@@ -616,14 +621,14 @@ contract AgentVault is
     function _routeProfitsWithProjectedBalances(
         address[] memory tokens,
         uint256[] memory preLoanBalances,
-        uint256[] memory projectedBalances,
-        address borrowedAsset,
-        uint256 owed
+        uint256[] memory projectedBalances
     ) internal {
+        require(tokens.length == preLoanBalances.length, "baseline length mismatch");
+        require(tokens.length == projectedBalances.length, "projected length mismatch");
         for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];
             uint256 projected = projectedBalances[i];
-            uint256 baseline = preLoanBalances.length > i ? preLoanBalances[i] : 0;
+            uint256 baseline = preLoanBalances[i];
             uint256 floor = protectedPrincipal[token] > baseline
                 ? protectedPrincipal[token]
                 : baseline;
@@ -748,19 +753,15 @@ contract AgentVault is
     // ═══════════════════════════════════════════════════════════════════════
 
     /// @dev Encode Balancer userData with pre-loan baselines.
-    ///      Original userData: (address[] targets, bytes[] datas)
-    ///      Enhanced userData: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
+    ///      Operator-provided userData format: (address[] targets, bytes[] datas, address[] outputTokens)
+    ///      Enhanced userData format: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
     function _encodeBalancerUserData(
         bytes memory userData,
         address[] memory borrowedTokens
     ) internal view returns (bytes memory) {
-        // Decode original: (targets, datas)
-        (address[] memory targets, bytes[] memory datas) = abi.decode(userData, (address[], bytes[]));
-
-        // Extract outputTokens from targets/datas if encoded (or use empty)
-        // For now, we use empty outputTokens — the operator can register them
-        // via the protected-token registry or declare them separately.
-        address[] memory outputTokens = new address[](0);
+        // Decode operator-provided: (targets, datas, outputTokens)
+        (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
+            abi.decode(userData, (address[], bytes[], address[]));
 
         // Build effective token set and snapshot pre-loan baselines
         address[] memory effectiveTokens = _getEffectiveTokensFlashloan(borrowedTokens, outputTokens);
@@ -770,14 +771,14 @@ contract AgentVault is
     }
 
     /// @dev Encode Aave params with pre-loan baseline.
-    ///      Original params: (address[] targets, bytes[] datas)
-    ///      Enhanced params: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
+    ///      Operator-provided params format: (address[] targets, bytes[] datas, address[] outputTokens)
+    ///      Enhanced params format: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
     function _encodeAaveParams(
         bytes memory params,
         address asset
     ) internal view returns (bytes memory) {
-        (address[] memory targets, bytes[] memory datas) = abi.decode(params, (address[], bytes[]));
-        address[] memory outputTokens = new address[](0);
+        (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
+            abi.decode(params, (address[], bytes[], address[]));
 
         address[] memory borrowedTokens = new address[](1);
         borrowedTokens[0] = asset;

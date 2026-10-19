@@ -1,0 +1,37 @@
+name: Foundry Tests
+
+on:
+  push:
+    branches:
+      - fix/agentvault-profit-routing
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/foundry.yml'
+      - '.gitmodules'
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/foundry.yml'
+      - '.gitmodules'
+
+jobs:
+  foundry:
+    name: Forge Build + Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Forge build
+        working-directory: contracts
+        run: forge build
+
+      - name: Forge test
+        working-directory: contracts
+        run: forge test --match-contract AgentVaultProfitRouting -vv
