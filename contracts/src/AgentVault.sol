@@ -17,20 +17,33 @@ pragma solidity ^0.8.24;
  *     withdraw protected principal, cannot pause.
  *
  * Profit flow:
- *   - Every `execute()` call ends with a profit check. If the vault's
- *     balance of any token increased beyond a threshold, the excess is
- *     routed to `profitRecipient` (default = owner). The agent keeps only
- *     the gas float in ETH.
+ *   - Every `execute()` call ends with a profit check using the effective
+ *     token set (all protected tokens + any declared output tokens).
+ *   - Flashloan callbacks use a pre-loan baseline (excluding borrowed
+ *     principal) to compute profit.
  *   - Principal protection: the vault tracks `protectedPrincipal` per
- *     token. The operator cannot withdraw protected principal — only the
- *     profit above protected principal can be routed.
+ *     token via an owner-controlled registry. The operator cannot omit
+ *     protected tokens from the effective check set.
  *
  * Revocation:
- *   - Owner can call `setOperator(address(0))` to instantly revoke the
- *     agent's authority. All `execute()` calls revert from that point.
+ *   - Owner can call `revokeOperator()` to instantly revoke the agent's
+ *     authority (sets operator to address(0)). All execute() calls revert.
  *   - Owner can call `pause()` to freeze everything except `recover()`.
  *   - Owner can call `recover()` to sweep any token to themselves at any
  *     time, even when paused, even if the operator is still set.
+ *
+ * Protected token registry:
+ *   - Owner registers tokens whose principal must be protected via
+ *     `protectToken()`. The registry is deduplicated.
+ *   - The effective token set for profit routing and principal checks
+ *     always includes ALL registered protected tokens, plus any borrowed
+ *     tokens (for flashloans), plus any operator-declared output tokens.
+ *   - The operator cannot omit protected tokens from the check set.
+ *
+ * gasReserveWei:
+ *   - Stored but currently NOT enforced. The field exists for future gas-
+ *     management features. It does not affect any control flow in this
+ *     version. Owners should not rely on it until enforcement is added.
  *
  * Audit notes:
  *   - ReentrancyGuard on all entry points
@@ -98,10 +111,13 @@ contract AgentVault is
     // ═══════════════════════════════════════════════════════════════════════
 
     event OperatorChanged(address indexed oldOperator, address indexed newOperator);
+    event OperatorRevoked(address indexed oldOperator);
     event ProfitRecipientChanged(address indexed oldRecipient, address indexed newRecipient);
     event TargetWhitelisted(address indexed target, bool allowed);
     event TokenProtected(address indexed token, uint256 amount);
     event TokenUnprotected(address indexed token, uint256 amount);
+    event TokenRegistered(address indexed token);
+    event TokenUnregistered(address indexed token);
     event ProfitRouted(address indexed token, uint256 amount, address indexed to);
     event Executed(address indexed target, bytes calldataPayload, bool success, bytes result);
     event FlashLoanInitiated(address indexed provider, address[] tokens, uint256[] amounts);
@@ -114,7 +130,8 @@ contract AgentVault is
     // STATE
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice The agent wallet — signs and submits all routine transactions
+    /// @notice The agent wallet — signs and submits all routine transactions.
+    ///         address(0) means the operator has been revoked.
     address public operator;
 
     /// @notice Where profits get routed (default = owner)
@@ -126,10 +143,17 @@ contract AgentVault is
     /// @notice Protected principal per token — operator cannot withdraw this
     mapping(address => uint256) public protectedPrincipal;
 
-    /// @notice Gas reserve kept in the vault for operator's gas (in ETH)
+    /// @notice Owner-controlled deduplicated registry of protected tokens.
+    ///         All registered tokens are ALWAYS included in the effective
+    ///         check set, regardless of what the operator declares.
+    address[] public registeredTokens;
+    mapping(address => bool) public isRegistered;
+
+    /// @notice Gas reserve kept in the vault for operator's gas (in ETH).
+    ///         NOTE: Currently NOT enforced. Stored for future use.
     uint256 public gasReserveWei;
 
-    /// @notice Balancer V2 Vault address (0xBA12222222228d8Ba445958a75a0704d566BF2C8 on most chains)
+    /// @notice Balancer V2 Vault address
     address public immutable balancerVault;
 
     /// @notice Aave V3 Pool address (chain-specific, set in constructor)
@@ -145,17 +169,20 @@ contract AgentVault is
     error OnlyOperator();
     error OnlyOwner();
     error TargetNotWhitelisted(address target);
-    error InsufficientGasReserve();
-    error ProtectedPrincipalBreached(address token, uint256 available, uint256 protected);
+    error ProtectedPrincipalBreached(address token, uint256 available, uint256 protected_);
     error FlashLoanNotAuthorized();
     error FlashLoanRepayFailed(address token, uint256 owed, uint256 available);
     error ZeroAddress();
+    error OperatorRevokedError();
+    error AlreadyRegistered(address token);
+    error NotRegistered(address token);
 
     // ═══════════════════════════════════════════════════════════════════════
     // MODIFIERS
     // ═══════════════════════════════════════════════════════════════════════
 
     modifier onlyOperator() {
+        if (operator == address(0)) revert OperatorRevokedError();
         if (msg.sender != operator) revert OnlyOperator();
         _;
     }
@@ -189,10 +216,18 @@ contract AgentVault is
     // OWNER FUNCTIONS — settings
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @notice Set a new operator. Cannot be used to revoke — use revokeOperator().
     function setOperator(address newOperator) external onlyOwner {
         if (newOperator == address(0)) revert ZeroAddress();
         emit OperatorChanged(operator, newOperator);
         operator = newOperator;
+    }
+
+    /// @notice Revoke the operator's authority. Sets operator to address(0).
+    ///         All execute() and flashloan calls will revert with OperatorRevoked().
+    function revokeOperator() external onlyOwner {
+        emit OperatorRevoked(operator);
+        operator = address(0);
     }
 
     function setProfitRecipient(address newRecipient) external onlyOwner {
@@ -214,7 +249,14 @@ contract AgentVault is
     }
 
     function protectToken(address token, uint256 amount) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
         protectedPrincipal[token] += amount;
+        // Auto-register the token so it's always in the effective check set
+        if (!isRegistered[token]) {
+            isRegistered[token] = true;
+            registeredTokens.push(token);
+            emit TokenRegistered(token);
+        }
         emit TokenProtected(token, amount);
     }
 
@@ -224,6 +266,41 @@ contract AgentVault is
         emit TokenUnprotected(token, amount);
     }
 
+    /// @notice Register a token in the protected-token registry.
+    ///         Registered tokens are ALWAYS included in the effective check set.
+    ///         Reverts for address(0) — native ETH profit routing is NOT
+    ///         supported via the registry. ETH is handled separately as gas
+    ///         reserve and is not auto-routed.
+    function registerToken(address token) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        if (isRegistered[token]) revert AlreadyRegistered(token);
+        isRegistered[token] = true;
+        registeredTokens.push(token);
+        emit TokenRegistered(token);
+    }
+
+    /// @notice Unregister a token. Only works if the token has no protected principal.
+    function unregisterToken(address token) external onlyOwner {
+        if (!isRegistered[token]) revert NotRegistered(token);
+        require(protectedPrincipal[token] == 0, "cannot unregister token with protected principal");
+        isRegistered[token] = false;
+        // Remove from array (swap-and-pop)
+        for (uint256 i = 0; i < registeredTokens.length; i++) {
+            if (registeredTokens[i] == token) {
+                registeredTokens[i] = registeredTokens[registeredTokens.length - 1];
+                registeredTokens.pop();
+                break;
+            }
+        }
+        emit TokenUnregistered(token);
+    }
+
+    /// @notice Get all registered protected tokens.
+    function getRegisteredTokens() external view returns (address[] memory) {
+        return registeredTokens;
+    }
+
+    /// @notice Set the gas reserve. NOTE: Currently NOT enforced.
     function setGasReserveWei(uint256 _gasReserveWei) external onlyOwner {
         gasReserveWei = _gasReserveWei;
     }
@@ -239,7 +316,6 @@ contract AgentVault is
     }
 
     /// @notice Owner can sweep any token at any time, even when paused.
-    ///         This is the recovery valve.
     function recover(address token, uint256 amount, address to) external onlyOwner {
         if (to == address(0)) to = owner();
         _safeTransfer(token, to, amount);
@@ -256,7 +332,6 @@ contract AgentVault is
                 emit Recovered(tokens[i], bal, to);
             }
         }
-        // Also sweep native ETH
         uint256 ethBal = address(this).balance;
         if (ethBal > 0) {
             (bool sent, ) = to.call{value: ethBal}("");
@@ -269,16 +344,11 @@ contract AgentVault is
     // OPERATOR FUNCTIONS — routine execution
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * @notice Operator calls a whitelisted target with arbitrary calldata.
-     *         After the call, profits above protected principal are routed
-     *         to profitRecipient. Reverts if target not whitelisted or if
-     *         protected principal is breached.
-     * @param target  Whitelisted contract address (e.g. Uniswap V4 router)
-     * @param data    Calldata to send to target
-     * @return success Whether the call succeeded
-     * @return result  Return data or revert reason
-     */
+    /// @notice Legacy execute() — enforces ALL registered protected tokens.
+    ///         Profit routing uses the effective token set (all registered
+    ///         protected tokens). Output-token profit routing is NOT
+    ///         available via this entry point — use executeWithDeclaredTokens()
+    ///         if the call may produce profit in non-registered tokens.
     function execute(address target, bytes calldata data)
         external
         onlyOperator
@@ -288,90 +358,107 @@ contract AgentVault is
     {
         if (!whitelistedTargets[target]) revert TargetNotWhitelisted(target);
 
-        // Snapshot balances before
-        address[] memory tokensToCheck = _tokensToCheckAfterCall();
-        uint256[] memory balancesBefore = _snapshotBalances(tokensToCheck);
+        // Effective token set = all registered protected tokens
+        address[] memory effectiveTokens = _getEffectiveTokens(new address[](0));
+        uint256[] memory baselines = _snapshotBalances(effectiveTokens);
 
-        // Execute the call
         (success, result) = target.call(data);
         emit Executed(target, data, success, result);
         require(success, "target call failed");
 
-        // Route profits above protected principal
-        _routeProfits(tokensToCheck, balancesBefore);
-
-        // Ensure protected principal is never breached
-        _assertProtectedPrincipalIntact(tokensToCheck);
+        _routeProfits(effectiveTokens, baselines);
+        _assertProtectedPrincipalIntact(effectiveTokens);
     }
 
-    /**
-     * @notice Operator initiates a Balancer V2 flashloan (0% fee).
-     *         The vault itself is the recipient — `receiveFlashLoan` is
-     *         called by Balancer with the borrowed tokens.
-     * @param tokens   Tokens to borrow
-     * @param amounts  Amounts to borrow
-     * @param userData Arbitrary data passed to receiveFlashLoan
-     */
+    /// @notice Execute with operator-declared output/check tokens.
+    ///         The effective token set = registered protected tokens + declared
+    ///         tokens (deduplicated). Use this when the call may produce profit
+    ///         in tokens that are not in the protected-token registry.
+    /// @param target        Whitelisted contract address
+    /// @param data          Calldata to send to target
+    /// @param declaredTokens Additional tokens to check for profit (beyond protected)
+    function executeWithDeclaredTokens(
+        address target,
+        bytes calldata data,
+        address[] calldata declaredTokens
+    ) external onlyOperator nonReentrant whenNotPaused returns (bool success, bytes memory result) {
+        if (!whitelistedTargets[target]) revert TargetNotWhitelisted(target);
+        _rejectZeroAddressTokens(declaredTokens);
+
+        address[] memory effectiveTokens = _getEffectiveTokens(declaredTokens);
+        uint256[] memory baselines = _snapshotBalances(effectiveTokens);
+
+        (success, result) = target.call(data);
+        emit Executed(target, data, success, result);
+        require(success, "target call failed");
+
+        _routeProfits(effectiveTokens, baselines);
+        _assertProtectedPrincipalIntact(effectiveTokens);
+    }
+
+    /// @notice Balancer V2 flashloan entry point.
+    ///         userData encodes (address[] targets, bytes[] datas, address[] outputTokens).
+    ///         outputTokens are additional tokens to check for profit beyond
+    ///         the borrowed tokens and registered protected tokens.
     function balancerFlashLoan(
         address[] calldata tokens,
         uint256[] calldata amounts,
         bytes calldata userData
     ) external onlyOperator nonReentrant whenNotPaused {
-        IBalancerVault(balancerVault).flashLoan(address(this), tokens, amounts, userData);
+        // Snapshot pre-loan baselines BEFORE the loan arrives
+        // Store in transient storage (or pass via userData encoding)
+        // We encode baselines into the userData so the callback has them
+        bytes memory enhancedUserData = _encodeBalancerUserData(userData, tokens);
+        IBalancerVault(balancerVault).flashLoan(address(this), tokens, amounts, enhancedUserData);
     }
 
-    /**
-     * @notice Operator initiates an Aave V3 flashloan (0.05% fee).
-     * @param asset  Token to borrow
-     * @param amount Amount to borrow
-     * @param params Arbitrary data passed to executeOperation
-     */
+    /// @notice Aave V3 flashloan entry point.
+    ///         params encodes (address[] targets, bytes[] datas, address[] outputTokens).
     function aaveFlashLoan(
         address asset,
         uint256 amount,
         bytes calldata params
     ) external onlyOperator nonReentrant whenNotPaused {
-        IAaveV3Pool(aaveV3Pool).flashLoanSimple(address(this), asset, amount, params, 0);
+        // Snapshot pre-loan baseline for the asset
+        // We'll pass it through the params encoding
+        bytes memory enhancedParams = _encodeAaveParams(params, asset);
+        IAaveV3Pool(aaveV3Pool).flashLoanSimple(address(this), asset, amount, enhancedParams, 0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // FLASHLOAN CALLBACKS — called by Balancer / Aave during the flashloan
+    // FLASHLOAN CALLBACKS
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * @notice Balancer V2 flashloan callback. The vault has just received
-     *         `tokens`/`amounts`. The operator-encoded strategy is in
-     *         `userData`. We decode it and execute the swaps. After this
-     *         returns, Balancer expects `tokens + feeAmounts` to be back
-     *         in the vault. (Balancer's fee is 0% so feeAmounts = 0.)
-     */
+    /// @notice Balancer V2 flashloan callback.
+    ///         Called by the Balancer Vault AFTER sending borrowed tokens.
+    ///         Repayment happens inside this callback via _safeTransfer.
+    ///         Profit routing uses pre-loan baselines (borrowed principal excluded).
     function receiveFlashLoan(
         address[] memory tokens,
         uint256[] memory amounts,
         uint256[] memory feeAmounts,
         bytes memory userData
     ) external override {
-        // Only Balancer Vault can call this
         if (msg.sender != balancerVault) revert FlashLoanNotAuthorized();
 
         emit FlashLoanInitiated(address(balancerVault), tokens, amounts);
 
-        // Decode the operator's strategy: a list of (target, data) pairs
-        // Each target must be whitelisted
+        // Decode enhanced userData: (targets, datas, outputTokens, preLoanBalances)
         (
             address[] memory targets,
-            bytes[] memory datas
-        ) = abi.decode(userData, (address[], bytes[]));
+            bytes[] memory datas,
+            address[] memory outputTokens,
+            uint256[] memory preLoanBalances
+        ) = abi.decode(userData, (address[], bytes[], address[], uint256[]));
 
-        // Snapshot balances before
-        uint256[] memory balancesBefore = _snapshotBalances(tokens);
+        // Effective token set = borrowed tokens + output tokens + registered protected tokens
+        address[] memory effectiveTokens = _getEffectiveTokensFlashloan(tokens, outputTokens);
 
-        // Execute each swap in order
+        // Execute swaps
         for (uint256 i = 0; i < targets.length; i++) {
             require(whitelistedTargets[targets[i]], "target not whitelisted");
             (bool ok, bytes memory ret) = targets[i].call(datas[i]);
             if (!ok) {
-                // Bubble up revert reason
                 assembly {
                     revert(add(ret, 0x20), mload(ret))
                 }
@@ -379,7 +466,7 @@ contract AgentVault is
             emit Executed(targets[i], datas[i], ok, ret);
         }
 
-        // Repay Balancer (tokens + feeAmounts; feeAmounts = 0 for Balancer)
+        // Repay Balancer (tokens + feeAmounts; fee = 0 for Balancer)
         uint256 totalRepaid = 0;
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 owed = amounts[i] + feeAmounts[i];
@@ -388,18 +475,17 @@ contract AgentVault is
             _safeTransfer(tokens[i], balancerVault, owed);
             totalRepaid += owed;
         }
-
         emit FlashLoanCompleted(balancerVault, totalRepaid, 0);
 
-        // Route any profit made during the flashloan
-        _routeProfits(tokens, balancesBefore);
-        _assertProtectedPrincipalIntact(tokens);
+        // Route profits using pre-loan baselines (borrowed principal excluded)
+        _routeProfitsWithBaselines(effectiveTokens, preLoanBalances);
+        _assertProtectedPrincipalIntact(effectiveTokens);
     }
 
-    /**
-     * @notice Aave V3 flashloan callback. Same pattern as Balancer but
-     *         single-token. Aave charges 0.05% fee (5 basis points).
-     */
+    /// @notice Aave V3 flashloan callback.
+    ///         Called by Aave Pool AFTER sending the borrowed asset.
+    ///         Aave pulls repayment via transferFrom AFTER this callback returns.
+    ///         We must compute projected post-repayment balance BEFORE routing.
     function executeOperation(
         address asset,
         uint256 amount,
@@ -416,10 +502,18 @@ contract AgentVault is
         amounts[0] = amount;
         emit FlashLoanInitiated(aaveV3Pool, tokens, amounts);
 
-        uint256[] memory balancesBefore = _snapshotBalances(tokens);
+        // Decode enhanced params: (targets, datas, outputTokens, preLoanBalance)
+        (
+            address[] memory targets,
+            bytes[] memory datas,
+            address[] memory outputTokens,
+            uint256[] memory preLoanBalances
+        ) = abi.decode(params, (address[], bytes[], address[], uint256[]));
 
-        // Decode strategy
-        (address[] memory targets, bytes[] memory datas) = abi.decode(params, (address[], bytes[]));
+        // Effective token set
+        address[] memory effectiveTokens = _getEffectiveTokensFlashloan(tokens, outputTokens);
+
+        // Execute swaps
         for (uint256 i = 0; i < targets.length; i++) {
             require(whitelistedTargets[targets[i]], "target not whitelisted");
             (bool ok, bytes memory ret) = targets[i].call(datas[i]);
@@ -431,17 +525,52 @@ contract AgentVault is
             emit Executed(targets[i], datas[i], ok, ret);
         }
 
-        // Repay Aave (amount + premium)
+        // Aave pulls repayment AFTER this callback returns via transferFrom.
+        // We approve the pool for amount + premium.
         uint256 owed = amount + premium;
         uint256 available = _balanceOf(asset, address(this));
         if (available < owed) revert FlashLoanRepayFailed(asset, owed, available);
         _approve(asset, aaveV3Pool, owed);
-
         emit FlashLoanCompleted(aaveV3Pool, owed, premium);
 
-        // Route profits
-        _routeProfits(tokens, balancesBefore);
-        _assertProtectedPrincipalIntact(tokens);
+        // Compute PROJECTED post-repayment balance for the borrowed asset.
+        // After Aave pulls `owed`, the vault's balance of `asset` will be:
+        //   currentBalance - owed
+        // We must check that this projected balance does not breach protected
+        // principal, and route only the projected surplus.
+        //
+        // For non-borrowed tokens (output tokens, other protected tokens),
+        // the current balance IS the post-repayment balance (no pull happens).
+
+        // Build projected balances for profit routing
+        uint256[] memory projectedBalances = new uint256[](effectiveTokens.length);
+        for (uint256 i = 0; i < effectiveTokens.length; i++) {
+            if (effectiveTokens[i] == asset) {
+                // Projected = current - owed (what will remain after Aave pulls)
+                projectedBalances[i] = _balanceOf(asset, address(this)) - owed;
+            } else {
+                // Non-borrowed tokens: current balance is the final balance
+                projectedBalances[i] = _balanceOf(effectiveTokens[i], address(this));
+            }
+        }
+
+        // Route profits using pre-loan baselines and projected balances
+        _routeProfitsWithProjectedBalances(effectiveTokens, preLoanBalances, projectedBalances);
+
+        // Assert protected principal using PROJECTED balances (not current,
+        // because Aave hasn't pulled yet). For the borrowed asset, the projected
+        // balance is currentBalance - owed. For others, it's the current balance.
+        for (uint256 i = 0; i < effectiveTokens.length; i++) {
+            uint256 projectedBal;
+            if (effectiveTokens[i] == asset) {
+                projectedBal = _balanceOf(asset, address(this)) - owed;
+            } else {
+                projectedBal = _balanceOf(effectiveTokens[i], address(this));
+            }
+            if (projectedBal < protectedPrincipal[effectiveTokens[i]]) {
+                revert ProtectedPrincipalBreached(effectiveTokens[i], projectedBal, protectedPrincipal[effectiveTokens[i]]);
+            }
+        }
 
         return true;
     }
@@ -450,23 +579,73 @@ contract AgentVault is
     // PROFIT ROUTING — internal
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * @dev For each token in the list, if the vault's current balance exceeds
-     *      the protected principal, the excess is routed to profitRecipient.
-     *      Native ETH is excluded from auto-routing (kept as gas reserve).
-     */
-    function _routeProfits(address[] memory tokens, uint256[] memory balancesBefore) internal {
+    /// @dev Route profits using current balance vs baseline.
+    function _routeProfits(address[] memory tokens, uint256[] memory baselines) internal {
         for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];
             uint256 balanceNow = _balanceOf(token, address(this));
-            uint256 balanceWas = balancesBefore[i];
-            // Profit = balanceNow - max(protectedPrincipal, balanceWas)
-            // If balanceNow < protectedPrincipal, profit is 0 (don't route)
-            uint256 floor = protectedPrincipal[token] > balanceWas
+            uint256 floor = protectedPrincipal[token] > baselines[i]
                 ? protectedPrincipal[token]
-                : balanceWas;
+                : baselines[i];
             if (balanceNow > floor) {
                 uint256 profit = balanceNow - floor;
+                _safeTransfer(token, profitRecipient, profit);
+                emit ProfitRouted(token, profit, profitRecipient);
+            }
+        }
+    }
+
+    /// @dev Route profits using pre-loan baselines (borrowed principal excluded).
+    ///      Used by Balancer callback where repayment already happened.
+    ///      Reverts on token/baseline length mismatch — never silently falls back to 0.
+    function _routeProfitsWithBaselines(address[] memory tokens, uint256[] memory preLoanBalances) internal {
+        require(tokens.length == preLoanBalances.length, "baseline length mismatch");
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            uint256 balanceNow = _balanceOf(token, address(this));
+            uint256 baseline = preLoanBalances[i];
+            uint256 floor = protectedPrincipal[token] > baseline
+                ? protectedPrincipal[token]
+                : baseline;
+            if (balanceNow > floor) {
+                uint256 profit = balanceNow - floor;
+                _safeTransfer(token, profitRecipient, profit);
+                emit ProfitRouted(token, profit, profitRecipient);
+            }
+        }
+    }
+
+    /// @dev Route profits using projected balances (for Aave where repayment
+    ///      hasn't happened yet). Only routes tokens where the projected
+    ///      balance exceeds the floor. The borrowed asset's profit is routed
+    ///      from the projected (post-repayment) surplus.
+    function _routeProfitsWithProjectedBalances(
+        address[] memory tokens,
+        uint256[] memory preLoanBalances,
+        uint256[] memory projectedBalances
+    ) internal {
+        require(tokens.length == preLoanBalances.length, "baseline length mismatch");
+        require(tokens.length == projectedBalances.length, "projected length mismatch");
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            uint256 projected = projectedBalances[i];
+            uint256 baseline = preLoanBalances[i];
+            uint256 floor = protectedPrincipal[token] > baseline
+                ? protectedPrincipal[token]
+                : baseline;
+            if (projected > floor) {
+                uint256 profit = projected - floor;
+                // For the borrowed asset: we can only route profit that remains
+                // AFTER Aave pulls `owed`. The vault currently has `projected + owed`.
+                // After Aave pulls `owed`, it will have `projected`.
+                // We route `profit` now — the vault must have enough to both
+                // repay `owed` AND send `profit`.
+                // Available for routing = currentBalance - owed (projected)
+                // But we already computed projected = currentBalance - owed.
+                // So if projected > floor, we route (projected - floor) = profit.
+                // The vault has (projected + owed) = (profit + floor + owed).
+                // After routing profit: (floor + owed). After Aave pulls owed: floor.
+                // This is correct — the vault ends with `floor` (>= protected principal).
                 _safeTransfer(token, profitRecipient, profit);
                 emit ProfitRouted(token, profit, profitRecipient);
             }
@@ -483,15 +662,147 @@ contract AgentVault is
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // EFFECTIVE TOKEN SET — internal
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Build the effective token set = registered protected tokens + declared tokens.
+    ///      Deduplicated. The operator cannot omit protected tokens.
+    function _getEffectiveTokens(address[] memory declaredTokens) internal view returns (address[] memory) {
+        // Start with registered tokens
+        uint256 count = registeredTokens.length;
+        // Add declared tokens that are not already registered
+        for (uint256 i = 0; i < declaredTokens.length; i++) {
+            if (!isRegistered[declaredTokens[i]]) {
+                count++;
+            }
+        }
+
+        address[] memory effective = new address[](count);
+        uint256 idx = 0;
+        // Add registered tokens
+        for (uint256 i = 0; i < registeredTokens.length; i++) {
+            effective[idx++] = registeredTokens[i];
+        }
+        // Add declared tokens (deduplicated against registered)
+        for (uint256 i = 0; i < declaredTokens.length; i++) {
+            if (!isRegistered[declaredTokens[i]]) {
+                // Check for duplicates within declaredTokens
+                bool dup = false;
+                for (uint256 j = 0; j < i; j++) {
+                    if (declaredTokens[j] == declaredTokens[i]) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    effective[idx++] = declaredTokens[i];
+                }
+            }
+        }
+
+        // Trim array to actual size (in case of duplicates within declared)
+        assembly {
+            mstore(effective, idx)
+        }
+
+        return effective;
+    }
+
+    /// @dev Build effective token set for flashloans = registered + borrowed + output.
+    function _getEffectiveTokensFlashloan(
+        address[] memory borrowedTokens,
+        address[] memory outputTokens
+    ) internal view returns (address[] memory) {
+        // Combine: registered + borrowed + output, deduplicated
+        uint256 count = registeredTokens.length;
+        for (uint256 i = 0; i < borrowedTokens.length; i++) {
+            if (!isRegistered[borrowedTokens[i]]) count++;
+        }
+        for (uint256 i = 0; i < outputTokens.length; i++) {
+            if (!isRegistered[outputTokens[i]]) count++;
+        }
+
+        address[] memory effective = new address[](count);
+        uint256 idx = 0;
+        // Registered
+        for (uint256 i = 0; i < registeredTokens.length; i++) {
+            effective[idx++] = registeredTokens[i];
+        }
+        // Borrowed (deduplicated)
+        for (uint256 i = 0; i < borrowedTokens.length; i++) {
+            bool seen = isRegistered[borrowedTokens[i]];
+            for (uint256 j = 0; j < idx; j++) {
+                if (effective[j] == borrowedTokens[i]) { seen = true; break; }
+            }
+            if (!seen) effective[idx++] = borrowedTokens[i];
+        }
+        // Output (deduplicated)
+        for (uint256 i = 0; i < outputTokens.length; i++) {
+            bool seen = isRegistered[outputTokens[i]];
+            for (uint256 j = 0; j < idx; j++) {
+                if (effective[j] == outputTokens[i]) { seen = true; break; }
+            }
+            if (!seen) effective[idx++] = outputTokens[i];
+        }
+
+        assembly { mstore(effective, idx) }
+        return effective;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FLASHLOAN DATA ENCODING — internal
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Encode Balancer userData with pre-loan baselines.
+    ///      Operator-provided userData format: (address[] targets, bytes[] datas, address[] outputTokens)
+    ///      Enhanced userData format: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
+    function _encodeBalancerUserData(
+        bytes memory userData,
+        address[] memory borrowedTokens
+    ) internal view returns (bytes memory) {
+        // Decode operator-provided: (targets, datas, outputTokens)
+        (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
+            abi.decode(userData, (address[], bytes[], address[]));
+
+        _rejectZeroAddressTokens(outputTokens);
+
+        // Build effective token set and snapshot pre-loan baselines
+        address[] memory effectiveTokens = _getEffectiveTokensFlashloan(borrowedTokens, outputTokens);
+        uint256[] memory preLoanBalances = _snapshotBalances(effectiveTokens);
+
+        return abi.encode(targets, datas, outputTokens, preLoanBalances);
+    }
+
+    /// @dev Encode Aave params with pre-loan baseline.
+    ///      Operator-provided params format: (address[] targets, bytes[] datas, address[] outputTokens)
+    ///      Enhanced params format: (address[] targets, bytes[] datas, address[] outputTokens, uint256[] preLoanBalances)
+    function _encodeAaveParams(
+        bytes memory params,
+        address asset
+    ) internal view returns (bytes memory) {
+        (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
+            abi.decode(params, (address[], bytes[], address[]));
+
+        _rejectZeroAddressTokens(outputTokens);
+
+        address[] memory borrowedTokens = new address[](1);
+        borrowedTokens[0] = asset;
+        address[] memory effectiveTokens = _getEffectiveTokensFlashloan(borrowedTokens, outputTokens);
+        uint256[] memory preLoanBalances = _snapshotBalances(effectiveTokens);
+
+        return abi.encode(targets, datas, outputTokens, preLoanBalances);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // HELPERS
     // ═══════════════════════════════════════════════════════════════════════
 
-    function _tokensToCheckAfterCall() internal pure returns (address[] memory) {
-        // For non-flashloan execute() calls, we don't know which tokens to
-        // check. The operator is responsible for not touching protected
-        // principal. Profit routing for execute() is best-effort.
-        // For atomic safety, use flashloan path.
-        return new address[](0);
+    /// @dev Reject address(0) in a token array. Native ETH profit routing
+    ///      is NOT supported via declared output tokens.
+    function _rejectZeroAddressTokens(address[] memory tokens) internal pure {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(0)) revert ZeroAddress();
+        }
     }
 
     function _snapshotBalances(address[] memory tokens) internal view returns (uint256[] memory) {
@@ -514,7 +825,6 @@ contract AgentVault is
             (bool sent, ) = to.call{value: amount}("");
             require(sent, "ETH transfer failed");
         } else {
-            // Use safe transfer pattern for ERC20
             (bool ok, bytes memory data) = token.call(
                 abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
             );
@@ -530,7 +840,7 @@ contract AgentVault is
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // RECEIVE — accept native ETH (for gas top-ups and ETH profits)
+    // RECEIVE — accept native ETH
     // ═══════════════════════════════════════════════════════════════════════
 
     receive() external payable {}
