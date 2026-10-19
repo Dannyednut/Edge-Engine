@@ -592,10 +592,120 @@ contract AgentVaultProfitRoutingTest is Test {
     }
 
     // ═══ B3: Baseline-array integrity ════════════════════════════════
-    // (Covered by the contract's require statements — no direct test needed
-    // since the internal functions are not externally callable. The
-    // require(tokens.length == preLoanBalances.length, "baseline length mismatch")
-    // in _routeProfitsWithBaselines and _routeProfitsWithProjectedBalances
-    // ensures reversion on mismatch. These are tested indirectly via the
-    // flashloan callback tests which pass correctly-formed data.)
+
+    function test_B3_BaselineMismatchRevertsViaDirectCallback() public {
+        // Exercise the baseline-mismatch path by calling receiveFlashLoan
+        // directly with crafted userData where the preLoanBalances array
+        // length does not match the effective token set length.
+        //
+        // The effective token set is computed from registered + borrowed +
+        // output tokens. If we register tokenB and borrow tokenB, the
+        // effective set = [tokenB] (1 token). If we pass preLoanBalances
+        // of length 0, the mismatch should revert.
+
+        vm.prank(owner);
+        vault.protectToken(address(tokenB), 0); // registers tokenB
+
+        // Craft userData with mismatched baseline length (0 instead of 1)
+        address[] memory targets = new address[](0);
+        bytes[] memory datas = new bytes[](0);
+        address[] memory outputTokens = new address[](0);
+        uint256[] memory wrongBaselines = new uint256[](0); // should be length 1
+
+        bytes memory craftedUserData = abi.encode(targets, datas, outputTokens, wrongBaselines);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(tokenB);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1000e18;
+        uint256[] memory feeAmounts = new uint256[](1);
+
+        // Mint tokens to vault BEFORE the prank so the callback has funds
+        tokenB.mint(address(vault), 1000e18);
+
+        // Prank as the balancer vault (lender authorization)
+        vm.prank(address(balancerVault));
+        vm.expectRevert("baseline length mismatch");
+        vault.receiveFlashLoan(tokens, amounts, feeAmounts, craftedUserData);
+    }
+
+    // ═══ Item 1: address(0) declared output token rejection ══════════
+
+    function test_Item1_ExecuteWithDeclaredTokensRejectsAddressZero() public {
+        address[] memory declaredTokens = new address[](1);
+        declaredTokens[0] = address(0);
+
+        bytes memory data = abi.encodeWithSelector(ProfitTarget.sendProfit.selector, address(tokenA), address(vault), 100e18);
+        vm.prank(operator);
+        vm.expectRevert(AgentVault.ZeroAddress.selector);
+        vault.executeWithDeclaredTokens(address(profitTarget), data, declaredTokens);
+    }
+
+    function test_Item1_BalancerFlashLoanRejectsAddressZeroInOutputTokens() public {
+        // Encode userData with address(0) in outputTokens
+        address[] memory targets = new address[](0);
+        bytes[] memory datas = new bytes[](0);
+        address[] memory outputTokens = new address[](1);
+        outputTokens[0] = address(0);
+        bytes memory userData = _encodeBalancerUserData(targets, datas, outputTokens);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(tokenB);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1000e18;
+
+        vm.prank(operator);
+        vm.expectRevert(AgentVault.ZeroAddress.selector);
+        vault.balancerFlashLoan(tokens, amounts, userData);
+    }
+
+    function test_Item1_AaveFlashLoanRejectsAddressZeroInOutputTokens() public {
+        address[] memory targets = new address[](0);
+        bytes[] memory datas = new bytes[](0);
+        address[] memory outputTokens = new address[](1);
+        outputTokens[0] = address(0);
+        bytes memory params = _encodeAaveParams(targets, datas, outputTokens);
+
+        vm.prank(operator);
+        vm.expectRevert(AgentVault.ZeroAddress.selector);
+        vault.aaveFlashLoan(address(tokenB), 1000e18, params);
+    }
+
+    // ═══ Item 2: Aave protected non-borrowed token drain ═════════════
+
+    function test_Item2_AaveProtectedNonBorrowedTokenDrainReverts() public {
+        // Protect tokenA (10_000e18), borrow tokenB, drain tokenA via
+        // the flashloan strategy through the Aave path.
+        vm.startPrank(owner);
+        vault.protectToken(address(tokenA), 10_000e18);
+        vault.protectToken(address(tokenB), 0);
+        vm.stopPrank();
+
+        uint256 borrowAmount = 1000e18;
+        uint256 premium = borrowAmount * 5 / 10000; // 0.5e18
+
+        // Strategy: drain 1000e18 of tokenA from the vault + generate
+        // enough tokenB to cover the premium
+        address[] memory targets = new address[](2);
+        targets[0] = address(tokenA);
+        targets[1] = address(profitTarget);
+        bytes[] memory datas = new bytes[](2);
+        // First call: drain tokenA
+        datas[0] = abi.encodeWithSelector(IERC20.transfer.selector, profitRecipient, 1000e18);
+        // Second call: generate enough tokenB to cover repayment + premium
+        datas[1] = abi.encodeWithSelector(ProfitTarget.sendProfit.selector, address(tokenB), address(vault), premium);
+        address[] memory outputTokens = new address[](0);
+        bytes memory params = _encodeAaveParams(targets, datas, outputTokens);
+
+        uint256 vaultABefore = tokenA.balanceOf(address(vault));
+        uint256 recipientABefore = tokenA.balanceOf(profitRecipient);
+
+        vm.prank(operator);
+        vm.expectRevert();
+        vault.aaveFlashLoan(address(tokenB), borrowAmount, params);
+
+        // Balances unchanged after revert
+        assertEq(tokenA.balanceOf(address(vault)), vaultABefore, "tokenA vault balance intact");
+        assertEq(tokenA.balanceOf(profitRecipient), recipientABefore, "tokenA recipient balance intact");
+    }
 }

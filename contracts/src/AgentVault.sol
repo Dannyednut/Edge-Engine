@@ -383,6 +383,7 @@ contract AgentVault is
         address[] calldata declaredTokens
     ) external onlyOperator nonReentrant whenNotPaused returns (bool success, bytes memory result) {
         if (!whitelistedTargets[target]) revert TargetNotWhitelisted(target);
+        _rejectZeroAddressTokens(declaredTokens);
 
         address[] memory effectiveTokens = _getEffectiveTokens(declaredTokens);
         uint256[] memory baselines = _snapshotBalances(effectiveTokens);
@@ -763,6 +764,8 @@ contract AgentVault is
         (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
             abi.decode(userData, (address[], bytes[], address[]));
 
+        _rejectZeroAddressTokens(outputTokens);
+
         // Build effective token set and snapshot pre-loan baselines
         address[] memory effectiveTokens = _getEffectiveTokensFlashloan(borrowedTokens, outputTokens);
         uint256[] memory preLoanBalances = _snapshotBalances(effectiveTokens);
@@ -780,6 +783,8 @@ contract AgentVault is
         (address[] memory targets, bytes[] memory datas, address[] memory outputTokens) =
             abi.decode(params, (address[], bytes[], address[]));
 
+        _rejectZeroAddressTokens(outputTokens);
+
         address[] memory borrowedTokens = new address[](1);
         borrowedTokens[0] = asset;
         address[] memory effectiveTokens = _getEffectiveTokensFlashloan(borrowedTokens, outputTokens);
@@ -791,6 +796,14 @@ contract AgentVault is
     // ═══════════════════════════════════════════════════════════════════════
     // HELPERS
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Reject address(0) in a token array. Native ETH profit routing
+    ///      is NOT supported via declared output tokens.
+    function _rejectZeroAddressTokens(address[] memory tokens) internal pure {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(0)) revert ZeroAddress();
+        }
+    }
 
     function _snapshotBalances(address[] memory tokens) internal view returns (uint256[] memory) {
         uint256[] memory balances = new uint256[](tokens.length);
