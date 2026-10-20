@@ -58,6 +58,7 @@ async function main() {
   
   const hlLstArb = new HlLstArbScanner({
     minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+    minNetDiscountPct: 0.30,
   });
   const eulerArb = new EulerLendingArbScanner({
     minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000,
@@ -136,25 +137,27 @@ async function main() {
     }
 
     // 2. kHYPE LST carry arb
+    // EM-STRAT-004: scanner is fail-closed. estimatedProfitUsd is a verified
+    // number when alerts exist (scanner requires net >= 0.30%). Anchor
+    // freshness and block timestamp are surfaced for diagnostic visibility.
     try {
       const alerts = await hlLstArb.scan();
       for (const a of alerts) {
         const key = `khype|${a.pair}`;
         if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
         seen.set(key, Date.now());
-        
+
         if (a.estimatedProfitUsd > 10) {
           await alerter.sendAlert({
             id: `khype_${Date.now()}`,
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'hl_lst_arb',
-            title: `[kHYPE] ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`,
+            title: `[kHYPE] ${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)})`,
             body: [
-              `Gross discount: ${a.grossDiscountPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)})`,
-              `Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
-              `Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s`,
-              `Anchor fresh: ${a.anchorFresh}`,
+              `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+              `Anchor: ${a.redemptionAnchor.toFixed(6)}  Fresh: ${a.anchorFresh}  Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
+              `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`,
             ].join('\n'),
             channels: ['telegram'],
           }).catch(() => {});
@@ -164,7 +167,12 @@ async function main() {
       console.warn(`[opp-monitor] kHYPE scan failed: ${e.message}`);
     }
 
-    // 3. Euler lending arb
+    // 3. Euler lending arb — MONITORING ONLY
+    // EM-STRAT-004: Euler alerts are monitoring-only. supply APY / spread /
+    // profit are all null. They MUST NOT be sent as actionable opportunities.
+    // The for-loop below is a no-op (continue on monitoringOnly), preserved
+    // as an explicit guard so future edits cannot accidentally re-enable
+    // opportunity alerts for this strategy.
     try {
       const alerts = await eulerArb.scan();
       for (const a of alerts) {

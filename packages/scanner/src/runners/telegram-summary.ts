@@ -119,30 +119,50 @@ async function main() {
   } catch (e: any) { lines.push(`Funding scan failed: ${e.message}`); lines.push(''); }
 
   // 3. kHYPE Carry Arb
+  // EM-STRAT-004: fail-closed — when no alerts, scanner returned [] (no
+  // actionable opportunity). When alerts exist, estimatedProfitUsd is a
+  // verified number (scanner requires net >= 0.30%).
   try {
-    const hlLstArb = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 });
+    const hlLstArb = new HlLstArbScanner({
+      minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
+    });
     const alerts = await hlLstArb.scan();
     if (alerts.length > 0) {
       const a = alerts[0];
       lines.push('--- kHYPE CARRY ARB ---');
-      lines.push(`Discount: ${a.grossDiscountPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)}, net: ${a.netProfitPct.toFixed(2)}%) = $${a.estimatedProfitUsd.toFixed(0)}`);
-      lines.push(`Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s | Anchor fresh: ${a.anchorFresh}`);
+      lines.push(`Gross: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`);
+      lines.push(`Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'} | Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'} | Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
+      lines.push('');
+    } else {
+      lines.push('--- kHYPE CARRY ARB ---');
+      lines.push('No actionable opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met)');
       lines.push('');
     }
-  } catch {}
+  } catch (e: any) {
+    lines.push(`--- kHYPE CARRY ARB ---`);
+    lines.push(`Scan failed: ${e.message}`);
+    lines.push('');
+  }
 
-  // 4. Euler Lending Arb
+  // 4. Euler Lending Arb — MONITORING ONLY
+  // EM-STRAT-004: supply APY, spread, profit are all UNAVAILABLE. Never
+  // displayed as zero. Severity is informational, NOT opportunity.
   try {
     const eulerArb = new EulerLendingArbScanner({ minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000 });
     const alerts = await eulerArb.scan();
     if (alerts.length > 0) {
-      lines.push('--- EULER LENDING (MONITORING) ---');
+      lines.push('--- EULER LENDING (MONITORING ONLY — not actionable) ---');
       for (const a of alerts.slice(0, 2)) {
-        lines.push(`${a.assetSymbol}: borrow ${a.depositVault.borrowApyPct.toFixed(1)}% - ${a.borrowVault.borrowApyPct.toFixed(1)}% (monitoring only)`);
+        lines.push(`${a.assetSymbol}: borrow ${a.depositVault.borrowApyPct.toFixed(1)}% - ${a.borrowVault.borrowApyPct.toFixed(1)}% | Supply APY: UNAVAILABLE | Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'} | Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE' : '$' + a.estimatedProfitUsd.toFixed(0)}`);
       }
       lines.push('');
     }
-  } catch {}
+  } catch (e: any) {
+    lines.push('--- EULER LENDING (MONITORING ONLY) ---');
+    lines.push(`Scan failed: ${e.message}`);
+    lines.push('');
+  }
 
   // Summary
   lines.push('--- SUMMARY ---');

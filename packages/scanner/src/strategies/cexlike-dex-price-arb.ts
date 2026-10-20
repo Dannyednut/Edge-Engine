@@ -58,8 +58,18 @@ export interface PriceArbAlert {
   /** Whether all economic inputs were available for the profit estimate. */
   economicsComplete: boolean;
   vooiExecutable: boolean;
-  /** CONVERGENCE TRADE: Result depends on close-out spread, fees, funding, margin, and time. */
+  /**
+   * CONVERGENCE TRADE: Result depends on close-out spread, fees, funding, margin, and time.
+   * EM-STRAT-004: when economicsComplete=false, this alert MUST NOT be presented
+   * with actionable-opportunity severity or an exact net-profit figure.
+   */
   tradeType: 'convergence';
+  /**
+   * Whether the alert is actionable. False when economicsComplete is false
+   * (missing funding or fee inputs). Presenters MUST downgrade severity
+   * to 'info' (or skip) when actionable=false.
+   */
+  actionable: boolean;
   ts: number;
 }
 
@@ -150,6 +160,10 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
           ? (grossProfitPct / 100) * this.params.maxSizeUsd
           : null;
 
+        // EM-STRAT-004: alert is actionable only when economics are complete.
+        // When funding is missing, presenters MUST downgrade severity to 'info'.
+        const actionable = economicsComplete && estimatedProfitUsd !== null && estimatedProfitUsd > 0;
+
         alerts.push({
           asset: item.asset,
           longVenue,
@@ -166,6 +180,7 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
           economicsComplete,
           vooiExecutable: true,
           tradeType: 'convergence',
+          actionable,
           ts: Date.now(),
         });
       }

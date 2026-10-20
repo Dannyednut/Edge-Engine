@@ -137,7 +137,9 @@ async function main() {
       ]);
 
       const filteredPerp = perpAlerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
-      const filteredCexHl = cexHlAlerts.filter(a => (a.netSpreadApr ?? 0) >= MIN_APR_FOR_ALERT);
+      // EM-STRAT-004: only include CEX-HL alerts with independently verified
+      // netSpreadApr (actionable=true). Non-actionable alerts are NOT sent.
+      const filteredCexHl = cexHlAlerts.filter(a => a.actionable && (a.netSpreadApr ?? -Infinity) >= MIN_APR_FOR_ALERT);
 
       console.log(`[scan ${scanCount}] perp_funding: ${filteredPerp.length} opps | cex_hl: ${filteredCexHl.length} opps | ${Date.now() - start}ms`);
 
@@ -208,6 +210,11 @@ async function main() {
           }
         } else {
           const a = alert as CexHlFundingAlert;
+          // EM-STRAT-004: only actionable alerts reach this branch (filter
+          // above enforces a.actionable). Display raw rates as 'UNAVAILABLE'
+          // when null rather than coercing to 0.
+          const fmtOrNull = (v: number | null, digits = 2) =>
+            v === null ? 'UNAVAILABLE' : v.toFixed(digits);
           await alerter.sendAlert({
             id: `cex_hl_${a.asset}_${a.cexVenue}_${Date.now()}`,
             ts: Date.now(),
@@ -216,15 +223,14 @@ async function main() {
             title: `[CEX-HL] ${a.asset} ${(a.netSpreadApr ?? 0).toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
             body: [
               `*Long perp* ${a.cexVenue}  →  *Short perp* Hyperliquid`,
-              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%*`,
-              `HL funding: ${a.hlFundingApr.toFixed(2)}% APR`,
-              `CEX funding: ${(a.cexFundingApr ?? 0).toFixed(2)}% APR`,
+              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%* (independently verified)`,
+              `HL funding (raw): ${fmtOrNull(a.hlFundingApr)}% APR`,
+              `CEX funding (raw): ${fmtOrNull(a.cexFundingApr)}% APR`,
+              `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,
               `VOOI atomic exec: ${a.vooiExecutable ? '✅' : '❌ (need direct ccxt+HL SDK)'}`,
-              '',
-              `_Higher APR than CEX-only spot-perp basis (~0%). HL funding floor = 10.95% APR; CEX funding compressed to ~0%._`,
             ].join('\n'),
             channels: ['telegram'],
           });

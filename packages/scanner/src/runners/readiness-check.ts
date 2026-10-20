@@ -120,27 +120,41 @@ async function main() {
   }
 
   // 8. kHYPE carry arb
+  // EM-STRAT-004: fail-closed — if anchor/delay/fees missing or net < 0.30%,
+  // the scanner returns [] and the readiness check reports 'warn' (no
+  // actionable opportunity right now). Never present a non-actionable
+  // scan as a verified opportunity.
   try {
-    const hlLstArb = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 });
+    const hlLstArb = new HlLstArbScanner({
+      minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
+    });
     const alerts = await hlLstArb.scan();
     const a = alerts[0];
     checks.push({
       name: 'kHYPE Carry Arb',
       status: a ? 'pass' : 'warn',
-      detail: a ? `${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)}) = $${a.estimatedProfitUsd.toFixed(0)}` : 'No opportunity',
+      detail: a
+        ? `${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`
+        : 'No actionable opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met)',
     });
   } catch (e: any) {
     checks.push({ name: 'kHYPE Carry Arb', status: 'fail', detail: e.message.slice(0, 50) });
   }
 
-  // 9. Euler lending arb
+  // 9. Euler lending arb — MONITORING ONLY
+  // EM-STRAT-004: Euler alerts are monitoring-only. The readiness check
+  // reports 'warn' (not 'pass') because no actionable opportunity can be
+  // verified. Supply APY / spread / profit are UNAVAILABLE.
   try {
     const eulerArb = new EulerLendingArbScanner({ minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000 });
     const alerts = await eulerArb.scan();
     checks.push({
       name: 'Euler Lending Arb',
-      status: alerts.length > 0 ? 'pass' : 'warn',
-      detail: alerts.length > 0 ? `${alerts.length} vaults monitored (top: ${alerts[0].assetSymbol} borrow ${alerts[0].depositVault.borrowApyPct.toFixed(1)}% - ${alerts[0].borrowVault.borrowApyPct.toFixed(1)}%)` : 'No vaults',
+      status: 'warn', // always warn — monitoring only, never actionable
+      detail: alerts.length > 0
+        ? `${alerts.length} vaults MONITORED (top: ${alerts[0].assetSymbol} borrow ${alerts[0].depositVault.borrowApyPct.toFixed(1)}% - ${alerts[0].borrowVault.borrowApyPct.toFixed(1)}%; supply APY UNAVAILABLE — monitoring only)`
+        : 'No vaults monitored',
     });
   } catch (e: any) {
     checks.push({ name: 'Euler Lending Arb', status: 'fail', detail: e.message.slice(0, 50) });

@@ -6,17 +6,33 @@
  * a structural 9-11% APR carry trade that's far better than the 0.02-0.11% APR
  * available from CEX-only spot-perp basis arbs.
  *
- * Pipeline:
- *   1. Pull Sharpe /arbitrage/cross-exchange filtered to {Hyperliquid, Binance,
- *      OKX, Bybit} — get netApr-ranked rows where one leg is on HL.
- *   2. For each row, check VOOI scanner for execution-aware price spread.
- *   3. If spread < 1% and netApr > threshold, fire alert + (optional) execute
- *      via VOOI paired-leg API.
+ * SIGNAL-INTEGRITY MODEL (corrected EM-STRAT-003, hardened EM-STRAT-004):
+ *   Sharpe's `/arbitrage/cross-exchange` endpoint returns a `netApr` that is
+ *   itself a *third-party net/spread estimate* — it is NOT the raw Hyperliquid
+ *   funding rate and NOT the raw CEX funding rate. Treating `netApr` as either
+ *   raw rate, or recomputing a "new net" by subtracting a CEX rate from it,
+ *   double-counts and produces an unreliable actionable signal.
+ *
+ *   This scanner therefore:
+ *     1. Pulls Sharpe cross-exchange rows to IDENTIFY candidate asset × venue
+ *        pairs (one leg HL, other leg CEX). `sharpeNetApr` is stored as a
+ *        third-party reference only.
+ *     2. Pulls RAW per-venue funding rates from Sharpe `/funding/rates` for
+ *        the HL leg and the CEX leg. These are the only rates eligible to
+ *        compute an actionable net spread.
+ *     3. Computes `netSpreadApr = hlRawFundingApr - cexRawFundingApr` ONLY
+ *        when both raw rates are available, correctly oriented (short-side
+ *        positive funding = receipts), and finite. Otherwise `netSpreadApr`
+ *        is null and the alert is NOT actionable.
+ *
+ *   `hlFundingApr` is the raw HL perp funding APR (separately sourced) or null.
+ *   `cexFundingApr` is the raw CEX perp funding APR (separately sourced) or null.
+ *   `sharpeNetApr` is the third-party estimate, explicitly labeled.
  *
  * Trade structure:
  *   LONG  spot ETH on Binance  (collect 0% funding on spot — no perp)
  *   SHORT perp ETH on Hyperliquid (collect ~10.95% APR funding from longs)
- *   Net delta = 0; net funding capture ≈ 10.95% APR - CEX borrow fees
+ *   Net delta = 0; net funding capture ≈ HL funding - CEX borrow fees
  *
  * Risks:
  *   - HL funding rate can fluctuate (currently at 10.95% floor but can spike
@@ -24,13 +40,6 @@
  *   - CEX withdrawal latency if rebalancing needed (5-20 min for native USDC)
  *   - HL insurance fund seizure risk on cascade (small)
  *   - Counter-party risk: capital split across Binance + HL
- *
- * Execution paths:
- *   - VOOI atomic: POST /arbitrage-orders with primary=short HL perp + hedge=long
- *     Binance perp (NOT spot — VOOI is perps-only). This captures the FUNDING
- *     spread but not the spot-vs-perp basis.
- *   - Direct: long Binance spot via ccxt + short HL perp via HL SDK. Captures
- *     both funding AND any spot-perp basis. Requires both SDKs integrated.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
@@ -38,7 +47,7 @@ import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
 
 export interface CexHlFundingArbParams {
-  minNetApr: number;            // 0.05 = 5% APR minimum to fire alert
+  minNetApr: number;            // 0.05 = 5% APR minimum to fire actionable alert
   cexVenues: string[];          // ['binance', 'okx', 'bybit'] — CEX spot candidates
   hlVenueName: string;          // 'hyperliquid' or 'Hyperliquid' — match Sharpe's naming
   useVooiExecutor: boolean;     // try VOOI for atomic paired-leg (perps only — no spot)
@@ -47,7 +56,7 @@ export interface CexHlFundingArbParams {
   autoExecute: boolean;
   /** Max notional per trade (USD) */
   maxNotionalUsd: number;
-  /** Only emit signals when HL funding is positive (shorts collect funding).
+  /** Only emit actionable alerts when HL funding is positive (shorts collect funding).
    *  Set to 0.02 (2%) to skip when HL funding flips negative.
    *  CRITICAL: HYPE funding flipped to -6.88% APR on Sep 28 2026. */
   minHlFundingApr: number;
@@ -56,10 +65,27 @@ export interface CexHlFundingArbParams {
 export interface CexHlFundingAlert {
   asset: string;
   cexVenue: string;
-  hlFundingApr: number;
-  /** CEX funding APR. null = not independently verified. */
+  /**
+   * Raw Hyperliquid perp funding APR (separately sourced from
+   * Sharpe `/funding/rates`). null = not independently verified.
+   *
+   * EM-STRAT-004: this is NEVER the Sharpe `netApr` or `grossApr`.
+   * Those third-party estimates are stored separately in `sharpeNetApr`.
+   */
+  hlFundingApr: number | null;
+  /**
+   * Raw CEX perp funding APR (separately sourced from
+   * Sharpe `/funding/rates`). null = not independently verified.
+   */
   cexFundingApr: number | null;
-  /** Net carry. null = unavailable (CEX rate missing). Do not present as actionable. */
+  /**
+   * Independently-verified net carry = hlFundingApr - cexFundingApr.
+   * null = unavailable (one or both raw rates missing, or sign/orientation
+   * inconsistent). When null, the alert MUST NOT be presented as actionable.
+   *
+   * EM-STRAT-004: this is NEVER computed by subtracting a CEX rate from
+   * Sharpe's netApr. Only raw rates are subtracted.
+   */
   netSpreadApr: number | null;
   hlOiUsd: number;
   cexOiUsd: number;
@@ -67,7 +93,11 @@ export interface CexHlFundingAlert {
   vooiExecutable: boolean;
   confidence: number;
   source: 'sharpe' | 'sharpe+vooi';
-  /** Sharpe's third-party netApr estimate — NOT independently decomposed. */
+  /**
+   * Sharpe's third-party netApr estimate — explicitly labeled as a
+   * reference. NOT used as a raw funding rate and NOT used to compute
+   * netSpreadApr. Present for diagnostic visibility only.
+   */
   sharpeNetApr: number | null;
   /** Whether the alert is actionable (requires independently verified net carry). */
   actionable: boolean;
@@ -101,15 +131,52 @@ export class CexHlFundingArbStrategy implements Strategy {
     };
   }
 
+  /**
+   * Look up a raw per-venue funding APR from Sharpe `/funding/rates`.
+   * Returns null if no row matches (asset, venue) or the rate is not finite.
+   *
+   * Both arguments are case-insensitive; Sharpe exchange names are normalized
+   * to lowercase for matching. The returned APR is already annualized.
+   */
+  private async fetchRawFundingApr(
+    fundingRows: { coin: string; exchange: string; annualized: number; rate: number }[],
+    asset: string,
+    venue: string,
+  ): Promise<number | null> {
+    const a = asset.toUpperCase();
+    const v = venue.toLowerCase();
+    const row = fundingRows.find(
+      r => (r.coin?.toUpperCase() === a) && (r.exchange?.toLowerCase() === v),
+    );
+    if (!row) return null;
+    if (!isFinite(row.annualized)) return null;
+    return row.annualized;
+  }
+
   async scan(): Promise<CexHlFundingAlert[]> {
-    // 1. Pull Sharpe cross-exchange arbs filtered to HL × CEX venues
+    // 1. Pull Sharpe cross-exchange arbs filtered to HL × CEX venues.
+    //    These rows identify candidate asset × venue pairs. The `netApr`
+    //    on each row is a third-party estimate (stored as `sharpeNetApr`),
+    //    NOT a raw funding rate.
     const sharpeResp = await this.sharpe.crossExchangeFunding({
       minApr: this.params.minNetApr,
       minOiUsd: 100_000,
       assetClass: 'crypto',
     });
 
-    // 2. Pull VOOI scanner for cross-validation
+    // 2. Pull Sharpe /funding/rates — RAW per-venue funding rates.
+    //    This is the only source eligible to compute an actionable net.
+    let hlRawFundingRows: { coin: string; exchange: string; annualized: number; rate: number }[] = [];
+    try {
+      const ratesResp = await this.sharpe.fundingRates({ assetClass: 'crypto' });
+      hlRawFundingRows = ratesResp.data as typeof hlRawFundingRows;
+    } catch (err) {
+      // Without raw rates we cannot compute actionable net spreads.
+      // Continue — alerts will be emitted with netSpreadApr=null and actionable=false.
+      console.warn('Sharpe /funding/rates unavailable (continuing with non-actionable alerts):', err);
+    }
+
+    // 3. Pull VOOI scanner for cross-validation of price spread
     let vooiPairs: Array<VooiArbitragePair & { asset: string }> = [];
     try {
       const vooiResp = await this.vooi.scanArbitrage({
@@ -136,7 +203,9 @@ export class CexHlFundingArbStrategy implements Strategy {
       vooiMap.set(key2, { ...p, long: p.short, short: p.long });
     }
 
-    // 3. For each Sharpe row, check if one leg is on Hyperliquid and the other on a CEX
+    // 4. For each Sharpe row, check if one leg is on Hyperliquid and the other on a CEX.
+    //    We DO NOT treat `netApr` as a raw rate. We separately look up raw rates
+    //    from /funding/rates for both legs.
     const alerts: CexHlFundingAlert[] = [];
     for (const row of sharpeResp.data) {
       const asset = (row.coin || row.asset || row.symbol || '').toUpperCase();
@@ -146,15 +215,6 @@ export class CexHlFundingArbStrategy implements Strategy {
       const shortVenue = (row.shortExchange || '').toLowerCase();
       if (!longVenue || !shortVenue) continue;
 
-      const netApr = row.netApr ?? row.grossApr ?? 0;
-      if (netApr < this.params.minNetApr) continue;
-
-      // FUNDING SIGN GUARD: only emit when HL funding is positive enough that
-      // shorts collect meaningful funding. If HL funding flips negative (like
-      // HYPE did on Sep 28 2026 at -6.88% APR), shorting HL means PAYING funding.
-      if (netApr < this.params.minHlFundingApr) continue;
-
-      // We want: HL on one side, CEX on the other
       const hlOnLong  = longVenue  === this.params.hlVenueName.toLowerCase();
       const hlOnShort = shortVenue === this.params.hlVenueName.toLowerCase();
       if (!hlOnLong && !hlOnShort) continue;
@@ -170,9 +230,58 @@ export class CexHlFundingArbStrategy implements Strategy {
 
       // Now: HL is short side (HL longs pay shorts → we short HL = collect funding)
       // CEX is long side (we long CEX perp = pay CEX funding)
-      // Net capture = HL funding received - CEX funding paid = netApr
 
-      // Cross-validate with VOOI
+      // ── Third-party reference (NOT used as a raw rate) ───────────────
+      const sharpeNetApr: number | null =
+        (typeof row.netApr === 'number' && isFinite(row.netApr)) ? row.netApr
+        : (typeof row.grossApr === 'number' && isFinite(row.grossApr)) ? row.grossApr
+        : null;
+
+      // ── Raw per-leg funding rates (separately sourced) ──────────────
+      // EM-STRAT-004: hlFundingApr is the raw HL funding APR from /funding/rates.
+      // It is NEVER equal to sharpeNetApr.
+      const hlFundingApr = await this.fetchRawFundingApr(hlRawFundingRows, asset, this.params.hlVenueName);
+      const cexFundingApr = await this.fetchRawFundingApr(hlRawFundingRows, asset, cexVenue);
+
+      // ── Actionable net spread ────────────────────────────────────────
+      // EM-STRAT-004: compute only when BOTH raw rates are available.
+      //   Net = HL funding (received by shorts) - CEX funding (paid by longs)
+      // If HL funding is negative, shorts pay funding — that flips the trade
+      // and we should NOT treat it as the same carry. We still emit the alert
+      // but with netSpreadApr reflecting the actual signed values, and
+      // `actionable` is only true when the trade direction is profitable
+      // (netSpreadApr >= minNetApr) AND HL funding is positive enough that
+      // shorts collect (per minHlFundingApr).
+      let netSpreadApr: number | null = null;
+      if (hlFundingApr !== null && cexFundingApr !== null) {
+        netSpreadApr = hlFundingApr - cexFundingApr;
+      }
+
+      // ── Actionable flag ─────────────────────────────────────────────
+      // An alert is actionable only when:
+      //   1. netSpreadApr is independently verified (both raw rates present)
+      //   2. HL funding is positive enough that shorts collect funding
+      //      (per minHlFundingApr — guards against the HYPE -6.88% case)
+      //   3. netSpreadApr >= minNetApr
+      //
+      // UNIT NORMALIZATION (EM-STRAT-004):
+      //   - hlFundingApr / cexFundingApr / netSpreadApr are in PERCENT
+      //     (e.g., 11 means 11% APR) — sourced from Sharpe /funding/rates
+      //     `annualized` field which follows APR convention.
+      //   - this.params.minNetApr and minHlFundingApr are configured in
+      //     FRACTION (e.g., 0.05 means 5%) per the existing convention
+      //     used for row.netApr comparison.
+      //   - Convert params from fraction to percent before comparing.
+      const minNetAprPct = this.params.minNetApr * 100;
+      const minHlFundingAprPct = this.params.minHlFundingApr * 100;
+      const hlFundingPositive =
+        hlFundingApr !== null && hlFundingApr >= minHlFundingAprPct;
+      const actionable =
+        netSpreadApr !== null &&
+        hlFundingPositive &&
+        netSpreadApr >= minNetAprPct;
+
+      // ── Cross-validate with VOOI (price spread, not funding) ────────
       const vooiKey = `${asset}|${longVenue}|${shortVenue}`;
       const vooiPair = vooiMap.get(vooiKey);
       let priceSpreadPct = 0;
@@ -188,24 +297,10 @@ export class CexHlFundingArbStrategy implements Strategy {
         if (Math.abs(priceSpreadPct) > 1.0) continue;
       }
 
-      // The CEX funding rate is NOT assumed to be 0. If Sharpe provides a
-      // separate CEX funding rate field, use it. Otherwise, mark cexFundingApr
-      // as null and suppress actionable alerts.
-      const sharpeCexRate = (row as any).cexFundingApr ?? (row as any).longFundingApr ?? null;
-      const cexFundingApr: number | null =
-        (typeof sharpeCexRate === 'number' && isFinite(sharpeCexRate)) ? sharpeCexRate : null;
-
-      // Net carry = HL funding - CEX funding. If CEX rate is missing, net carry is unavailable.
-      const netSpreadApr: number | null =
-        cexFundingApr !== null ? netApr - cexFundingApr : null;
-
-      // An alert is only actionable if we have independently verified net carry.
-      const actionable = netSpreadApr !== null && netSpreadApr >= this.params.minNetApr;
-
       alerts.push({
         asset,
         cexVenue,
-        hlFundingApr: netApr,
+        hlFundingApr,
         cexFundingApr,
         netSpreadApr,
         hlOiUsd: row.shortOiUsd ?? 0,
@@ -214,7 +309,7 @@ export class CexHlFundingArbStrategy implements Strategy {
         vooiExecutable,
         confidence,
         source,
-        sharpeNetApr: netApr,
+        sharpeNetApr,
         actionable,
       });
     }

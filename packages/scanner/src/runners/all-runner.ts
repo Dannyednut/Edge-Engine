@@ -248,21 +248,31 @@ async function main() {
       }
 
       // Process cex_hl alerts — only send actionable alerts when net carry is verified
-      for (const a of cexHlAlerts.filter(a => a.actionable && (a.netSpreadApr ?? 0) >= 5).slice(0, 2)) {
+      // EM-STRAT-004: never present an alert with opportunity severity when
+      // netSpreadApr is null. When non-actionable, downgrade to 'info' and
+      // explicitly label the alert as "REFERENCE ONLY — net carry unverified".
+      for (const a of cexHlAlerts.slice(0, 2)) {
         const key = `cex_hl|${a.asset}|${a.cexVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
+        const actionable = a.actionable && (a.netSpreadApr ?? -Infinity) >= 5;
+        const fmtOrNull = (v: number | null, digits = 2) =>
+          v === null ? 'UNAVAILABLE' : v.toFixed(digits);
         await alerter.sendAlert({
           id: `cex_hl_${a.asset}_${a.cexVenue}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: actionable ? 'opportunity' : 'info',
           strategyId: 'cex_hl_funding_arb',
-          title: `[CEX-HL] ${a.asset} ${a.netSpreadApr!.toFixed(1)}% APR · ${a.cexVenue}↔HL`,
+          title: actionable
+            ? `[CEX-HL] ${a.asset} ${a.netSpreadApr!.toFixed(1)}% APR · ${a.cexVenue}↔HL`
+            : `[CEX-HL-REF] ${a.asset} ${a.cexVenue}↔HL — net carry unverified`,
           body: [
             `Long perp ${a.cexVenue} -> Short perp Hyperliquid`,
-            `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (verified)`,
-            `HL funding: ${a.hlFundingApr.toFixed(2)}% / CEX funding: ${a.cexFundingApr!.toFixed(2)}%`,
-            `Sharpe netApr (third-party): ${a.sharpeNetApr?.toFixed(2) ?? 'n/a'}%`,
+            actionable
+              ? `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (independently verified)`
+              : `Net spread APR: UNAVAILABLE (raw rates incomplete — REFERENCE ONLY)`,
+            `HL funding (raw): ${fmtOrNull(a.hlFundingApr)}% / CEX funding (raw): ${fmtOrNull(a.cexFundingApr)}%`,
+            `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
             `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
             `VOOI atomic: ${a.vooiExecutable ? 'YES' : 'NO (need direct SDK)'}`,
           ].join('\n'),
@@ -407,7 +417,10 @@ async function main() {
         });
       }
 
-      // Process CexLikeDex price arb alerts — convergence trades, not instant profit
+      // Process CexLikeDex price arb alerts — convergence trades, not instant profit.
+      // EM-STRAT-004: when economicsComplete=false (missing funding/fees), the
+      // alert MUST NOT use 'opportunity' severity and MUST NOT show an exact
+      // net-profit figure. Downgrade to 'info' and show 'UNAVAILABLE' for profit.
       for (const a of priceArbAlerts.slice(0, 3)) {
         const key = `pricearb|${a.asset}|${a.longVenue}|${a.shortVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -415,16 +428,18 @@ async function main() {
         await alerter.sendAlert({
           id: `pricearb_${a.asset}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: a.actionable ? 'opportunity' : 'info',
           strategyId: 'cexlike_dex_price_arb',
-          title: `[PRICE-CONVERGENCE] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread`,
+          title: a.actionable
+            ? `[PRICE-CONVERGENCE] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread`
+            : `[PRICE-CONVERGENCE-INFO] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread (economics incomplete)`,
           body: [
             `CONVERGENCE TRADE: result depends on close-out, fees, funding, margin, time`,
             `Long ${a.longVenue} $${a.longPrice} -> Short ${a.shortVenue} $${a.shortPrice}`,
-            `Headline: ${a.headlineSpreadPct.toFixed(2)}%  At-size: ${a.atSizeSpreadPct?.toFixed(2) ?? 'n/a'}%  Effective: ${a.effectiveSpreadPct.toFixed(2)}%`,
+            `Headline: ${a.headlineSpreadPct.toFixed(2)}%  At-size: ${a.atSizeSpreadPct?.toFixed(2) ?? 'UNAVAILABLE'}%  Effective: ${a.effectiveSpreadPct.toFixed(2)}%`,
             `Funding 1h: ${a.fundingSpread1h !== null ? a.fundingSpread1h.toFixed(4) + '%' : 'UNAVAILABLE'}`,
             `Est. profit: ${a.estimatedProfitUsd !== null ? '$' + a.estimatedProfitUsd.toFixed(2) : 'UNAVAILABLE (missing economics)'}`,
-            `Economics complete: ${a.economicsComplete}`,
+            `Economics complete: ${a.economicsComplete}  Actionable: ${a.actionable}`,
             `Long OI: $${a.longOiUsd.toFixed(0)}  Short OI: $${a.shortOiUsd.toFixed(0)}`,
           ].join('\n'),
           channels: ['telegram'],
@@ -465,8 +480,10 @@ async function main() {
           body: [
             `Market price: ${a.marketPrice.toFixed(6)} kHYPE/WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
             `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
-            `Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s  Anchor fresh: ${a.anchorFresh}`,
-            `Fee tier: ${a.feeTier/10000}%  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
+            `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
+            // EM-STRAT-004: fee tier is in hundredths of a bip (e.g., 100 → 0.01%).
+            // Display as pct directly using the corrected conversion (fee/10000).
+            `Fee tier: ${a.feeTier} (${a.ammFeePct.toFixed(4)}%)  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
             `Liquidity: ${a.poolLiquidity.toString()}`,
             `Carry arb: buy kHYPE, queue withdrawal, receive HYPE at anchor rate`,
           ].join('\n'),
@@ -579,6 +596,10 @@ async function main() {
       }
 
       // Process Euler lending arb alerts
+      // EM-STRAT-004: Euler alerts are monitoring-only — supply APY, spread,
+      // and profit are null (cannot be verified). NEVER display these as
+      // verified-zero values; use 'UNAVAILABLE' explicitly. Severity is
+      // 'info', NOT 'opportunity'.
       for (const a of eulerLendingArbAlerts.slice(0, 3)) {
         const key = `eulr|${a.assetSymbol}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -593,9 +614,12 @@ async function main() {
             `MONITORING ONLY — supply APY unavailable, cannot compute spread`,
             `Deposit vault: ${a.depositVault.name} (borrow ${a.depositVault.borrowApyPct.toFixed(2)}%)`,
             `Borrow vault:  ${a.borrowVault.name} (borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%)`,
+            `Supply APY (deposit): ${a.depositVault.supplyApyPct === null ? 'UNAVAILABLE' : a.depositVault.supplyApyPct.toFixed(2) + '%'}`,
+            `Supply APY (borrow):  ${a.borrowVault.supplyApyPct === null ? 'UNAVAILABLE' : a.borrowVault.supplyApyPct.toFixed(2) + '%'}`,
+            `Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'}`,
+            `Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE (cannot estimate)' : '$' + a.estimatedProfitUsd.toFixed(0)}`,
             `Borrowable: ${a.borrowable}  CF: ${a.collateralFactorPct}% (assumed)`,
-            `Supply APY: unavailable | Profit: cannot estimate`,
-            `Combined liq: ${a.totalLiquidityUsd !== null ? '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k' : 'unavailable'}`,
+            `Combined liq: ${a.totalLiquidityUsd !== null ? '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k' : 'UNAVAILABLE'}`,
           ].join('\n'),
           channels: ['telegram'],
         });
@@ -780,6 +804,27 @@ async function main() {
       for (const [k, ts] of seenOpps.entries()) {
         if (ts < cutoff) seenOpps.delete(k);
       }
+
+      // ─── EM-STRAT-004: Non-actionable strategy enforcement ───────────
+      // airdropAlerts and leverageAlerts carry `researchOnly: true` — they
+      // are based on static campaign/rate tables, NOT live market data.
+      // eulerLendingArbAlerts carry `monitoringOnly: true` — supply APY
+      // cannot be verified, so no actionable spread/profit can be computed.
+      //
+      // Policy: NONE of these alerts may be sent through `alerter.sendAlert()`
+      // with `severity: 'opportunity'` (or 'critical'). They are intentionally
+      // omitted from the alert dispatch blocks above. The per-scan log line
+      // records their counts for observability only.
+      //
+      // Regression tests in `strategy-labeling.test.ts` verify:
+      //   1. airdropAlerts[i].researchOnly === true
+      //   2. leverageAlerts[i].researchOnly === true
+      //   3. eulerLendingArbAlerts[i].monitoringOnly === true
+      //   4. This file does not call alerter.sendAlert() with severity
+      //      'opportunity' for any of those three alert types.
+      void airdropAlerts;       // observed but never alerted
+      void leverageAlerts;      // observed but never alerted
+      void eulerLendingArbAlerts; // monitoring-only: handled above with 'info' severity
     } catch (err) {
       console.error(`[scan ${scanCount}] failed:`, err);
     }
