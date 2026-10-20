@@ -164,16 +164,36 @@ explicit Instructor approval BEFORE any such change.
 Instructor-authorized series start, applied as an EXACT UTC timestamp
 (inclusive ≥) against each pair's/observation's actual `collected_at_utc`
 BEFORE slot aggregation/deduplication. A pre-authorization sample collected
-on the same UTC date as the authorized start — even inside the same 12h slot
-(the real pilot was recorded 2026-10-20T04:56:54Z, so the same-day-start
-hazard is live) — can never contribute to the authorized series. The slot
-grid is the 28 half-day slots from the floor-12h of the start; excluded rows
-are disclosed in the report (`pairs_before_boundary_excluded`,
-`boundary_excluded_primary_slots`), never deleted. The default earliest-run
-anchor is labeled `default_earliest_run` with an explicit "NOT an authorized
-series start" note and remains diagnostic-only (the runbook mandates
-`--window-start` for any authorized evaluation). The fixed 28-slot
-denominator, the pre-registered gate and its hash are unchanged.
+before the anchor — even on the same UTC date (the real pilot was recorded
+2026-10-20T04:56:54Z, so the same-day-start hazard is live) — can never
+contribute to the authorized series. Excluded rows are disclosed in the
+report (`pairs_before_boundary_excluded`, `boundary_excluded_primary_slots`),
+never deleted. The default earliest-run anchor is labeled
+`anchor_basis: "default_earliest_run"` with an explicit "NOT an authorized
+series start" note, and `window_semantics.anchor_role` flags it as
+`diagnostic_earliest_run_derived_not_authorized` (it is derived from the
+first collection — exactly the conflation the authorized rule avoids) and
+remains diagnostic-only (the runbook mandates `--window-start` for any
+authorized evaluation). The fixed 28-slot denominator, the pre-registered
+gate and its hash are unchanged.
+
+**Authorized window semantics (EI-STRAT-005):** the pre-registered design is
+the **fixed 14-day UTC slot window** `[anchor, anchor + 14 days)` — 28
+consecutive 12h UTC slots. `--window-start` is the **gate-window anchor**
+and must be **slot-aligned: exactly `00:00:00Z` or `12:00:00Z`**; a
+non-aligned value (e.g. `08:00Z`, for which the old floor-12h grid would
+end 13 days 16 hours = 328h after the exact start — 8h short of 14 full
+elapsed days, matching neither candidate reading of the pre-registration)
+is refused before any computation (`WindowAnchorError`, stats exit 4) with
+the nearest slot boundaries named — never floored silently. For an aligned
+anchor the two readings — a fixed 14-day UTC slot window with an exact
+lower cutoff, and 14 full elapsed days from the exact authorized timestamp
+— describe the IDENTICAL interval, so the 28-slot interpretation is
+preserved without touching `GATE_CONFIG` or its hash. The timestamp is the
+gate-window anchor, **not** the time of the first actual collection: the
+first admitted collection is disclosed as an observed fact
+(`window_semantics.first_accepted_collection_utc`) and never moves the
+grid. Every report carries the full rule in `window_semantics`.
 
 **Three-major coverage condition (EI-STRAT-003):** a major (BTC/ETH/SOL) counts as
 adequately covered when it has ≥ ceil(0.85 × 28) = **24 complete paired slots** inside
@@ -247,11 +267,12 @@ manifest-migration decision) — no such change is implemented here.
 |---|---|
 | Manually invoked read-only Python tool, free public sources, no credentials | `cli.py` (single-shot invocations); stdlib-only runtime |
 | New dedicated evidence path, no modification of existing data | `evidence/funding-carry/data/` (new; per-run dirs; append-only) |
-| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (83 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard, exact-start boundary, legacy-metadata clarity) |
+| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (94 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard, exact-start boundary, legacy-metadata clarity, slot-aligned window semantics) |
 | Fail closed, mark gaps, never manufacture rows | `models.validate_observation`, gap-row design, exit-code contract |
 | Runbook for twice-daily collection, append semantics, hash/consistency checks, derived stats | `RUNBOOK.md` + `store.verify` + `stats` |
 | No cron/GHA/daemon/daemon-like scheduling | none exists; runbook states the prohibition |
 | ≥14 days × 2/day, ≥85% completeness, CEX leg on ≥3 majors, honest gap reporting | `stats.py` gate engine (UNRESOLVED path unit-tested) |
 | EI-STRAT-003: fixed 28-slot completeness denominator · three-major overall condition · non-gate fee sensitivity sidecar · offline CI job | `stats.py` (fixed window + majors gate) · `fees.py` + `fees` CLI · `tests/test_gate_window.py` / `test_gate_majors.py` / `test_fees_sidecar.py` / `test_offline_guard.py` · `.github/workflows/evidence-funding-carry-tests.yml` |
 | EI-STRAT-004: exact authorized-start boundary before slot aggregation · legacy completeness-definition metadata labeled · authorized-start runbook procedure | `stats.py` (exact `collected_at_utc` boundary + 28-slot grid + exclusion disclosure + legacy-status block) · `tests/test_window_boundary.py` · `tests/test_completeness_definition.py` · `RUNBOOK.md` §0.1/§4 |
+| EI-STRAT-005: slot-aligned authorized window anchors (00:00:00Z/12:00:00Z, exit-4 refusal) · gate-window anchor vs first-collection clarification · fixed-14-day-UTC-slot-window disclosure | `stats.py` (`WindowAnchorError` + `_require_slot_aligned` + `window_semantics` report block incl. `first_accepted_collection_utc`) · `cli.py` (exit 4) · `tests/test_window_semantics.py` · `RUNBOOK.md` §0.1/§4 |
 | Pre-registered gate thresholds unchanged | `GATE_CONFIG` + `gate_config_sha256` drift lock (exit 3) |

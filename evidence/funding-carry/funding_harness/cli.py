@@ -3,7 +3,9 @@
 No scheduler, no daemon, no cron — every action is a single explicitly
 invoked process that exits when done. Exit codes:
   collect: 0 complete (no gaps) · 1 recorded with gaps · 2 hard failure
-  stats:   0 verdict computed (PASS/FAIL/BETWEEN) · 1 UNRESOLVED
+  stats:   0 verdict computed (PASS/FAIL/BETWEEN) · 1 UNRESOLVED ·
+           3 gate-config drift refusal · 4 non-slot-aligned --window-start
+           refusal (EI-STRAT-005)
   verify:  0 consistent · 1 inconsistencies found
   fees:    0 always (NON-GATE sensitivity sidecar; never a verdict)
 """
@@ -16,7 +18,8 @@ from pathlib import Path
 
 from . import TOOL_NAME, TOOL_VERSION, config
 from .collect import GateDriftError, run_collection
-from .stats import VERDICT_UNRESOLVED, compute_report, write_report
+from .stats import (VERDICT_UNRESOLVED, WindowAnchorError, compute_report,
+                    write_report)
 from .store import verify as verify_store
 
 DEFAULT_BASE_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -106,9 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="DIAGNOSTIC ONLY — the gate window is fixed at 14 "
                         "days by GATE_CONFIG and never changes")
     s.add_argument("--window-start", default=None,
-                   help="pin the authorized series start (UTC, "
-                        "YYYY-MM-DDTHH:MM:SSZ); default anchors at the "
-                        "earliest run timestamp")
+                   help="pin the authorized gate-window anchor (UTC, "
+                        "YYYY-MM-DDTHH:MM:SSZ; MUST be slot-aligned: "
+                        "exactly 00:00:00Z or 12:00:00Z — EI-STRAT-005; "
+                        "non-aligned values are refused, never floored); "
+                        "default anchors at the earliest run timestamp "
+                        "(diagnostic only, never an authorized start)")
     s.set_defaults(func=cmd_stats)
 
     f = sub.add_parser("fees", help="NON-GATE fee sensitivity sidecar: "
@@ -135,3 +141,6 @@ def main(argv=None) -> int:
     except GateDriftError as exc:
         print(f"GATE-DRIFT REFUSAL: {exc}", file=sys.stderr)
         return 3
+    except WindowAnchorError as exc:
+        print(f"WINDOW-ANCHOR REFUSAL: {exc}", file=sys.stderr)
+        return 4

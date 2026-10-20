@@ -21,7 +21,7 @@ no blockchain RPC · EI-S008 untouched.
   `ei/funding-carry-evidence-harness`. All commands below run from there.
   `python3 -m funding_harness --help` shows the CLI.
 
-### 0.1 Authorized series start (EI-STRAT-004 — read before any authorized run)
+### 0.1 Authorized series start (EI-STRAT-004/005 — read before any authorized run)
 
 - **The recurring twice-daily observation series has NOT been authorized or
   started.** The only existing sample is the pre-authorization exploratory
@@ -29,23 +29,50 @@ no blockchain RPC · EI-S008 untouched.
   tool readiness, not part of any authorized series. It is kept intact;
   it is never deleted or rewritten.
 - When the Instructor authorizes the series, record BEFORE the first
-  authorized `collect`: (a) the **exact authorized first-series start
-  timestamp** (UTC, to the second) and (b) the **two daily collection
+  authorized `collect`: (a) the **authorized gate-window anchor** (UTC —
+  see the slot-alignment rule below) and (b) the **two daily collection
   windows** (e.g. the §0 slots). Both go into the session log.
-- Always pass the authorized start to stats:
-  `python3 -m funding_harness stats --window-start <exact UTC ts>`. The
-  boundary is applied as an **exact timestamp against each pair's/
+- **The anchor must be slot-aligned (EI-STRAT-005): exactly `00:00:00Z`
+  or `12:00:00Z`.** The pre-registered evaluation window is the FIXED
+  14-day UTC slot window `[anchor, anchor + 14 days)` — 28 consecutive
+  12h UTC slots. Because the anchor sits on a slot boundary, the exact
+  authorized timestamp, the grid start and the lower data cutoff all
+  coincide, and "14 full elapsed days from the exact authorized
+  timestamp" describes the IDENTICAL interval — the two candidate
+  readings of the pre-registration cannot diverge. A non-aligned
+  `--window-start` (e.g. `08:00Z`, which would end the floor-12h grid
+  13 days 16 hours = 328h after the exact start — 8h short of 14 elapsed
+  days) is **refused with exit 4** and the two nearest boundaries are
+  printed; nothing is ever floored silently.
+- **The anchor is the gate-window anchor, NOT the time of the first
+  actual collection.** The first authorized `collect` happens at or after
+  the anchor, inside the first slot; whenever it actually lands (e.g.
+  `13:07:33Z`), the grid stays `[anchor, anchor + 14 days)`. The first
+  admitted collection is disclosed in every report as an observed fact
+  (`window_semantics.first_accepted_collection_utc`) and never moves the
+  window. Do not conflate the two meanings.
+- Practically: pick the slot boundary the intended first collection falls
+  into (first collection ~08:00–10:00Z → anchor `00:00:00Z` that day;
+  first collection ~20:00–22:00Z → anchor `12:00:00Z` that day), and
+  always choose the anchor **strictly after every pre-authorization
+  sample** (the 04:56:54Z pilot). Slot alignment alone does not detect
+  pilots — the anchor choice does.
+- Always pass the authorized anchor to stats:
+  `python3 -m funding_harness stats --window-start <slot-aligned UTC ts>`.
+  The boundary is applied as an **exact timestamp against each pair's/
   observation's actual `collected_at_utc` before slot aggregation** — a
-  pre-start sample on the same UTC date (even inside the same 12h slot) is
-  excluded from the authorized series and disclosed in the report
+  pre-start sample on the same UTC date is excluded from the authorized
+  series and disclosed in the report
   (`evaluation_window.pairs_before_boundary_excluded`,
   `evaluation_window.boundary_excluded_primary_slots`). The fixed 28-slot
   denominator and the gate are unchanged.
 - **Never use the default anchor for authorized evaluation while the pilot
   run exists.** Without `--window-start` the window anchors at the earliest
   run timestamp — the pilot's own date — and the report labels this as
-  `anchor_basis: "default_earliest_run"` with an explicit "NOT an authorized
-  series start" note. Default-anchor reports are diagnostics only.
+  `anchor_role: "diagnostic_earliest_run_derived_not_authorized"` with an
+  explicit "NOT an authorized series start" note (the default anchor is
+  first-collection-derived — exactly the conflation the authorized rule
+  avoids). Default-anchor reports are diagnostics only.
 
 ## 1. Collection (≈ 15–60 seconds)
 
@@ -66,6 +93,8 @@ Exit codes: **0** no gaps · **1** recorded with gaps (normal while Binance/MEXC
 blocked) · **2** hard failure (zero complete observations — rerun once after ~5 min;
 if it persists, log the incident and continue the series; the gap is data, not an
 excuse to skip) · **3** gate-config drift (stop, report to Instructor).
+(`stats` exit codes: **0** verdict · **1** UNRESOLVED · **3** gate-config drift ·
+**4** non-slot-aligned `--window-start` refusal, EI-STRAT-005.)
 
 **If a previously-healthy venue shows gaps for 3+ consecutive runs**, note it in the
 session log — that is a coverage regression the final report must disclose.
@@ -126,14 +155,26 @@ python3 -m funding_harness stats
   series start — never the observed span. A partially observed window therefore reads
   as partially complete (the first single slot = 1/28 = 3.6%); unobserved periods can
   never disappear from the denominator. If the Instructor authorizes an official
-  series start date, pass `stats --window-start <UTC>` so the anchor is pinned rather
-  than inferred.
+  series start, pass `stats --window-start <slot-aligned UTC ts>` (§0.1) so the
+  anchor is pinned rather than inferred.
 - **Authorized-start boundary is an exact timestamp (EI-STRAT-004):** `--window-start`
   is compared (inclusive ≥) against every pair/observation's actual `collected_at_utc`
   at second resolution BEFORE slot aggregation/dedup, so a pre-authorization sample
-  collected on the same UTC date — even in the same 12h slot — cannot
-  contribute to the authorized series. The slot grid is the 28 half-day slots from the
-  floor-12h of the start; excluded rows are disclosed, never deleted.
+  collected before the anchor cannot contribute to the authorized series. Excluded
+  rows are disclosed, never deleted.
+- **Authorized window semantics (EI-STRAT-005):** the pre-registered design is the
+  **fixed 14-day UTC slot window** `[anchor, anchor + 14 days)` — 28 consecutive 12h
+  UTC slots; the denominator is 28 slots, never elapsed-seconds from an arbitrary
+  timestamp. `--window-start` is therefore the **gate-window anchor** and must be
+  **slot-aligned: exactly `00:00:00Z` or `12:00:00Z`** — non-aligned values are
+  refused (exit 4) with the nearest boundaries named, never floored. For an aligned
+  anchor the alternative reading ("14 full elapsed days from the exact authorized
+  timestamp") describes the identical interval, so the pre-registered 28-slot
+  interpretation holds either way without touching `GATE_CONFIG` or its hash. The
+  timestamp is the gate-window anchor, **not** the time of the first actual
+  collection; the first admitted collection is disclosed
+  (`window_semantics.first_accepted_collection_utc`) and never moves the grid.
+  Every report carries the full rule in `window_semantics`.
 - **Completeness-definition metadata (EI-STRAT-004):** the hash-locked
   `GATE_CONFIG["completeness_definition"]` string ("…(days_spanned * samples_per_day)")
   is **legacy pre-registration metadata** — the effective calculation is the fixed

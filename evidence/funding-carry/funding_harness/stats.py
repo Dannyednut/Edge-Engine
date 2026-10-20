@@ -44,6 +44,22 @@ is retained verbatim; every report carries an explicit legacy-status block
 (completeness_definition_effective) so the legacy string can never be read
 as the operative calculation.
 
+Authorized window semantics (EI-STRAT-005): the pre-registered design is a
+FIXED 14-DAY UTC SLOT WINDOW — the 28 consecutive 12h UTC slots
+[anchor, anchor + 14 days). An explicit --window-start is the GATE-WINDOW
+ANCHOR (the Instructor-authorized boundary from which the grid is derived),
+never the time of the first actual collection (an observed fact, disclosed
+separately, that never moves the grid). The anchor must be SLOT-ALIGNED —
+exactly 00:00:00Z or 12:00:00Z; a non-aligned value is refused BEFORE any
+computation (WindowAnchorError; CLI exit 4) with the nearest boundaries
+named, never floored silently. Slot alignment makes the alternative
+reading — 14 full elapsed days from the exact authorized timestamp —
+describe the IDENTICAL interval (for a non-aligned 08:00Z start the
+floor-12h grid would end 13 days 16 hours = 328h after the exact start,
+8h short of 14 elapsed days), so the fixed 28-slot denominator, GATE_CONFIG
+and its hash are preserved unchanged. Exact record-timestamp filtering is
+retained (inclusive lower / exclusive upper, second resolution).
+
 Threshold immutability: every run manifest embeds gate_config_sha256; if any
 run (or this module) disagrees with the pre-registered hash, stats refuses to
 produce a report (GateDriftError) instead of comparing against drifted
@@ -69,6 +85,19 @@ def _slot_dt(slot_label: str) -> datetime:
     return datetime.strptime(slot_label, "%Y-%m-%dT%HZ").replace(
         tzinfo=timezone.utc)
 
+
+class WindowAnchorError(ValueError):
+    """Raised when --window-start is not a slot-aligned UTC slot boundary.
+
+    EI-STRAT-005: authorized gate-window anchors must be exactly 00:00:00Z
+    or 12:00:00Z. A non-aligned anchor would apply the exact row cutoff
+    inside the first slot while the 28-slot grid still starts at floor-12h
+    (for an 08:00Z start the grid end would sit 13 days 16 hours = 328h
+    after the exact start — 8h short of 14 full elapsed days), so the
+    window would match neither pre-registered reading. The tool refuses
+    (fail closed) instead of flooring the value silently.
+    """
+
 VERDICT_PASS = "PASS"
 VERDICT_FAIL = "FAIL"
 VERDICT_BETWEEN = "BETWEEN_THRESHOLDS"
@@ -77,6 +106,38 @@ VERDICT_UNRESOLVED = "UNRESOLVED"
 
 def _parse_ts(ts: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _require_slot_aligned(boundary: datetime) -> None:
+    """EI-STRAT-005: authorized anchors must sit on a 12h UTC slot boundary.
+
+    A slot-aligned anchor makes floor-12h an identity operation, so the
+    grid start IS the exact authorized anchor and the grid end IS
+    anchor + 14 full days (also slot-aligned). Then the pre-registered
+    reading — a fixed 14-day UTC slot window whose exact lower cutoff is
+    the anchor — and the alternative reading — 14 full elapsed days from
+    the exact authorized timestamp — describe the IDENTICAL interval, and
+    the fixed 28-slot denominator and gate hash are preserved unchanged.
+    """
+    if (boundary.hour in (0, 12) and boundary.minute == 0
+            and boundary.second == 0 and boundary.microsecond == 0):
+        return
+    day0 = boundary.replace(hour=0, minute=0, second=0, microsecond=0)
+    prev_boundary = day0 if boundary.hour < 12 else day0 + timedelta(hours=12)
+    next_boundary = prev_boundary + timedelta(hours=12)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    raise WindowAnchorError(
+        f"--window-start {boundary.strftime(fmt)} is not slot-aligned. "
+        "The authorized gate-window anchor must be exactly 00:00:00Z or "
+        "12:00:00Z so the fixed 28-slot grid [anchor, anchor + 14 days) "
+        "coincides with 14 full elapsed days from the exact authorized "
+        "timestamp; a non-aligned start would apply an exact row cutoff "
+        "inside the first slot while the grid still starts at its "
+        "floor-12h (e.g. an 08:00Z start would end 13 days 16 hours = "
+        "328h after the exact start — 8h short of 14 elapsed days). "
+        "Re-anchor to the containing or next slot boundary: "
+        f"{prev_boundary.strftime(fmt)} or {next_boundary.strftime(fmt)} "
+        "(EI-STRAT-005; nothing was floored silently).")
 
 
 def preregistered_window_slots(g: dict) -> int:
@@ -192,6 +253,11 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
     # to the authorized series. Excluded rows are counted and disclosed
     # below; the underlying runs are never modified or deleted.
     boundary_utc = _parse_ts(window_start_utc) if window_start_utc else None
+    if boundary_utc is not None:
+        # EI-STRAT-005: fail closed BEFORE any computation. --window-start
+        # is the authorized GATE-WINDOW ANCHOR and must coincide with a 12h
+        # UTC slot boundary; nothing about the report is produced otherwise.
+        _require_slot_aligned(boundary_utc)
 
     def _in_authorized_series(ts: str) -> bool:
         return boundary_utc is None or _parse_ts(ts) >= boundary_utc
@@ -235,9 +301,13 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
                        "verdict_reasons": ["cannot determine the window "
                                            "anchor: no run timestamps"]})
         return report
-    # Slot grid: the 28 half-day slots starting at the floor-12h of the
-    # window start (midnight for the default earliest-run anchor and for
-    # midnight overrides — identical to the EI-STRAT-003 date semantics).
+    # Slot grid: the 28 half-day slots starting at the window anchor. With
+    # the EI-STRAT-005 slot-alignment validation above, floor-12h of an
+    # explicit anchor is an IDENTITY operation: the grid start IS the exact
+    # authorized anchor and the grid end IS anchor + 14 full days (also
+    # slot-aligned) — both candidate readings of the pre-registered window
+    # coincide. The default earliest-run anchor keeps its EI-STRAT-003
+    # date semantics (midnight grid start); it is diagnostic-only.
     if boundary_utc is not None:
         first_slot_dt = boundary_utc.replace(minute=0, second=0,
                                              microsecond=0)
@@ -437,6 +507,86 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
             "requires explicit Instructor approval BEFORE any such change."),
         "effective_calculation": report["completeness_definition_effective"],
         "gate_config_sha256": report["gate_config_sha256"],
+    }
+
+    # ---- authorized window semantics (EI-STRAT-005) -----------------------
+    # The pre-registered design is a FIXED 14-DAY UTC SLOT WINDOW: the 28
+    # consecutive 12h UTC slots [anchor, anchor + 14 days). --window-start
+    # is the GATE-WINDOW ANCHOR, never the time of the first actual
+    # collection; because the anchor is validated slot-aligned above, the
+    # alternative reading — 14 full elapsed days from the exact authorized
+    # timestamp — describes the IDENTICAL interval, so the pre-registered
+    # 28-slot interpretation holds without any gate change.
+    if all_pairs:
+        first_accepted_ts = min(p["collected_at_utc"] for p in all_pairs)
+    elif all_obs:
+        first_accepted_ts = min(o["collected_at_utc"] for o in all_obs)
+    else:
+        first_accepted_ts = None
+    if boundary_utc is not None:
+        anchor_role = "gate_window_anchor"
+        anchor_is_first_collection = False
+        alignment_note = (
+            "anchor validated slot-aligned (00:00:00Z | 12:00:00Z) before "
+            "computation; the grid start equals the exact authorized "
+            "anchor (floor-12h is an identity operation here) and the grid "
+            "end equals anchor + 14 full days")
+    else:
+        # The default anchor is DERIVED from the earliest recorded run
+        # timestamp (date-truncated) — i.e. it IS first-collection-derived.
+        # That conflation is exactly why it is diagnostic-only and can
+        # never authorize a series.
+        anchor_role = "diagnostic_earliest_run_derived_not_authorized"
+        anchor_is_first_collection = True
+        alignment_note = (
+            "no --window-start given: the anchor is derived from the "
+            "earliest recorded run timestamp (date-truncated) — it is "
+            "first-collection-derived, which is exactly why it is "
+            "diagnostic-only and NOT an authorized series start; the "
+            "earliest run may be the pre-authorization pilot. Authorized "
+            "evaluation requires an explicit slot-aligned --window-start")
+    report["window_semantics"] = {
+        "interpretation": "fixed_14_day_utc_slot_window",
+        "definition": (
+            "the pre-registered evaluation window is the fixed sequence of "
+            "28 consecutive 12-hour UTC slots [anchor, anchor + 14 days) "
+            "(window_days_min x samples_per_day = "
+            f"{window_slots}); record timestamps are filtered EXACTLY "
+            "(inclusive lower, exclusive upper) against this interval "
+            "BEFORE slot aggregation/deduplication (EI-STRAT-004), then "
+            "floored to their containing 12h UTC slot"),
+        "alternative_reading_note": (
+            "for a slot-aligned anchor the alternative reading — 14 full "
+            "elapsed days from the exact authorized timestamp — describes "
+            "the IDENTICAL interval [anchor, anchor + 14 days); the two "
+            "readings only diverge for non-aligned timestamps, which are "
+            "refused before any computation (WindowAnchorError, CLI "
+            "exit 4)"),
+        "anchor_role": anchor_role,
+        "anchor_is_first_collection_time": anchor_is_first_collection,
+        "first_accepted_collection_utc": first_accepted_ts,
+        "first_collection_role": (
+            "observed fact, not a window input — the collected_at_utc of "
+            "the first record admitted to the evaluation window; it must "
+            "be >= the anchor and never moves the 28-slot grid"),
+        "slot_alignment_required": True,
+        "slot_alignment_validated": boundary_utc is not None,
+        "slot_alignment_rule": (
+            "an authorized --window-start must be exactly 00:00:00Z or "
+            "12:00:00Z; non-aligned values are refused (WindowAnchorError, "
+            "CLI exit 4) with the nearest slot boundaries named — never "
+            "floored silently"),
+        "rationale": (
+            "a non-aligned anchor such as 08:00Z would put the exact row "
+            "cutoff inside the first slot while the 28-slot grid still "
+            "starts at floor-12h: the grid end would sit 13 days 16 hours "
+            "(328h = 336h - 8h) after the exact start — 8 hours short of "
+            "14 full elapsed days — matching neither pre-registered "
+            "reading; slot alignment makes grid start == exact anchor and "
+            "the two readings identical, preserving the fixed 28-slot "
+            "denominator and the gate hash unchanged"),
+        "grid_span_hours": 336,
+        "anchor_note": alignment_note,
     }
 
     # ---- overall verdict --------------------------------------------------

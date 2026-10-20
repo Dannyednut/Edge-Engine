@@ -8,6 +8,16 @@ could contribute to the authorized series via slot aggregation/median
 dedupe. The fix filters each pair's ACTUAL collected_at_utc against the
 authorized boundary BEFORE slot aggregation/deduplication.
 
+EI-STRAT-005 supersedes the mid-slot-cutoff capability: authorized window
+boundaries must be SLOT-ALIGNED (exactly 00:00:00Z or 12:00:00Z), so the
+EI-STRAT-004 scenario of an 08:00Z exact cutoff INSIDE the pilot's slot is
+no longer expressible — a non-aligned --window-start is refused
+(WindowAnchorError, CLI exit 4; refusal semantics live in
+tests/test_window_semantics.py). The pilot-exclusion guarantee itself is
+strengthened: for an aligned anchor there is no partial slot — either the
+whole slot is authorized or it is entirely pre-anchor — and the exact
+timestamp filter still excludes every row strictly before the anchor.
+
 The pre-registered gate, its hash and the fixed 28-slot denominator are
 unchanged; the pilot run itself is never deleted or rewritten — excluded
 rows are counted and disclosed in the report instead.
@@ -24,10 +34,11 @@ from funding_harness.stats import (VERDICT_UNRESOLVED, compute_report)
 from funding_harness.store import write_run
 from tests.test_pairing_stats import _funding_obs
 
-# The authorized start shares its UTC date AND its T00Z 12h slot with the
-# pilot observation (mirrors the real 2026-10-20 pilot-vs-authorized-start
-# hazard): pilot 03:00Z and allowed 09:00Z both floor to slot 2026-11-05T00Z.
-AUTHORIZED_START = "2026-11-05T08:00:00Z"
+# The pilot and allowed observations share their UTC date AND their T00Z
+# 12h slot (mirrors the real 2026-10-20 pilot-vs-authorized-start hazard):
+# pilot 03:00Z and allowed 09:00Z both floor to slot 2026-11-05T00Z.
+# Under EI-STRAT-005 the only expressible authorized anchors for this date
+# are the slot boundaries 00:00:00Z and 12:00:00Z (see the tests below).
 PILOT_TS = "2026-11-05T03:00:00Z"
 ALLOWED_TS = "2026-11-05T09:00:00Z"
 
@@ -57,32 +68,47 @@ def _fixture_same_slot(base):
     return base
 
 
-def test_pre_start_pilot_cannot_contribute_same_date_same_slot(tmp_path):
-    # THE mandated fixture: pre-start observation and allowed observation in
-    # the same UTC date / 12h bucket. The pilot pair (03:00Z < 08:00Z start)
-    # must be excluded BEFORE slot aggregation/median dedupe — the authorized
-    # slot value is the allowed observation's value alone.
+def test_same_slot_pilot_and_allowed_under_aligned_anchors(tmp_path):
+    # EI-STRAT-004's mandated fixture (pre-start pilot + allowed observation
+    # in the SAME UTC date / 12h bucket) under EI-STRAT-005's aligned rule:
+    # the 08:00Z mid-slot cutoff that used to separate pilot (03:00Z) from
+    # allowed (09:00Z) inside slot [00Z,12Z) is no longer expressible — it
+    # is refused (WindowAnchorError; see test_window_semantics.py). For the
+    # two expressible anchors there is no partial slot: anchoring at
+    # 00:00:00Z admits BOTH rows of the shared slot (both are then
+    # in-window authorized observations; the slot median is the median of
+    # both); anchoring at 12:00:00Z places the WHOLE slot before the anchor
+    # so both rows are pre-start, excluded and disclosed.
     base = _fixture_same_slot(tmp_path)
-    report = compute_report(base, window_start_utc=AUTHORIZED_START)
-    a = report["per_asset"]["BTC"]
+
+    at_midnight = compute_report(base,
+                                 window_start_utc="2026-11-05T00:00:00Z")
+    a = at_midnight["per_asset"]["BTC"]
+    assert at_midnight["evaluation_window"][
+        "pairs_before_boundary_excluded"] == 0
     assert a["n_slots_with_complete_pair"] == 1
     assert a["sample_completeness"] == pytest.approx(1 / 28, abs=1e-4)
-    slot_median = a["daily_median_net_apr_pre_registered"]["2026-11-05"]
-    assert slot_median == pytest.approx(ALLOWED_NET, abs=1e-6)
-    assert a["median_net_apr_pre_registered"] == pytest.approx(
-        ALLOWED_NET, abs=1e-6)
-    # decisive: the slot value is NOT influenced by the pilot rate
-    assert slot_median != pytest.approx(
-        (PILOT_NET + ALLOWED_NET) / 2, abs=1e-6)
+    # both rows are in the authorized window: the slot median is the honest
+    # median of the two admitted observations
+    assert a["daily_median_net_apr_pre_registered"]["2026-11-05"] == \
+        pytest.approx((PILOT_NET + ALLOWED_NET) / 2, abs=1e-6)
 
-    ew = report["evaluation_window"]
+    at_noon = compute_report(base, window_start_utc="2026-11-05T12:00:00Z")
+    ew = at_noon["evaluation_window"]
     assert ew["window_start_override"] is True
     assert ew["anchor_basis"] == "authorized_start_override"
-    assert ew["authorized_boundary_utc"] == AUTHORIZED_START
-    # excluded evidence is disclosed, never silently dropped
-    assert ew["pairs_before_boundary_excluded"] == 1
+    assert ew["authorized_boundary_utc"] == "2026-11-05T12:00:00Z"
+    # excluded evidence is disclosed, never silently dropped: the whole
+    # pre-anchor slot (both rows) is excluded
+    assert ew["pairs_before_boundary_excluded"] == 2
     assert ew["boundary_excluded_primary_slots"] == ["2026-11-05T00Z"]
-    assert report["verdict"] == VERDICT_UNRESOLVED  # 1 slot < 14d window
+    # no in-window pair remains for the asset -> it drops out of per_asset
+    # and the overall verdict is UNRESOLVED (never a pass)
+    assert "BTC" not in at_noon["per_asset"]
+    assert at_noon["verdict"] == VERDICT_UNRESOLVED
+    assert any("no complete paired observations" in r
+               for r in at_noon["verdict_reasons"])
+    assert at_noon["window_semantics"]["slot_alignment_validated"] is True
 
 
 def test_default_anchor_is_labeled_not_authorized(tmp_path):
@@ -135,14 +161,17 @@ def test_pilot_alone_in_pre_start_slot_is_excluded_and_disclosed(tmp_path):
 
 def test_boundary_is_exact_timestamp_inclusive(tmp_path):
     # The boundary is compared against each pair's actual collected_at_utc at
-    # second resolution: 07:59:59Z (before an 08:00:00Z start) is excluded,
-    # 08:00:00Z exactly is included — a date-level filter cannot do this.
+    # second resolution: 11:59:59Z (before the 12:00:00Z anchor) is excluded
+    # and 12:00:00Z exactly is included — a date-level filter cannot do
+    # this. The excluded row's slot [00Z,12Z) lies entirely before the
+    # aligned anchor; the included row's slot [12Z,24Z) is the first grid
+    # slot. Exact filtering is retained under the aligned rule.
     base = tmp_path
-    _write_run(base, "20261105T075959Z", "2026-11-05T07:59:59Z",
+    _write_run(base, "20261105T115959Z", "2026-11-05T11:59:59Z",
                0.0000125, 0.0002)          # net ~ -11.15% (distinct)
-    _write_run(base, "20261105T080000Z", "2026-11-05T08:00:00Z",
+    _write_run(base, "20261105T120000Z", "2026-11-05T12:00:00Z",
                0.0000125, 0.00005273)      # net ~ +4.976%
-    report = compute_report(base, window_start_utc=AUTHORIZED_START)
+    report = compute_report(base, window_start_utc="2026-11-05T12:00:00Z")
     a = report["per_asset"]["BTC"]
     assert report["evaluation_window"]["pairs_before_boundary_excluded"] == 1
     assert a["n_slots_with_complete_pair"] == 1
@@ -150,19 +179,27 @@ def test_boundary_is_exact_timestamp_inclusive(tmp_path):
         pytest.approx(ALLOWED_NET, abs=1e-6)
 
 
-def test_override_grid_is_exactly_28_slots_from_floor12_start(tmp_path):
-    # The fixed pre-registered denominator is preserved under any override:
-    # the grid is the 28 half-day slots [floor12(start), floor12(start)+14d).
+def test_override_grid_is_exactly_28_slots_from_aligned_anchor(tmp_path):
+    # EI-STRAT-005: the grid is the 28 half-day slots [anchor, anchor+14d)
+    # with the anchor validated slot-aligned — so floor12(anchor) == anchor
+    # and the grid start IS the exact authorized anchor.
     base = _fixture_same_slot(tmp_path)
-    report = compute_report(base, window_start_utc=AUTHORIZED_START)
+    report = compute_report(base, window_start_utc="2026-11-05T00:00:00Z")
     ew = report["evaluation_window"]
-    assert ew["first_slot_utc"] == "2026-11-05T00Z"   # floor12(08:00Z)
+    assert ew["first_slot_utc"] == "2026-11-05T00Z"   # the anchor itself
     assert ew["end_slot_exclusive_utc"] == "2026-11-19T00Z"
     assert ew["grid_slots"] == 28
     assert ew["slots"] == 28
     assert (datetime.strptime("2026-11-19T00Z", "%Y-%m-%dT%HZ")
             - datetime.strptime("2026-11-05T00Z", "%Y-%m-%dT%HZ")) == \
         timedelta(days=14)
+    # a noon anchor: grid [12:00Z, +14d) — 28 slots ending at 12:00Z
+    report_noon = compute_report(base,
+                                 window_start_utc="2026-11-05T12:00:00Z")
+    ewn = report_noon["evaluation_window"]
+    assert ewn["first_slot_utc"] == "2026-11-05T12Z"
+    assert ewn["end_slot_exclusive_utc"] == "2026-11-19T12Z"
+    assert ewn["grid_slots"] == 28
     # midnight overrides keep the EI-STRAT-003 date-window semantics
     # (regression guard; the full penalty scenario lives in
     # test_gate_window.py::test_missing_beginning_penalized_...)
