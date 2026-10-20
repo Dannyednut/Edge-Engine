@@ -143,18 +143,18 @@ async function main() {
         if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
         seen.set(key, Date.now());
         
-        const annualProfit = a.estimatedProfitUsd * (365 / 8);
-        if (annualProfit > 1000) {
+        if (a.estimatedProfitUsd > 10) {
           await alerter.sendAlert({
             id: `khype_${Date.now()}`,
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'hl_lst_arb',
-            title: `[kHYPE] ${a.discountPct.toFixed(2)}% discount = $${annualProfit.toFixed(0)}/yr`,
+            title: `[kHYPE] ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`,
             body: [
-              `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
-              `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
-              `Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(0)}% APR)`,
+              `Gross discount: ${a.grossDiscountPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)})`,
+              `Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+              `Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s`,
+              `Anchor fresh: ${a.anchorFresh}`,
             ].join('\n'),
             channels: ['telegram'],
           }).catch(() => {});
@@ -168,24 +168,9 @@ async function main() {
     try {
       const alerts = await eulerArb.scan();
       for (const a of alerts) {
-        if (a.estimatedProfitUsd < 200) continue;
-        const key = `euler|${a.assetSymbol}`;
-        if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
-        seen.set(key, Date.now());
-        
-        await alerter.sendAlert({
-          id: `euler_${a.assetSymbol}_${Date.now()}`,
-          ts: Date.now(),
-          severity: 'opportunity',
-          strategyId: 'euler_lending_arb',
-          title: `[EULER] ${a.assetSymbol} ${a.spreadPct.toFixed(1)}% spread = $${a.estimatedProfitUsd.toFixed(0)}/yr`,
-          body: [
-            `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}%`,
-            `Borrow: ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}%`,
-            `Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`,
-          ].join('\n'),
-          channels: ['telegram'],
-        }).catch(() => {});
+        // Euler alerts are MONITORING ONLY — do not send as actionable opportunity alerts
+        // (supply APY unavailable, prices unverified, borrowability unconfirmed)
+        if (a.monitoringOnly) continue;
       }
     } catch (e: any) {
       console.warn(`[opp-monitor] Euler scan failed: ${e.message}`);

@@ -124,9 +124,9 @@ async function main() {
     const alerts = await hlLstArb.scan();
     if (alerts.length > 0) {
       const a = alerts[0];
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
       lines.push('--- kHYPE CARRY ARB ---');
-      lines.push(`Discount: ${a.discountPct.toFixed(2)}% = $${annualProfit.toFixed(0)}/yr (${((annualProfit / 5000) * 100).toFixed(0)}% APR)`);
+      lines.push(`Discount: ${a.grossDiscountPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)}, net: ${a.netProfitPct.toFixed(2)}%) = $${a.estimatedProfitUsd.toFixed(0)}`);
+      lines.push(`Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s | Anchor fresh: ${a.anchorFresh}`);
       lines.push('');
     }
   } catch {}
@@ -136,9 +136,9 @@ async function main() {
     const eulerArb = new EulerLendingArbScanner({ minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000 });
     const alerts = await eulerArb.scan();
     if (alerts.length > 0) {
-      lines.push('--- EULER LENDING ARB ---');
+      lines.push('--- EULER LENDING (MONITORING) ---');
       for (const a of alerts.slice(0, 2)) {
-        lines.push(`${a.assetSymbol}: ${a.spreadPct.toFixed(1)}% spread = $${a.estimatedProfitUsd.toFixed(0)}/yr`);
+        lines.push(`${a.assetSymbol}: borrow ${a.depositVault.borrowApyPct.toFixed(1)}% - ${a.borrowVault.borrowApyPct.toFixed(1)}% (monitoring only)`);
       }
       lines.push('');
     }

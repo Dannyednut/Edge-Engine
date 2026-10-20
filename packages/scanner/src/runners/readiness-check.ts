@@ -127,7 +127,7 @@ async function main() {
     checks.push({
       name: 'kHYPE Carry Arb',
       status: a ? 'pass' : 'warn',
-      detail: a ? `${a.discountPct.toFixed(2)}% discount = $${(a.estimatedProfitUsd * 365 / 8).toFixed(0)}/yr` : 'No opportunity',
+      detail: a ? `${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)}) = $${a.estimatedProfitUsd.toFixed(0)}` : 'No opportunity',
     });
   } catch (e: any) {
     checks.push({ name: 'kHYPE Carry Arb', status: 'fail', detail: e.message.slice(0, 50) });
@@ -140,7 +140,7 @@ async function main() {
     checks.push({
       name: 'Euler Lending Arb',
       status: alerts.length > 0 ? 'pass' : 'warn',
-      detail: alerts.length > 0 ? `${alerts.length} opps (top: ${alerts[0].assetSymbol} ${alerts[0].spreadPct.toFixed(1)}%)` : 'No opportunities',
+      detail: alerts.length > 0 ? `${alerts.length} vaults monitored (top: ${alerts[0].assetSymbol} borrow ${alerts[0].depositVault.borrowApyPct.toFixed(1)}% - ${alerts[0].borrowVault.borrowApyPct.toFixed(1)}%)` : 'No vaults',
     });
   } catch (e: any) {
     checks.push({ name: 'Euler Lending Arb', status: 'fail', detail: e.message.slice(0, 50) });

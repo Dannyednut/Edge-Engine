@@ -137,7 +137,7 @@ async function main() {
       ]);
 
       const filteredPerp = perpAlerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
-      const filteredCexHl = cexHlAlerts.filter(a => a.netSpreadApr >= MIN_APR_FOR_ALERT);
+      const filteredCexHl = cexHlAlerts.filter(a => (a.netSpreadApr ?? 0) >= MIN_APR_FOR_ALERT);
 
       console.log(`[scan ${scanCount}] perp_funding: ${filteredPerp.length} opps | cex_hl: ${filteredCexHl.length} opps | ${Date.now() - start}ms`);
 
@@ -213,12 +213,12 @@ async function main() {
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'cex_hl_funding_arb',
-            title: `[CEX-HL] ${a.asset} ${a.netSpreadApr.toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
+            title: `[CEX-HL] ${a.asset} ${(a.netSpreadApr ?? 0).toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
             body: [
               `*Long perp* ${a.cexVenue}  →  *Short perp* Hyperliquid`,
-              `Net spread APR: *${a.netSpreadApr.toFixed(2)}%*`,
+              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%*`,
               `HL funding: ${a.hlFundingApr.toFixed(2)}% APR`,
-              `CEX funding: ${a.cexFundingApr.toFixed(2)}% APR`,
+              `CEX funding: ${(a.cexFundingApr ?? 0).toFixed(2)}% APR`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,

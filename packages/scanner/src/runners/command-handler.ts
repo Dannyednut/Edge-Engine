@@ -337,9 +337,9 @@ async function handleOpportunities(): Promise<string> {
     const khypeAlerts = await hlLstArb.scan();
     if (khypeAlerts.length > 0) {
       const a = khypeAlerts[0];
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
+      const annualProfit = (a.estimatedProfitUsd ?? 0) * (365 / 8);
       lines.push(`#1 kHYPE LST carry arb`);
-      lines.push(`  Discount: ${a.discountPct.toFixed(2)}%  APR: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
+      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  APR: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
       lines.push(`  Est. profit: $${annualProfit.toFixed(0)}/yr on $5k`);
       lines.push('');
     }
@@ -351,13 +351,13 @@ async function handleOpportunities(): Promise<string> {
     const eulerAlerts = await eulerArb.scan();
     for (const a of eulerAlerts.slice(0, 3)) {
       lines.push(`#${lines.filter(l => l.startsWith('#')).length + 1} Euler ${a.assetSymbol} lending arb`);
-      lines.push(`  Spread: ${a.spreadPct.toFixed(2)}%  Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`);
-      lines.push(`  Deposit: ${a.depositVault.apyPct.toFixed(2)}%  Borrow: ${a.borrowVault.apyPct.toFixed(2)}%`);
+      lines.push(`  Spread: ${(a.spreadPct ?? 0).toFixed(2)}%  Profit: $${(a.estimatedProfitUsd ?? 0).toFixed(0)}/yr on $5k`);
+      lines.push(`  Deposit: ${a.depositVault.borrowApyPct.toFixed(2)}%  Borrow: ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
       lines.push('');
     }
 
-    const totalProfit = (khypeAlerts[0] ? khypeAlerts[0].estimatedProfitUsd * (365 / 8) : 0)
-                      + eulerAlerts.slice(0, 3).reduce((s, a) => s + a.estimatedProfitUsd, 0);
+    const totalProfit = (khypeAlerts[0] ? (khypeAlerts[0]?.estimatedProfitUsd ?? 0) * (365 / 8) : 0)
+                      + eulerAlerts.slice(0, 3).reduce((s, a) => s + (a.estimatedProfitUsd ?? 0), 0);
     lines.push(`Total: $${totalProfit.toFixed(0)}/yr on $20k = ${((totalProfit / 20000) * 100).toFixed(1)}% APR`);
 
     return lines.join('\n');
@@ -375,17 +375,17 @@ async function handleKhype(): Promise<string> {
     if (alerts.length === 0) return 'No kHYPE arb opportunity right now.';
 
     const a = alerts[0];
-    const annualProfit = a.estimatedProfitUsd * (365 / 8);
+    const annualProfit = (a.estimatedProfitUsd ?? 0) * (365 / 8);
     return [
       '═══ kHYPE LST Carry Arb ═══',
       '',
-      `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
-      `kHYPE price: ${a.khypePrice.toFixed(6)} WHYPE`,
+      `Discount: ${a.grossDiscountPct.toFixed(2)}% on HyperSwap V3`,
+      `kHYPE price: ${a.marketPrice.toFixed(6)} WHYPE`,
       `Pool liquidity: ${a.poolLiquidity.toString()}`,
       `Fee tier: ${a.feeTier/10000}%`,
       `Flashloan fee: ${a.flashloanFeePct.toFixed(2)}%`,
       '',
-      `Net profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
+      `Net profit per 8-day cycle: $${(a.estimatedProfitUsd ?? 0).toFixed(2)}`,
       `Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(1)}% APR)`,
       '',
       'Execution:',
@@ -411,11 +411,11 @@ async function handleEuler(): Promise<string> {
 
     const lines: string[] = ['═══ Euler HL Lending Arb ═══', ''];
     for (const a of alerts) {
-      lines.push(`${a.assetSymbol}: ${a.spreadPct.toFixed(2)}% spread`);
-      lines.push(`  Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}%`);
-      lines.push(`  Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}%`);
-      lines.push(`  Profit:  $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`);
-      lines.push(`  TVL:     $${(a.totalLiquidityUsd / 1000).toFixed(0)}k combined`);
+      lines.push(`${a.assetSymbol}: ${(a.spreadPct ?? 0).toFixed(2)}% spread`);
+      lines.push(`  Deposit: ${a.depositVault.name} @ ${a.depositVault.borrowApyPct.toFixed(2)}%`);
+      lines.push(`  Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
+      lines.push(`  Profit:  $${(a.estimatedProfitUsd ?? 0).toFixed(0)}/yr on $5k`);
+      lines.push(`  TVL:     $${( (a.totalLiquidityUsd ?? 0) / 1000).toFixed(0)}k combined`);
       lines.push('');
     }
     return lines.join('\n');

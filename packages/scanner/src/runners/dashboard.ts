@@ -77,12 +77,12 @@ async function main() {
       opportunities.push({
         strategy: 'kHYPE LST carry arb',
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.discountPct,
+        spreadPct: a.grossDiscountPct,
         annualizedReturnPct,
         estimatedProfitUsd: annualProfit,
         capitalRequired: 5_000,
         details: [
-          `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3 (fee=${a.feeTier})`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}% on HyperSwap V3 (fee=${a.feeTier})`,
           `Net profit per 8-day cycle: $${profitPerCycle.toFixed(2)}`,
           `Annualized: $${annualProfit.toFixed(0)} (${annualizedReturnPct.toFixed(1)}% APR)`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
@@ -108,16 +108,16 @@ async function main() {
       opportunities.push({
         strategy: 'Euler HL lending arb',
         asset: a.assetSymbol,
-        spreadPct: a.spreadPct,
-        annualizedReturnPct: a.spreadPct * 0.8, // ~80% collateral factor
-        estimatedProfitUsd: a.estimatedProfitUsd,
+        spreadPct: a.spreadPct ?? 0,
+        annualizedReturnPct: (a.spreadPct ?? 0) * 0.8, // ~80% collateral factor
+        estimatedProfitUsd: a.estimatedProfitUsd ?? 0,
         capitalRequired: 5_000,
         details: [
-          `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-          `Spread:  ${a.spreadPct.toFixed(2)}%  Collateral factor: ${a.collateralFactorPct}%`,
-          `Combined liquidity: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
-          `Est. profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k collateral`,
+          `Deposit: ${a.depositVault.name} @ ${a.depositVault.borrowApyPct.toFixed(2)}% APR`,
+          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.borrowApyPct.toFixed(2)}% APR`,
+          `Spread:  ${(a.spreadPct ?? 0).toFixed(2)}%  Collateral factor: ${a.collateralFactorPct}%`,
+          `Combined liquidity: $${((a.totalLiquidityUsd ?? 0) / 1000).toFixed(0)}k`,
+          `Est. profit: $${(a.estimatedProfitUsd ?? 0).toFixed(0)}/yr on $5k collateral`,
         ],
         ts: a.ts,
       });

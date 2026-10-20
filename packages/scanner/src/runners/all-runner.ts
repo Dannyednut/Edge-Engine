@@ -247,8 +247,8 @@ async function main() {
         });
       }
 
-      // Process cex_hl alerts
-      for (const a of cexHlAlerts.filter(a => a.netSpreadApr >= 5).slice(0, 2)) {
+      // Process cex_hl alerts — only send actionable alerts when net carry is verified
+      for (const a of cexHlAlerts.filter(a => a.actionable && (a.netSpreadApr ?? 0) >= 5).slice(0, 2)) {
         const key = `cex_hl|${a.asset}|${a.cexVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
@@ -257,11 +257,12 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: 'cex_hl_funding_arb',
-          title: `[CEX-HL] ${a.asset} ${a.netSpreadApr.toFixed(1)}% APR · ${a.cexVenue}↔HL`,
+          title: `[CEX-HL] ${a.asset} ${a.netSpreadApr!.toFixed(1)}% APR · ${a.cexVenue}↔HL`,
           body: [
-            `Long perp ${a.cexVenue} → Short perp Hyperliquid`,
-            `Net spread APR: ${a.netSpreadApr.toFixed(2)}%`,
-            `HL funding: ${a.hlFundingApr.toFixed(2)}% / CEX funding: ${a.cexFundingApr.toFixed(2)}%`,
+            `Long perp ${a.cexVenue} -> Short perp Hyperliquid`,
+            `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (verified)`,
+            `HL funding: ${a.hlFundingApr.toFixed(2)}% / CEX funding: ${a.cexFundingApr!.toFixed(2)}%`,
+            `Sharpe netApr (third-party): ${a.sharpeNetApr?.toFixed(2) ?? 'n/a'}%`,
             `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
             `VOOI atomic: ${a.vooiExecutable ? 'YES' : 'NO (need direct SDK)'}`,
           ].join('\n'),
@@ -406,7 +407,7 @@ async function main() {
         });
       }
 
-      // Process CexLikeDex price arb alerts
+      // Process CexLikeDex price arb alerts — convergence trades, not instant profit
       for (const a of priceArbAlerts.slice(0, 3)) {
         const key = `pricearb|${a.asset}|${a.longVenue}|${a.shortVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -416,10 +417,14 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: 'cexlike_dex_price_arb',
-          title: `[PRICE] ${a.asset} ${a.priceSpreadPct.toFixed(1)}% spread`,
+          title: `[PRICE-CONVERGENCE] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread`,
           body: [
-            `Long ${a.longVenue} $${a.longPrice} → Short ${a.shortVenue} $${a.shortPrice}`,
-            `Spread: ${a.priceSpreadPct.toFixed(2)}%  Profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+            `CONVERGENCE TRADE: result depends on close-out, fees, funding, margin, time`,
+            `Long ${a.longVenue} $${a.longPrice} -> Short ${a.shortVenue} $${a.shortPrice}`,
+            `Headline: ${a.headlineSpreadPct.toFixed(2)}%  At-size: ${a.atSizeSpreadPct?.toFixed(2) ?? 'n/a'}%  Effective: ${a.effectiveSpreadPct.toFixed(2)}%`,
+            `Funding 1h: ${a.fundingSpread1h !== null ? a.fundingSpread1h.toFixed(4) + '%' : 'UNAVAILABLE'}`,
+            `Est. profit: ${a.estimatedProfitUsd !== null ? '$' + a.estimatedProfitUsd.toFixed(2) : 'UNAVAILABLE (missing economics)'}`,
+            `Economics complete: ${a.economicsComplete}`,
             `Long OI: $${a.longOiUsd.toFixed(0)}  Short OI: $${a.shortOiUsd.toFixed(0)}`,
           ].join('\n'),
           channels: ['telegram'],
@@ -456,13 +461,14 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: 'hl_lst_arb',
-          title: `[HLLST] ${a.pair} ${a.discountPct.toFixed(2)}% discount`,
+          title: `[HLLST] ${a.pair} ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`,
           body: [
-            `kHYPE price: ${a.khypePrice.toFixed(6)} WHYPE  Discount: ${a.discountPct.toFixed(2)}%`,
-            `Net profit: ${a.estimatedProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)} on $5k`,
+            `Market price: ${a.marketPrice.toFixed(6)} kHYPE/WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
+            `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+            `Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s  Anchor fresh: ${a.anchorFresh}`,
             `Fee tier: ${a.feeTier/10000}%  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
             `Liquidity: ${a.poolLiquidity.toString()}`,
-            `Carry arb: buy kHYPE, queue 7-9 day withdrawal, receive HYPE`,
+            `Carry arb: buy kHYPE, queue withdrawal, receive HYPE at anchor rate`,
           ].join('\n'),
           channels: ['telegram'],
         });
@@ -580,15 +586,16 @@ async function main() {
         await alerter.sendAlert({
           id: `eulr_${a.assetSymbol}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'euler_lending_arb',
-          title: `[EULR] ${a.assetSymbol} ${a.spreadPct.toFixed(2)}% spread (Euler HL)`,
+          title: `[EULR-MONITOR] ${a.assetSymbol} borrow ${a.depositVault.borrowApyPct.toFixed(2)}% - ${a.borrowVault.borrowApyPct.toFixed(2)}%`,
           body: [
-            `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-            `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-            `Spread:  ${a.spreadPct.toFixed(2)}%  CF: ${a.collateralFactorPct}%`,
-            `Est. profit: $${a.estimatedProfitUsd.toFixed(2)}/yr on $${5000} collateral`,
-            `Combined liq: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
+            `MONITORING ONLY — supply APY unavailable, cannot compute spread`,
+            `Deposit vault: ${a.depositVault.name} (borrow ${a.depositVault.borrowApyPct.toFixed(2)}%)`,
+            `Borrow vault:  ${a.borrowVault.name} (borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%)`,
+            `Borrowable: ${a.borrowable}  CF: ${a.collateralFactorPct}% (assumed)`,
+            `Supply APY: unavailable | Profit: cannot estimate`,
+            `Combined liq: ${a.totalLiquidityUsd !== null ? '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k' : 'unavailable'}`,
           ].join('\n'),
           channels: ['telegram'],
         });

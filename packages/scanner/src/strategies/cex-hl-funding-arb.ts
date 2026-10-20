@@ -55,16 +55,22 @@ export interface CexHlFundingArbParams {
 
 export interface CexHlFundingAlert {
   asset: string;
-  cexVenue: string;             // 'Binance' / 'OKX' / 'Bybit'
-  hlFundingApr: number;         // annualized HL perp funding %
-  cexFundingApr: number;        // annualized CEX perp funding %
-  netSpreadApr: number;         // hlFundingApr - cexFundingApr (the capture)
+  cexVenue: string;
+  hlFundingApr: number;
+  /** CEX funding APR. null = not independently verified. */
+  cexFundingApr: number | null;
+  /** Net carry. null = unavailable (CEX rate missing). Do not present as actionable. */
+  netSpreadApr: number | null;
   hlOiUsd: number;
   cexOiUsd: number;
-  priceSpreadPct: number;       // from VOOI cross-validation
-  vooiExecutable: boolean;      // can VOOI execute this (both legs as perps)?
+  priceSpreadPct: number;
+  vooiExecutable: boolean;
   confidence: number;
   source: 'sharpe' | 'sharpe+vooi';
+  /** Sharpe's third-party netApr estimate — NOT independently decomposed. */
+  sharpeNetApr: number | null;
+  /** Whether the alert is actionable (requires independently verified net carry). */
+  actionable: boolean;
 }
 
 export class CexHlFundingArbStrategy implements Strategy {
@@ -182,22 +188,38 @@ export class CexHlFundingArbStrategy implements Strategy {
         if (Math.abs(priceSpreadPct) > 1.0) continue;
       }
 
+      // The CEX funding rate is NOT assumed to be 0. If Sharpe provides a
+      // separate CEX funding rate field, use it. Otherwise, mark cexFundingApr
+      // as null and suppress actionable alerts.
+      const sharpeCexRate = (row as any).cexFundingApr ?? (row as any).longFundingApr ?? null;
+      const cexFundingApr: number | null =
+        (typeof sharpeCexRate === 'number' && isFinite(sharpeCexRate)) ? sharpeCexRate : null;
+
+      // Net carry = HL funding - CEX funding. If CEX rate is missing, net carry is unavailable.
+      const netSpreadApr: number | null =
+        cexFundingApr !== null ? netApr - cexFundingApr : null;
+
+      // An alert is only actionable if we have independently verified net carry.
+      const actionable = netSpreadApr !== null && netSpreadApr >= this.params.minNetApr;
+
       alerts.push({
         asset,
         cexVenue,
         hlFundingApr: netApr,
-        cexFundingApr: 0,
-        netSpreadApr: netApr,
+        cexFundingApr,
+        netSpreadApr,
         hlOiUsd: row.shortOiUsd ?? 0,
         cexOiUsd: row.longOiUsd ?? 0,
         priceSpreadPct,
         vooiExecutable,
         confidence,
         source,
+        sharpeNetApr: netApr,
+        actionable,
       });
     }
 
-    alerts.sort((a, b) => b.netSpreadApr - a.netSpreadApr);
+    alerts.sort((a, b) => (b.netSpreadApr ?? -Infinity) - (a.netSpreadApr ?? -Infinity));
     return alerts;
   }
 }

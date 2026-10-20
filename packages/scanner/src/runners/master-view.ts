@@ -140,26 +140,20 @@ async function main() {
     const hlLstArb = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 });
     const alerts = await hlLstArb.scan();
     for (const a of alerts) {
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
-      console.log(`  kHYPE/WHYPE: ${a.discountPct.toFixed(2)}% discount`);
-      console.log(`    Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`);
-      console.log(`    Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(0)}% APR)\n`);
-      totalAnnualUsd += annualProfit;
-      totalCapital += 5000;
+      console.log(`  kHYPE/WHYPE: ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`);
+      console.log(`    Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`);
+      console.log(`    Withdrawal delay: ${a.withdrawalDelaySec ?? 'unknown'}s\n`);
     }
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }
 
   // ── 4. Euler HL Lending Arb ──
-  console.log('── 4. EULER HL LENDING ARB ──\n');
+  console.log('── 4. EULER HL LENDING (MONITORING ONLY) ──\n');
   try {
     const eulerArb = new EulerLendingArbScanner({ minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000 });
     const alerts = await eulerArb.scan();
     for (const a of alerts.slice(0, 3)) {
-      console.log(`  ${a.assetSymbol}: ${a.spreadPct.toFixed(1)}% spread`);
-      console.log(`    Deposit: ${a.depositVault.apyPct.toFixed(2)}%  Borrow: ${a.borrowVault.apyPct.toFixed(2)}%`);
-      console.log(`    Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k\n`);
-      totalAnnualUsd += a.estimatedProfitUsd;
-      totalCapital += 5000;
+      console.log(`  ${a.assetSymbol}: borrow ${a.depositVault.borrowApyPct.toFixed(2)}% - ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
+      console.log(`    Supply APY: unavailable | Borrowable: ${a.borrowable} | Monitoring only\n`);
     }
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }
 

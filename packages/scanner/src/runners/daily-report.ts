@@ -276,18 +276,18 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
     });
     const alerts = await hlLstArb.scan();
     for (const a of alerts) {
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
+      const annualProfit = (a.estimatedProfitUsd ?? 0) * (365 / 8);
       opportunities.push({
         rank: ++rank,
         strategy: 'kHYPE LST carry arb',
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.discountPct,
+        spreadPct: a.grossDiscountPct,
         annualizedReturnPct: (annualProfit / 5000) * 100,
         estimatedProfitUsd: annualProfit,
         capitalRequired: 5000,
         details: [
-          `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
-          `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}% on HyperSwap V3`,
+          `Profit per 8-day cycle: $${(a.estimatedProfitUsd ?? 0).toFixed(2)}`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
           `Execution: buy kHYPE → queue 7-day Kinetiq withdrawal → claim HYPE`,
         ],
@@ -306,14 +306,14 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
         rank: ++rank,
         strategy: 'Euler HL lending arb',
         asset: a.assetSymbol,
-        spreadPct: a.spreadPct,
-        annualizedReturnPct: a.spreadPct * 0.8,
-        estimatedProfitUsd: a.estimatedProfitUsd,
+        spreadPct: a.spreadPct ?? 0,
+        annualizedReturnPct: (a.spreadPct ?? 0) * 0.8,
+        estimatedProfitUsd: (a.estimatedProfitUsd ?? 0),
         capitalRequired: 5000,
         details: [
-          `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-          `Combined liquidity: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
+          `Deposit: ${a.depositVault.name} @ ${a.depositVault.borrowApyPct.toFixed(2)}% APR`,
+          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.borrowApyPct.toFixed(2)}% APR`,
+          `Combined liquidity: $${((a.totalLiquidityUsd ?? 0) / 1000).toFixed(0)}k`,
         ],
       });
     }
@@ -358,7 +358,7 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
         asset: a.lst,
         spreadPct: a.vsKhypeSpreadPct,
         annualizedReturnPct: a.annualizedReturnPct,
-        estimatedProfitUsd: a.estimatedProfitUsd * (365 / a.daysToMaturity),
+        estimatedProfitUsd: (a.estimatedProfitUsd ?? 0) * (365 / a.daysToMaturity),
         capitalRequired: 5000,
         details: [
           `PT: ${a.lst}  Maturity: ${a.expiry} (${a.daysToMaturity.toFixed(0)}d)`,
@@ -448,7 +448,7 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
   } catch (e: any) { console.log(`  ⚠ VOOI scan failed: ${e.message}`); }
 
   // Sort by estimated annual profit (highest first)
-  opportunities.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
+  opportunities.sort((a, b) => b.estimatedProfitUsd - (a.estimatedProfitUsd ?? 0));
   // Re-rank
   opportunities.forEach((o, i) => o.rank = i + 1);
 

@@ -1,36 +1,39 @@
 /**
  * HlLstArbScanner — kHYPE/WHYPE LST carry arbitrage on HyperSwap V3.
  *
- * THE EDGE:
- *   kHYPE (Kinetiq liquid staked HYPE) trades at a discount to WHYPE on HyperSwap V3.
- *   Verified live Oct 8 2026: 1 WHYPE = 0.9754 kHYPE → kHYPE at 2.46% discount.
+ * FAIR-VALUE MODEL (corrected EM-STRAT-003):
+ *   The discount is NOT measured against an assumed 1:1 WHYPE ratio.
+ *   The Kinetiq kHYPE-to-HYPE exchange rate (from Accountant.kHYPEToHYPE(1e18))
+ *   is the authoritative redemption anchor. If 1 kHYPE redeems for R HYPE,
+ *   the fair market price of kHYPE in WHYPE is R. Any market price below R
+ *   is a true discount; above R is a premium.
  *
- * REDEMPTION MECHANISM (verified from Kinetiq FAQ Oct 9 2026):
- *   Route 1: Queue native withdrawal → burns kHYPE, returns HYPE after 7-9 day delay, less small fee
- *   Route 2: Swap kHYPE → HYPE on HyperSwap (instant, market price)
- *   NOT instant redemption. This is a CARRY ARB, not atomic.
+ *   The scanner fetches the exchange rate anchor from the on-chain
+ *   Accountant contract. If the anchor is unavailable or stale, the
+ *   scanner fails closed and does NOT report an actionable discount.
  *
- * TRADE STRUCTURE (carry arb, 7-9 day capital lock):
- *   1. Buy kHYPE on HyperSwap V3 (0.01% fee pool) at 2.46% discount
- *   2. Queue native withdrawal from Kinetiq (7-9 day delay)
- *   3. Receive HYPE after 7-9 days at ~1:1 rate + staking rewards
- *   4. Net profit: ~2% on capital per 8-day cycle = ~91% APR annualized
- *
- * WHY THE DISCOUNT EXISTS:
- *   - kHYPE has 7-9 day withdrawal delay → liquidity discount
- *   - HL DeFi is new, few arb bots are monitoring it
- *   - kHYPE exchange rate only goes UP (validator rewards accrue) → no downside risk
+ * REDEMPTION MECHANISM:
+ *   Queue native withdrawal -> burns kHYPE, returns HYPE after delay, less fee.
+ *   This is a CARRY ARB, not atomic. Capital is locked for the withdrawal period.
  *
  * RISKS:
  *   - Kinetiq smart contract risk (validator / slashing risk)
- *   - kHYPE exchange rate is not guaranteed (but has only increased since launch)
- *   - Capital locked 7-9 days per cycle
+ *   - Capital locked during withdrawal delay
  *   - HyperSwap V3 pool liquidity may be insufficient for large trades
- *   - kHYPE discount could widen (increases edge) or narrow (reduces edge)
+ *   - Discount could widen or narrow
+ *   - Exchange rate anchor could become stale between scans
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { HYPERSWAP_V3_POOLS, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman, HYPERLEND_FLASHLOAN_FEE } from '../lib/hyperliquid-defi.js';
+
+// Kinetiq Accountant contract — kHYPEToHYPE(uint256) selector = 0x759bc2fc
+const ACCOUNTANT_ADDR = '0x9209648Ec9D448EF57116B73A2f081835643dc7A';
+const KHYPE_TO_HYPE_SELECTOR = '0x759bc2fc';
+const ONE_E18 = 10n ** 18n;
+
+// Stale data threshold (5 minutes)
+const ANCHOR_STALENESS_MS = 5 * 60 * 1000;
 
 export interface HlLstArbParams {
   /** Min discount % to fire alert (default 0.5%) */
@@ -45,13 +48,25 @@ export interface HlLstArbAlert {
   pair: string;
   poolAddress: string;
   feeTier: number;
-  khypePrice: number;        // kHYPE price in WHYPE (should be ~1.0 if peg holds)
-  discountPct: number;       // how much kHYPE is below WHYPE
-  poolLiquidity: bigint;
-  estimatedProfitPct: number;  // discount - flashloan_fee - amm_fee
+  /** Market price of kHYPE in WHYPE (from pool slot0). */
+  marketPrice: number;
+  /** Redemption anchor: kHYPE-to-HYPE exchange rate from Accountant. */
+  redemptionAnchor: number;
+  /** Gross discount: (anchor - marketPrice) / anchor * 100. Positive = kHYPE below fair value. */
+  grossDiscountPct: number;
+  /** Net-of-cost threshold: gross discount - AMM fee - flashloan fee. */
+  netProfitPct: number;
+  /** Estimated profit in USD on max position size. */
   estimatedProfitUsd: number;
   flashloanFeePct: number;
   ammFeePct: number;
+  poolLiquidity: bigint;
+  /** Withdrawal delay in seconds (from Kinetiq StakingManager). */
+  withdrawalDelaySec: number | null;
+  /** Timestamp of the exchange-rate anchor fetch. */
+  anchorTs: number | null;
+  /** Whether the anchor is fresh (within staleness threshold). */
+  anchorFresh: boolean;
   executable: boolean;
   ts: number;
 }
@@ -75,10 +90,78 @@ export class HlLstArbScanner implements Strategy {
     };
   }
 
+  /**
+   * Fetch the kHYPE-to-HYPE exchange rate from the Kinetiq Accountant.
+   * Returns the rate as a human-readable number (e.g., 1.0265 means 1 kHYPE = 1.0265 HYPE).
+   * Returns null if the fetch fails or the result is invalid.
+   */
+  async fetchRedemptionAnchor(): Promise<{ rate: number; ts: number } | null> {
+    try {
+      const res = await fetch(HYPEREVM_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', method: 'eth_call',
+          params: [{ to: ACCOUNTANT_ADDR, data: KHYPE_TO_HYPE_SELECTOR + ONE_E18.toString(16).padStart(64, '0') }, 'latest'], id: 1,
+        }),
+      });
+      const json = await res.json() as { result?: string };
+      const result = json.result;
+      if (!result || result === '0x' || result.length < 66) return null;
+      const rawRate = BigInt('0x' + result.slice(2, 66));
+      if (rawRate <= 0n) return null;
+      const rate = Number(rawRate) / Number(ONE_E18);
+      if (!isFinite(rate) || rate <= 0) return null;
+      return { rate, ts: Date.now() };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fetch the withdrawal delay from the Kinetiq StakingManager.
+   * Selector: withdrawalDelay() = 0x5e8a8c20
+   * Returns seconds, or null if unavailable.
+   */
+  async fetchWithdrawalDelay(): Promise<number | null> {
+    try {
+      const STAKING_MANAGER = '0x393D0B87Ed38fc779FD9611144aE649BA6082109';
+      const res = await fetch(HYPEREVM_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', method: 'eth_call',
+          params: [{ to: STAKING_MANAGER, data: '0x5e8a8c20' }, 'latest'], id: 1,
+        }),
+      });
+      const json = await res.json() as { result?: string };
+      const result = json.result;
+      if (!result || result === '0x' || result.length < 66) return null;
+      return parseInt(result.slice(2, 66), 16);
+    } catch {
+      return null;
+    }
+  }
+
   async scan(): Promise<HlLstArbAlert[]> {
     const alerts: HlLstArbAlert[] = [];
 
-    // Find all WHYPE/kHYPE V3 pools
+    // 1. Fetch the redemption anchor (kHYPE-to-HYPE exchange rate)
+    const anchor = await this.fetchRedemptionAnchor();
+    if (!anchor) {
+      // Fail closed: no anchor = no actionable discount
+      return [];
+    }
+    const anchorFresh = (Date.now() - anchor.ts) < ANCHOR_STALENESS_MS;
+    if (!anchorFresh) {
+      // Fail closed: stale anchor
+      return [];
+    }
+
+    // 2. Fetch withdrawal delay
+    const withdrawalDelaySec = await this.fetchWithdrawalDelay();
+
+    // 3. Find WHYPE/kHYPE V3 pools and compute discount vs anchor
     const khypePools = HYPERSWAP_V3_POOLS.filter(p => p.pair === 'WHYPE/kHYPE');
 
     for (const pool of khypePools) {
@@ -99,14 +182,34 @@ export class HlLstArbScanner implements Strategy {
         const sqrtPriceX96 = BigInt('0x' + slot0Result.slice(2, 66));
         const dec0 = HL_TOKEN_DECIMALS['WHYPE'] ?? 18;
         const dec1 = HL_TOKEN_DECIMALS['kHYPE'] ?? 18;
-        const price = v3PriceToHuman(sqrtPriceX96, dec0, dec1);
+        const marketPrice = v3PriceToHuman(sqrtPriceX96, dec0, dec1);
 
-        // price = kHYPE per WHYPE. If < 1, kHYPE is at discount
-        if (price <= 0 || price > 2) continue;  // sanity check
+        // marketPrice = kHYPE per WHYPE (pool's price representation).
+        // The redemption anchor tells us 1 kHYPE = anchor.rate HYPE.
+        // Fair price of kHYPE in WHYPE = 1 / anchor.rate (since WHYPE ~= HYPE 1:1).
+        // If marketPrice < (1 / anchor.rate), kHYPE is at a discount.
+        //
+        // Actually, let's think carefully:
+        // - Pool price gives us: how many kHYPE per 1 WHYPE
+        // - If pool says 1 WHYPE = 1.03 kHYPE, that means kHYPE is cheaper
+        // - The fair value: 1 WHYPE should = 1/anchor.rate kHYPE
+        //   (because 1 kHYPE redeems for anchor.rate HYPE, so 1/anchor.rate kHYPE = 1 HYPE = 1 WHYPE)
+        // - Discount = (fairKHypePerWHYPE - marketKHypePerWHYPE) / fairKHypePerWHYPE * 100
+        //   where fairKHypePerWHYPE = 1 / anchor.rate
+        //
+        // But we need to be careful about price direction. Let's compute:
+        // - fairPrice = 1 / anchor.rate (kHYPE per WHYPE at fair value)
+        // - If marketPrice > fairPrice, kHYPE is CHEAPER (more kHYPE per WHYPE) = discount
+        // - grossDiscountPct = (marketPrice - fairPrice) / fairPrice * 100
 
-        const discountPct = (1 - price) * 100;  // positive = kHYPE cheaper
+        const fairPrice = 1 / anchor.rate; // kHYPE per WHYPE at redemption value
+        if (marketPrice <= 0 || marketPrice > 2 * fairPrice) continue; // sanity check
 
-        if (discountPct < this.params.minDiscountPct) continue;
+        // Discount = (marketPrice - fairPrice) / fairPrice * 100
+        // Positive = kHYPE trades below redemption value (buy kHYPE cheap)
+        const grossDiscountPct = ((marketPrice - fairPrice) / fairPrice) * 100;
+
+        if (grossDiscountPct < this.params.minDiscountPct) continue;
 
         // Get liquidity
         const liqRes = await fetch(HYPEREVM_RPC, {
@@ -123,27 +226,31 @@ export class HlLstArbScanner implements Strategy {
 
         if (liquidity === 0n) continue;
 
-        // Compute profit
-        const ammFeePct = (pool.fee / 10000) * 100;  // fee in bps → %
-        const flashloanFeePct = HYPERLEND_FLASHLOAN_FEE * 100;  // 0.04%
-        const estimatedProfitPct = discountPct - ammFeePct - flashloanFeePct;
+        // Compute net profit after costs
+        const ammFeePct = (pool.fee / 10000) * 100;
+        const flashloanFeePct = HYPERLEND_FLASHLOAN_FEE * 100;
+        const netProfitPct = grossDiscountPct - ammFeePct - flashloanFeePct;
 
-        if (estimatedProfitPct <= 0) continue;
+        if (netProfitPct <= 0) continue;
 
-        const estimatedProfitUsd = (estimatedProfitPct / 100) * this.params.maxSizeUsd;
+        const estimatedProfitUsd = (netProfitPct / 100) * this.params.maxSizeUsd;
 
         alerts.push({
           pair: 'WHYPE/kHYPE',
           poolAddress: pool.address,
           feeTier: pool.fee,
-          khypePrice: price,
-          discountPct,
-          poolLiquidity: liquidity,
-          estimatedProfitPct,
+          marketPrice,
+          redemptionAnchor: anchor.rate,
+          grossDiscountPct,
+          netProfitPct,
           estimatedProfitUsd,
           flashloanFeePct,
           ammFeePct,
-          executable: false,  // needs flashloan executor + kHYPE redemption check
+          poolLiquidity: liquidity,
+          withdrawalDelaySec,
+          anchorTs: anchor.ts,
+          anchorFresh,
+          executable: false,
           ts: Date.now(),
         });
       } catch {
@@ -151,7 +258,6 @@ export class HlLstArbScanner implements Strategy {
       }
     }
 
-    // Sort by profit (best discount first)
     alerts.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
     return alerts;
   }
