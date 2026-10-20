@@ -50,8 +50,9 @@ evidence/funding-carry/
 │   ├── store.py               JSONL persistence, manifests, hashing, verify
 │   ├── pairing.py             derived HL-vs-CEX net-APR estimates (pairs.jsonl)
 │   ├── stats.py               window metrics + pre-registered gate verdict engine
-│   └── cli.py                 collect / stats / verify (exit codes 0/1/2/3)
-├── tests/                     51 offline tests (fixtures = bounded real payloads)
+│   ├── fees.py                NON-GATE fee sensitivity sidecar (never a verdict)
+│   └── cli.py                 collect / stats / verify / fees (exit codes 0/1/2/3)
+├── tests/                     75 offline tests (fixtures = bounded real payloads)
 └── data/                      runtime only (gitignored): runs/<run_id>/…
 ```
 
@@ -136,10 +137,27 @@ EI-STRAT-002 instruction):
 Definitions fixed before observations begin (`config.GATE_CONFIG`, embedded in every
 run manifest): eligible day = UTC day with ≥1 complete paired observation; day is
 positive when its median net APR > 0; persistence = positive_days/eligible_days;
-sign-flips = sign changes of consecutive daily medians (zeros excluded);
-completeness = complete 12h slots / (days_spanned × 2). **Threshold immutability**:
-`gate_config_sha256` is embedded in every manifest; `stats` refuses to produce a report
-(exit 3) if any run was collected under a different gate hash.
+sign-flips = sign changes of consecutive daily medians (zeros excluded).
+
+**Completeness denominator (EI-STRAT-003 audit):** the denominator is ALWAYS the
+fixed pre-registered window size — 14 days × 2 slots/day = **28 slots** — anchored at
+the series start (earliest run timestamp, or the authorized start pinned via
+`stats --window-start`). It is never derived from the observed date span, so
+unobserved periods can never disappear from the denominator: the single-slot initial
+sample is 1/28 = 3.6% (the pre-audit implementation computed 1/2 = 50% for the same
+sample — fixed and regression-tested). The observed span is reported separately as a
+diagnostic only.
+
+**Three-major coverage condition (EI-STRAT-003):** a major (BTC/ETH/SOL) counts as
+adequately covered when it has ≥ ceil(0.85 × 28) = **24 complete paired slots** inside
+the evaluation window (the same 85% bar the per-asset gate applies). With fewer than
+three adequate majors, the OVERALL verdict is **UNRESOLVED** — never PASS, never
+BETWEEN_THRESHOLDS, and not FAIL either (per-asset diagnostics remain in `per_asset`).
+
+**Threshold immutability**: `gate_config_sha256` is embedded in every manifest; `stats`
+refuses to produce a report (exit 3) if any run was collected under a different gate
+hash. GATE_CONFIG was NOT modified by the EI-STRAT-003 audit (byte-identity is pinned
+by a test against the pre-registered hash).
 
 The fee band (0.10–0.20% round trip, 4 taker legs) is EI-STRAT-001's pre-registered
 number. Slippage is not modeled as a constant: it is **observed** as VOOI at-size
@@ -147,6 +165,19 @@ spread context where available, and every assumption that IS made (fee tier, hol
 period for the non-gate amortized sensitivity) is labeled as an assumption in code and
 in every report. Funding-sign changes are measured, not assumed away (HYPE Sep-28
 precedent from the repo's own strategy comments).
+
+**Fee methodology (EI-STRAT-003 audit — gate unchanged):** the pre-registered metric
+subtracts the one-time 0.20% round trip directly from the annualized funding APR, i.e.
+it prices exactly ONE round trip per year. That makes it a **screening proxy**, not
+realizable net APR: the realizable annualized fee drag scales with turnover as
+`round_trip_fee × (365 / holding_days)` — 73.0%/yr at a 1-day hold, 10.43%/yr at
+7 days, 5.21%/yr at 14 days, 2.43%/yr at 30 days. This is exposed as a clearly labeled,
+**non-gate** sidecar (`python -m funding_harness fees [--report <gate-report.json>]`,
+`funding_harness/fees.py`): it never produces or modifies a verdict, never touches
+GATE_CONFIG, and its assumptions are stated in code and in its output. Any proposal to
+change the gate metric itself goes to the Instructor for explicit approval BEFORE
+implementation (it would change `gate_config_sha256` and require an explicit
+manifest-migration decision) — no such change is implemented here.
 
 ## 6. Failure model (why the numbers can be trusted)
 
@@ -170,6 +201,11 @@ precedent from the repo's own strategy comments).
 
 - No cron job, scheduled GitHub Action, daemon, persistent process, or automatic
   schedule (explicitly reserved for separate approval).
+- The only CI presence is `.github/workflows/evidence-funding-carry-tests.yml`
+  (EI-STRAT-003): a narrowly scoped OFFLINE job that runs the harness pytest suite
+  with the mocked transport and `FUNDING_HARNESS_OFFLINE=1` (any real network attempt
+  raises at the transport layer). It has no schedule trigger, never calls `collect`,
+  requires no credentials, and starts no background process.
 - Does not run the paper trader, start scanner daemons, touch V1/V2 state or logs.
 - No blockchain RPC/forks, no wallets/keys, no credentials, no paid services.
 - Does not modify any existing file or observation anywhere; writes only under
@@ -184,9 +220,10 @@ precedent from the repo's own strategy comments).
 |---|---|
 | Manually invoked read-only Python tool, free public sources, no credentials | `cli.py` (single-shot invocations); stdlib-only runtime |
 | New dedicated evidence path, no modification of existing data | `evidence/funding-carry/data/` (new; per-run dirs; append-only) |
-| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (51 tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper) |
+| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (75 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard) |
 | Fail closed, mark gaps, never manufacture rows | `models.validate_observation`, gap-row design, exit-code contract |
 | Runbook for twice-daily collection, append semantics, hash/consistency checks, derived stats | `RUNBOOK.md` + `store.verify` + `stats` |
 | No cron/GHA/daemon/daemon-like scheduling | none exists; runbook states the prohibition |
 | ≥14 days × 2/day, ≥85% completeness, CEX leg on ≥3 majors, honest gap reporting | `stats.py` gate engine (UNRESOLVED path unit-tested) |
+| EI-STRAT-003: fixed 28-slot completeness denominator · three-major overall condition · non-gate fee sensitivity sidecar · offline CI job | `stats.py` (fixed window + majors gate) · `fees.py` + `fees` CLI · `tests/test_gate_window.py` / `test_gate_majors.py` / `test_fees_sidecar.py` / `test_offline_guard.py` · `.github/workflows/evidence-funding-carry-tests.yml` |
 | Pre-registered gate thresholds unchanged | `GATE_CONFIG` + `gate_config_sha256` drift lock (exit 3) |

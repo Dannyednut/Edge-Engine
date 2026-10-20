@@ -95,6 +95,20 @@ python3 -m funding_harness stats
   coverage = UNRESOLVED. Do not edit `config.GATE_CONFIG`. If the Instructor ever
   approves a threshold change, that is a new decision recorded BEFORE the next
   collection — never retroactively.**
+- **Completeness denominator (EI-STRAT-003):** reported completeness always uses the
+  fixed pre-registered denominator of **28 slots** (14 days × 2/day) anchored at the
+  series start — never the observed span. A partially observed window therefore reads
+  as partially complete (the first single slot = 1/28 = 3.6%); unobserved periods can
+  never disappear from the denominator. If the Instructor authorizes an official
+  series start date, pass `stats --window-start <UTC>` so the anchor is pinned rather
+  than inferred.
+- **Overall verdict requires three adequately covered majors:** BTC, ETH and SOL each
+  need ≥ 24 complete paired slots inside the window (the 85% bar); with fewer, the
+  overall verdict is UNRESOLVED regardless of the per-asset numbers.
+- **Fee context (non-gate):** `python3 -m funding_harness fees` prints the labeled
+  sensitivity sidecar (one-time 0.20% round trip amortized over 1/7/14/30-day holds).
+  It never affects the gate verdict; the pre-registered metric remains a screening
+  proxy that prices exactly one round trip per year.
 
 ## 5. Periodic duties (weekly is enough)
 
