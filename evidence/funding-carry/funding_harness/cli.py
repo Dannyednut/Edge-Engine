@@ -1,10 +1,11 @@
-"""Manual CLI: python -m funding_harness <collect|stats|verify>
+"""Manual CLI: python -m funding_harness <collect|stats|verify|fees>
 
 No scheduler, no daemon, no cron — every action is a single explicitly
 invoked process that exits when done. Exit codes:
   collect: 0 complete (no gaps) · 1 recorded with gaps · 2 hard failure
   stats:   0 verdict computed (PASS/FAIL/BETWEEN) · 1 UNRESOLVED
   verify:  0 consistent · 1 inconsistencies found
+  fees:    0 always (NON-GATE sensitivity sidecar; never a verdict)
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ def cmd_collect(args) -> int:
 
 def cmd_stats(args) -> int:
     base = _base_dir(args)
-    report = compute_report(base, window_days=args.window_days)
+    report = compute_report(base, window_days=args.window_days,
+                            window_start_utc=args.window_start)
     path = write_report(base, report)
     print(f"verdict={report['verdict']}")
     for r in report.get("verdict_reasons", []):
@@ -63,6 +65,26 @@ def cmd_verify(args) -> int:
     return 0 if report["ok"] else 1
 
 
+def cmd_fees(args) -> int:
+    """NON-GATE fee sensitivity sidecar. Reads no network, no credentials;
+    never touches GATE_CONFIG or any verdict. Exit code always 0."""
+    from . import fees
+    holding = tuple(
+        float(x) for x in str(args.holding_days).split(",") if x.strip())
+    if args.report:
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+        out = fees.apply_to_gate_report(report, holding_days=holding)
+    else:
+        out = fees.sensitivity_table(holding_days=holding)
+    text = json.dumps(out, indent=2)
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+        print(f"fee-sensitivity sidecar written (non-gate): {args.out}")
+    else:
+        print(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m funding_harness",
@@ -80,8 +102,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("stats", help="compute derived statistics + pre-registered "
                        "gate verdict across all recorded runs")
-    s.add_argument("--window-days", type=int, default=14)
+    s.add_argument("--window-days", type=int, default=14,
+                   help="DIAGNOSTIC ONLY — the gate window is fixed at 14 "
+                        "days by GATE_CONFIG and never changes")
+    s.add_argument("--window-start", default=None,
+                   help="pin the authorized series start (UTC, "
+                        "YYYY-MM-DDTHH:MM:SSZ); default anchors at the "
+                        "earliest run timestamp")
     s.set_defaults(func=cmd_stats)
+
+    f = sub.add_parser("fees", help="NON-GATE fee sensitivity sidecar: "
+                       "one-time round-trip fee amortized over illustrative "
+                       "holding periods (never a verdict, never gate input)")
+    f.add_argument("--holding-days", default="1,7,14,30",
+                   help="comma-separated illustrative holding periods in days")
+    f.add_argument("--report", default=None,
+                   help="optional gate-report JSON to attach per-asset "
+                        "turnover-aware context (read-only)")
+    f.add_argument("--out", default=None,
+                   help="optional output path (default: stdout)")
+    f.set_defaults(func=cmd_fees)
 
     v = sub.add_parser("verify", help="consistency/hash checks across all runs")
     v.set_defaults(func=cmd_verify)

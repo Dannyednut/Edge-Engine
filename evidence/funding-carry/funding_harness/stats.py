@@ -8,8 +8,21 @@ EI-STRAT-001 §4.2 gate metrics and returns a verdict:
   BETWEEN_THRESHOLDS  coverage adequate but median sits between 1.5% and 3%
             with <= 2 flips (the pre-registered gate defines neither pass nor
             fail here; decision returned to the Instructor)
-  UNRESOLVED  coverage insufficient (window < 14d, completeness < 85%, or
-            CEX-leg coverage < 3 assets) — never reported as a pass
+  UNRESOLVED  coverage insufficient — evaluation window not fully elapsed
+            (< 14 consecutive days), completeness < 85%, fewer than 3 majors
+            with adequate CEX-leg coverage, or no paired series — never
+            reported as a pass
+
+Completeness basis (EI-STRAT-003 methodology audit): the denominator is
+ALWAYS the fixed pre-registered window size (14 days x 2 slots/day = 28
+slots), anchored at the series start — never the observed date span — so
+unobserved periods can never disappear from the denominator. A single-slot
+initial sample is 1/28 = 3.6%, not 1/2 = 50%. The observed span is reported
+separately as a diagnostic only.
+
+Overall verdict precedence (EI-STRAT-003): fewer than 3 majors with adequate
+CEX-leg coverage => UNRESOLVED before any PASS/FAIL/BETWEEN mapping (per-
+asset diagnostics remain visible in per_asset).
 
 Threshold immutability: every run manifest embeds gate_config_sha256; if any
 run (or this module) disagrees with the pre-registered hash, stats refuses to
@@ -19,7 +32,8 @@ thresholds.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import math
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from typing import Optional
@@ -37,6 +51,40 @@ VERDICT_UNRESOLVED = "UNRESOLVED"
 
 def _parse_ts(ts: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def preregistered_window_slots(g: dict) -> int:
+    """Fixed completeness denominator: window_days_min x samples_per_day = 28.
+
+    EI-STRAT-003 audit fix: the denominator is the pre-registered window size
+    and is NEVER derived from the observed date span, so unobserved periods
+    always stay in the denominator (a single-slot initial sample is 1/28 =
+    3.6%, not 1/2 = 50%).
+    """
+    return int(g["window_days_min"]) * int(g["samples_per_day"])
+
+
+def _window_anchor(runs: list[dict], override: Optional[str]) -> Optional[str]:
+    """UTC date ('YYYY-MM-DD') the pre-registered 14-day window starts on.
+
+    Default anchor: the earliest run timestamp (manifest started_utc, with
+    fallbacks to the run's first pair / observation). An explicit override
+    (CLI --window-start) pins the Instructor-authorized series start; slots
+    before the anchor are excluded from metrics and the missing slots count
+    against completeness (missing-beginning coverage cannot hide).
+    """
+    if override:
+        return _parse_ts(override).strftime("%Y-%m-%d")
+    candidates = []
+    for rec in runs:
+        ts = (rec.get("manifest") or {}).get("started_utc")
+        if not ts and rec["pairs"]:
+            ts = rec["pairs"][0].get("collected_at_utc")
+        if not ts and rec["observations"]:
+            ts = rec["observations"][0].get("collected_at_utc")
+        if ts:
+            candidates.append(_parse_ts(ts).strftime("%Y-%m-%d"))
+    return min(candidates) if candidates else None
 
 
 def load_runs(base_dir: Path) -> list[dict]:
@@ -88,7 +136,15 @@ def check_gate_drift(runs: list[dict]) -> None:
                 "altered thresholds")
 
 
-def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
+def compute_report(base_dir: Path, *, window_days: int = 14,
+                   window_start_utc: Optional[str] = None) -> dict:
+    """Compute the gate report over the FIXED pre-registered 14-day window.
+
+    ``window_days`` is diagnostic only (reported as window_requested_days);
+    the gate window length is fixed by GATE_CONFIG and never changes.
+    ``window_start_utc`` optionally pins the authorized series start (UTC);
+    by default the window anchors at the earliest run timestamp.
+    """
     runs = load_runs(base_dir)
     check_gate_drift(runs)
     g = config.GATE_CONFIG
@@ -111,14 +167,33 @@ def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
                        "verdict_reasons": ["no collection runs exist yet"]})
         return report
 
+    # ---- pre-registered evaluation window (fixed; EI-STRAT-003 audit) ----
+    # Denominator is FIXED at window_days_min x samples_per_day = 28 slots;
+    # it never derives from the observed date span.
+    window_slots = preregistered_window_slots(g)
+    gate_window_days = int(g["window_days_min"])
+    anchor_date = _window_anchor(runs, window_start_utc)
+    if anchor_date is None:
+        report.update({"verdict": VERDICT_UNRESOLVED,
+                       "verdict_reasons": ["cannot determine the window "
+                                           "anchor: no run timestamps"]})
+        return report
+    window_end_exclusive = (date.fromisoformat(anchor_date)
+                            + timedelta(days=gate_window_days)).isoformat()
+
     # ---- per-asset gate metrics ------------------------------------------
     per_asset = {}
     for asset in sorted({p["asset"] for p in all_pairs}):
         asset_pairs = [p for p in all_pairs if p["asset"] == asset]
         primary = [p for p in asset_pairs if p.get("primary_cex_leg")]
-        slots = dedupe_slots([(iso_to_utc_slot12(p["collected_at_utc"]),
-                               p["net_apr_pre_registered"],
-                               p["collected_at_utc"]) for p in primary])
+        slots_all = dedupe_slots([(iso_to_utc_slot12(p["collected_at_utc"]),
+                                   p["net_apr_pre_registered"],
+                                   p["collected_at_utc"]) for p in primary])
+        # metrics use only slots inside the fixed evaluation window; slots
+        # outside are reported separately (never silently dropped or merged)
+        slots = [(s, v) for s, v in slots_all
+                 if anchor_date <= s[:10] < window_end_exclusive]
+        slots_outside = len(slots_all) - len(slots)
         days: dict[str, list[float]] = {}
         for slot, net in slots:
             days.setdefault(iso_date(slot), []).append(net)
@@ -139,12 +214,17 @@ def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
                 flips += 1
             last_nonzero = s
 
+        # Diagnostics only (legacy 'window_days_spanned' kept for report
+        # continuity; NEITHER value feeds the completeness denominator):
         window_days_spanned = 0
-        if eligible_days:
-            d0 = datetime.strptime(eligible_days[0], "%Y-%m-%d").date()
-            d1 = datetime.strptime(eligible_days[-1], "%Y-%m-%d").date()
+        window_days_elapsed = 0
+        if slots_all:
+            observed_days = sorted({s[:10] for s, _ in slots_all})
+            d0 = datetime.strptime(observed_days[0], "%Y-%m-%d").date()
+            d1 = datetime.strptime(observed_days[-1], "%Y-%m-%d").date()
             window_days_spanned = (d1 - d0).days + 1
-        expected_slots = max(window_days_spanned, 1) * g["samples_per_day"]
+            window_days_elapsed = (d1 - date.fromisoformat(anchor_date)).days + 1
+        expected_slots = window_slots            # FIXED 28 — EI-STRAT-003
         completeness = len(slots) / expected_slots if expected_slots else 0.0
 
         cex_legs = sorted({p["long_venue"] for p in primary}) or \
@@ -167,14 +247,21 @@ def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
             if daily_medians else None
 
         verdict, reasons = _verdict_for(
-            window_days_spanned, completeness, len(eligible_days),
+            window_days_elapsed, completeness, len(eligible_days),
             measured_median, persistence, flips, bool(cex_legs), g)
 
         per_asset[asset] = {
             "window_days_spanned": window_days_spanned,
+            "window_days_elapsed": window_days_elapsed,
+            "window_start_utc": anchor_date,
+            "window_end_utc_exclusive": window_end_exclusive,
+            "n_slots_observed_total": len(slots_all),
+            "slots_outside_evaluation_window": slots_outside,
             "eligible_days": eligible_days,
             "n_slots_with_complete_pair": len(slots),
             "expected_slots": expected_slots,
+            "completeness_denominator_slots": window_slots,
+            "completeness_basis": "fixed_preregistered_window_eistrat003",
             "sample_completeness": round(completeness, 4),
             "daily_median_net_apr_pre_registered": {
                 d: round(v, 6) for d, v in daily_medians.items()},
@@ -215,6 +302,14 @@ def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
     report.update({
         "n_runs": len(runs),
         "window_requested_days": window_days,
+        "evaluation_window": {
+            "anchor_utc": anchor_date,
+            "end_utc_exclusive": window_end_exclusive,
+            "days": gate_window_days,
+            "slots": window_slots,
+            "denominator_basis": "fixed_preregistered_window (EI-STRAT-003)",
+            "window_start_override": bool(window_start_utc),
+        },
         "per_asset": per_asset,
         "gaps_summary": gap_summary,
         "source_dates_with_complete_observations": {
@@ -223,15 +318,46 @@ def compute_report(base_dir: Path, *, window_days: int = 14) -> dict:
     })
 
     # ---- overall verdict --------------------------------------------------
-    assets_with_cex = sum(
-        1 for a in per_asset.values() if a["cex_leg_venues_observed"])
+    # EI-STRAT-003: enforce the pre-registered three-major coverage condition
+    # BEFORE any PASS/FAIL/BETWEEN mapping. A major is 'adequately covered'
+    # when it has >= ceil(min_sample_completeness x window_slots) complete
+    # HL-vs-CEX paired slots inside the evaluation window (the same 85% bar
+    # the per-asset gate applies). With fewer than the required majors, the
+    # pre-registered metric is not computable as a decision => UNRESOLVED
+    # (never PASS, never BETWEEN_THRESHOLDS, and not FAIL either — per-asset
+    # diagnostics remain visible in per_asset).
+    min_adequate_slots = math.ceil(
+        g["min_sample_completeness"] * window_slots)
+    major_detail = {a: per_asset[a]["n_slots_with_complete_pair"]
+                    for a in config.ASSETS if a in per_asset}
+    adequate_majors = [a for a in config.ASSETS
+                       if major_detail.get(a, 0) >= min_adequate_slots]
+    report["majors_coverage"] = {
+        "required_majors": g["min_assets_with_cex_leg"],
+        "min_complete_pair_slots_per_major": min_adequate_slots,
+        "adequate_majors": adequate_majors,
+        "major_complete_pair_slots": major_detail,
+        "definition": (
+            "a major counts as adequately covered when it has >= ceil("
+            "min_sample_completeness x window_slots) complete HL-vs-CEX "
+            "paired slots inside the pre-registered 14-day window"),
+    }
     if not per_asset:
         overall, oreason = VERDICT_UNRESOLVED, ["no complete paired observations"]
-    elif all(a["verdict"] == VERDICT_PASS for a in per_asset.values()) \
-            and assets_with_cex >= g["min_assets_with_cex_leg"]:
+    elif len(adequate_majors) < g["min_assets_with_cex_leg"]:
+        overall, oreason = VERDICT_UNRESOLVED, [
+            f"majors with adequate CEX-leg coverage: "
+            f"{', '.join(adequate_majors) or 'none'} "
+            f"({len(adequate_majors)} of "
+            f"{g['min_assets_with_cex_leg']} required; bar: >= "
+            f"{min_adequate_slots} complete paired slots per major in the "
+            "14-day window); per pre-registration, insufficient coverage "
+            "returns UNRESOLVED — not PASS, BETWEEN_THRESHOLDS, or FAIL "
+            "(per-asset diagnostics remain in per_asset)"]
+    elif all(a["verdict"] == VERDICT_PASS for a in per_asset.values()):
         overall, oreason = VERDICT_PASS, [
-            "all assets pass; CEX-leg coverage on "
-            f"{assets_with_cex} majors"]
+            "all assets pass; CEX-leg coverage adequate on "
+            f"{len(adequate_majors)} majors"]
     elif any(a["verdict"] == VERDICT_FAIL for a in per_asset.values()):
         overall, oreason = VERDICT_FAIL, [
             f"{sum(1 for a in per_asset.values() if a['verdict'] == VERDICT_FAIL)}"
@@ -254,7 +380,8 @@ def _verdict_for(window_days, completeness, eligible_days, median_net,
     reasons = []
     if window_days < g["window_days_min"]:
         return VERDICT_UNRESOLVED, [
-            f"window {window_days}d < required {g['window_days_min']}d"]
+            f"evaluation window elapsed {window_days}d < required "
+            f"{g['window_days_min']}d consecutive days"]
     if completeness < g["min_sample_completeness"]:
         return VERDICT_UNRESOLVED, [
             f"completeness {completeness:.3f} < "
@@ -283,9 +410,11 @@ def _coverage_statement(per_asset: dict, gap_summary: dict) -> str:
     parts = []
     for asset, a in per_asset.items():
         parts.append(
-            f"{asset}: {a['n_slots_with_complete_pair']} complete paired slots "
-            f"over {a['window_days_spanned']}d (completeness "
-            f"{a['sample_completeness']:.1%}, CEX legs "
+            f"{asset}: {a['n_slots_with_complete_pair']}/"
+            f"{a['completeness_denominator_slots']} complete paired slots in "
+            f"the fixed pre-registered window (completeness "
+            f"{a['sample_completeness']:.1%}, observed span "
+            f"{a['window_days_spanned']}d, CEX legs "
             f"{','.join(a['cex_leg_venues_observed']) or 'NONE'})")
     if gap_summary:
         parts.append("gap summary: " + "; ".join(
