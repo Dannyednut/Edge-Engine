@@ -1,7 +1,7 @@
 /**
  * EulerLendingArbScanner — find Euler HL vault yield spreads.
  *
- * CORRECTED SEMANTICS (EM-STRAT-003):
+ * CORRECTED SEMANTICS (EM-STRAT-003, hardened EM-STRAT-004, test-safety EM-STRAT-005):
  *   The difference between two interestRate() values is NOT "deposit APY
  *   minus borrow APY." Euler's interestRate() returns the BORROW rate.
  *   The supply (deposit) rate must be computed from the borrow rate,
@@ -15,6 +15,13 @@
  *   Until valid supply and borrow rates, live prices, and usable liquidity
  *   are available, this scanner emits clearly labeled monitoring data
  *   rather than an arbitrage profit estimate.
+ *
+ * TEST SEAM (EM-STRAT-005 §3):
+ *   The constructor accepts an optional `deps` argument with `eulerClient`
+ *   (an injectable EulerClient-like object) for deterministic testing.
+ *   Tests pass a mock client that returns canned vault records — no live
+ *   RPC. Production callers omit `deps`; the scanner constructs a real
+ *   EulerClient internally.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
@@ -29,6 +36,22 @@ export interface EulerLendingArbParams {
   maxSizeUsd: number;
   /** Asset price inputs — must be provided by the caller from a verified source. */
   assetPrices?: Record<string, number>;
+}
+
+/**
+ * Injectable dependencies. Tests pass `eulerClient` to override the live
+ * EulerClient. Production callers omit `deps`.
+ *
+ * EM-STRAT-005 §3: tests MUST NOT trigger live HyperEVM RPC. The mock
+ * client returns deterministic vault records.
+ */
+export interface EulerLendingArbDeps {
+  /**
+   * Override the internally-constructed EulerClient. Must expose
+   * `getAllVaults(): Promise<EulerVaultInfo[]>` (the only method this
+   * scanner calls).
+   */
+  eulerClient?: { getAllVaults(): Promise<EulerVaultInfo[]> };
 }
 
 export interface EulerLendingArbAlert {
@@ -52,10 +75,12 @@ export class EulerLendingArbScanner implements Strategy {
   readonly id = 'euler_lending_arb';
   readonly landscape = 'F_perps_funding' as const;
 
-  private euler: EulerClient;
+  private euler: { getAllVaults(): Promise<EulerVaultInfo[]> };
 
-  constructor(private params: EulerLendingArbParams) {
-    this.euler = new EulerClient();
+  constructor(private params: EulerLendingArbParams, deps: EulerLendingArbDeps = {}) {
+    // EM-STRAT-005 §3: injectable test seam. When deps.eulerClient is
+    // provided, no live EulerClient is constructed and no RPC is issued.
+    this.euler = deps.eulerClient ?? new EulerClient();
   }
 
   subscribesTo(): string[] { return []; }
@@ -161,3 +186,4 @@ export class EulerLendingArbScanner implements Strategy {
     return this.euler.getAllVaults();
   }
 }
+

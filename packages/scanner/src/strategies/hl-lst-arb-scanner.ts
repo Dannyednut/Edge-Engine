@@ -19,16 +19,30 @@
  *   margin against slippage, MEV, and execution risk before the carry
  *   is treated as a real opportunity.
  *
- * SOURCE FRESHNESS (EM-STRAT-004):
- *   Anchor freshness reflects the on-chain block timestamp at which the
- *   rate was read — NOT the local clock time of the fetch. The block
- *   timestamp is the authoritative "last update" of the Accountant state.
+ * SOURCE FRESHNESS (corrected EM-STRAT-004, finalized EM-STRAT-005 §4):
+ *   The block timestamp returned by `eth_getBlockByNumber('latest')` is
+ *   the L1 chain-head timestamp at the moment of the RPC call. It bounds
+ *   the freshness of the on-chain Accountant read: the rate was current
+ *   as of that block.
+ *
+ *   IMPORTANT (EM-STRAT-005 §4): the block timestamp does NOT prove when
+ *   the Accountant exchange rate was last CHANGED. The Accountant may
+ *   have updated many blocks ago and simply not changed since. The
+ *   freshness check here verifies only that the chain is recent (block
+ *   timestamp within 5 minutes of local now) — it does NOT verify the
+ *   cadence of Accountant state updates.
+ *
+ *   EM-STRAT-005 §4: the scanner fails closed on invalid block timestamps
+ *   (missing, non-finite, zero, negative) AND on FUTURE timestamps (block
+ *   timestamp later than local now + 60s tolerance) — a future timestamp
+ *   indicates either clock skew or a malformed RPC response, both of
+ *   which invalidate the freshness check.
  *
  * FAIL-CLOSED INPUTS (EM-STRAT-004):
  *   All of the following are required inputs; if any is unavailable the
  *   scanner returns [] (no actionable alert):
  *     - Redemption anchor (kHYPE→HYPE rate)
- *     - Anchor freshness within staleness window
+ *     - Anchor freshness within staleness window (chain-head block ts)
  *     - Withdrawal delay (from StakingManager)
  *     - AMM fee tier (from pool metadata)
  *     - Flashloan fee (constant)
@@ -123,12 +137,22 @@ export interface HlLstArbAlert {
   /** Withdrawal delay in seconds (from Kinetiq StakingManager). */
   withdrawalDelaySec: number | null;
   /**
-   * On-chain block timestamp (seconds since epoch) at which the anchor
-   * rate was read. This is the authoritative "last update" of the
-   * Accountant state — NOT the local fetch time.
+   * On-chain block timestamp (seconds since epoch) of the L1 chain head at
+   * the moment the redemption anchor was read. Bounds the freshness of the
+   * Accountant read: the rate was current as of that block.
+   *
+   * IMPORTANT (EM-STRAT-005 §4): this does NOT prove when the Accountant
+   * exchange rate last CHANGED. The Accountant may have updated many
+   * blocks ago and simply not changed since. The freshness check
+   * (`anchorFresh`) verifies only that the chain is recent — it does not
+   * verify the cadence of Accountant state updates.
    */
   anchorBlockTs: number | null;
-  /** Anchor freshness window (ms). Anchor is fresh if (now - anchorBlockTs*1000) < window. */
+  /**
+   * Whether the chain-head block timestamp is within the staleness window
+   * (5 minutes) of local now AND is not in the future. EM-STRAT-005 §4:
+   * future timestamps fail closed (clock skew / malformed RPC).
+   */
   anchorFresh: boolean;
   /** Whether the alert meets the 0.30% net-discount threshold and all required inputs. */
   executable: boolean;
@@ -167,13 +191,14 @@ export class HlLstArbScanner implements Strategy {
 
   /**
    * Fetch the kHYPE-to-HYPE exchange rate from the Kinetiq Accountant,
-   * along with the latest block timestamp (real source freshness).
-   * Returns null if either fetch fails.
+   * along with the latest L1 block timestamp. Returns null if either
+   * fetch fails or the values are invalid.
    *
-   * The block timestamp is the authoritative "last update" of the
-   * on-chain Accountant state — using it (instead of Date.now()) means
-   * anchor freshness reflects actual on-chain update cadence, not local
-   * fetch latency.
+   * EM-STRAT-005 §4: the block timestamp is the L1 chain-head timestamp
+   * at the moment of the RPC call. It bounds the freshness of the
+   * Accountant read but does NOT prove when the Accountant state last
+   * changed. The freshness check in `scan()` verifies only that the
+   * chain is recent.
    */
   async fetchRedemptionAnchor(): Promise<{ rate: number; blockTs: number } | null> {
     try {
@@ -194,7 +219,6 @@ export class HlLstArbScanner implements Strategy {
       if (!isFinite(rate) || rate <= 0) return null;
 
       // Block timestamp from eth_getBlockByNumber result.
-      // Block JSON: { number, timestamp, hash, ... }
       const block = blockRes.result as unknown;
       let blockTs: number | null = null;
       if (typeof block === 'string' && block.startsWith('0x')) {
@@ -206,6 +230,8 @@ export class HlLstArbScanner implements Strategy {
           blockTs = parseInt(ts.slice(2), 16);
         }
       }
+      // EM-STRAT-005 §4: fail closed on invalid block timestamps
+      // (missing, non-finite, zero, negative).
       if (blockTs === null || !isFinite(blockTs) || blockTs <= 0) return null;
 
       return { rate, blockTs };
@@ -238,16 +264,24 @@ export class HlLstArbScanner implements Strategy {
   async scan(): Promise<HlLstArbAlert[]> {
     const alerts: HlLstArbAlert[] = [];
 
-    // 1. Fetch the redemption anchor (kHYPE-to-HYPE exchange rate + block ts)
+    // 1. Fetch the redemption anchor (kHYPE-to-HYPE exchange rate + L1 block ts)
     const anchor = await this.fetchRedemptionAnchor();
     if (!anchor) {
       // Fail closed: no anchor = no actionable discount
       return [];
     }
     const nowMs = this.now();
-    const anchorFresh = (nowMs - anchor.blockTs * 1000) < ANCHOR_STALENESS_MS;
+    const nowSec = Math.floor(nowMs / 1000);
+    // EM-STRAT-005 §4: freshness check verifies the L1 chain is recent.
+    // This does NOT prove when the Accountant state last changed — only
+    // that the chain head is within 5 minutes of local now.
+    const anchorAgeSec = nowSec - anchor.blockTs;
+    const FUTURE_TOLERANCE_SEC = 60; // allow 60s clock skew
+    const anchorFresh =
+      anchorAgeSec >= -FUTURE_TOLERANCE_SEC &&   // not in the future (beyond tolerance)
+      anchorAgeSec * 1000 < ANCHOR_STALENESS_MS; // not stale (within 5 min)
     if (!anchorFresh) {
-      // Fail closed: stale anchor (block timestamp too old)
+      // Fail closed: stale or future block timestamp (clock skew / malformed RPC).
       return [];
     }
 

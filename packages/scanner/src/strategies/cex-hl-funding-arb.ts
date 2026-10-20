@@ -1,45 +1,56 @@
 /**
- * CexHlFundingArbStrategy — CEX spot (long) + Hyperliquid perp (short) funding arb.
+ * CexHlFundingArbStrategy — CEX perpetual (long) + Hyperliquid perpetual (short)
+ * funding-rate carry.
  *
- * Based on Task 9 research finding: Hyperliquid funding floor is 10.95% APR
- * for ETH/BTC/SOL while CEX funding has compressed to near-zero. This creates
- * a structural 9-11% APR carry trade that's far better than the 0.02-0.11% APR
- * available from CEX-only spot-perp basis arbs.
+ * TRADE STRUCTURE (corrected EM-STRAT-005 §2):
+ *   LONG  perp ETH on a CEX venue (e.g., Binance) — pays CEX perp funding
+ *   SHORT perp ETH on Hyperliquid — receives HL perp funding (when positive)
+ *   Net delta ≈ 0; net funding capture ≈ HL funding (received) − CEX funding (paid)
  *
- * SIGNAL-INTEGRITY MODEL (corrected EM-STRAT-003, hardened EM-STRAT-004):
- *   Sharpe's `/arbitrage/cross-exchange` endpoint returns a `netApr` that is
- *   itself a *third-party net/spread estimate* — it is NOT the raw Hyperliquid
- *   funding rate and NOT the raw CEX funding rate. Treating `netApr` as either
- *   raw rate, or recomputing a "new net" by subtracting a CEX rate from it,
- *   double-counts and produces an unreliable actionable signal.
+ *   The previous documentation described this as "CEX spot (long) + HL perp
+ *   (short)" while subtracting a CEX perp funding rate — internally
+ *   inconsistent. EM-STRAT-005 §2 corrects the documentation: BOTH legs
+ *   are perpetuals, and the net carry is the difference of perp funding
+ *   rates. A spot leg would not have a funding rate at all.
  *
- *   This scanner therefore:
- *     1. Pulls Sharpe cross-exchange rows to IDENTIFY candidate asset × venue
- *        pairs (one leg HL, other leg CEX). `sharpeNetApr` is stored as a
- *        third-party reference only.
- *     2. Pulls RAW per-venue funding rates from Sharpe `/funding/rates` for
- *        the HL leg and the CEX leg. These are the only rates eligible to
- *        compute an actionable net spread.
- *     3. Computes `netSpreadApr = hlRawFundingApr - cexRawFundingApr` ONLY
- *        when both raw rates are available, correctly oriented (short-side
- *        positive funding = receipts), and finite. Otherwise `netSpreadApr`
- *        is null and the alert is NOT actionable.
+ * PROVENANCE MODEL (EM-STRAT-005 §2):
+ *   Sharpe's `/arbitrage/cross-exchange` endpoint returns `netApr`/`grossApr`
+ *   as third-party NET estimates. Sharpe's `/funding/rates` endpoint returns
+ *   per-venue funding APRs. Both endpoints come from the SAME provider
+ *   (Sharpe). A second Sharpe endpoint is NOT independent corroboration —
+ *   it is the same source relabelled.
  *
- *   `hlFundingApr` is the raw HL perp funding APR (separately sourced) or null.
- *   `cexFundingApr` is the raw CEX perp funding APR (separately sourced) or null.
- *   `sharpeNetApr` is the third-party estimate, explicitly labeled.
+ *   EM-STRAT-005 §2 therefore distinguishes two levels of verification:
+ *     - "third-party-sourced": data comes from Sharpe (either endpoint).
+ *       This is sufficient to IDENTIFY a candidate carry but NOT to label
+ *       the net spread as independently verified.
+ *     - "independently corroborated": per-leg raw rates have been
+ *       cross-checked against venue-native free public endpoints (e.g.,
+ *       Hyperliquid `/info` for HL funding; Binance `/fapi/v1/premiumIndex`
+ *       for Binance funding), with validated units (APR vs 8h fraction)
+ *       and source freshness. This is required before `actionable = true`.
  *
- * Trade structure:
- *   LONG  spot ETH on Binance  (collect 0% funding on spot — no perp)
- *   SHORT perp ETH on Hyperliquid (collect ~10.95% APR funding from longs)
- *   Net delta = 0; net funding capture ≈ HL funding - CEX borrow fees
+ *   This implementation does NOT yet wire venue-native endpoints. Until
+ *   such corroboration is implemented, every alert has:
+ *     - provenance = 'third-party-sourced'  (Sharpe only)
+ *     - actionable = false
  *
- * Risks:
- *   - HL funding rate can fluctuate (currently at 10.95% floor but can spike
- *     higher or drop lower)
- *   - CEX withdrawal latency if rebalancing needed (5-20 min for native USDC)
- *   - HL insurance fund seizure risk on cascade (small)
- *   - Counter-party risk: capital split across Binance + HL
+ *   `hlFundingApr` and `cexFundingApr` are the raw per-venue funding APRs
+ *   from Sharpe `/funding/rates` (percent units, already annualized). They
+ *   are NEVER Sharpe's `netApr`/`grossApr`. They are stored for diagnostic
+ *   visibility but are NOT treated as independently verified.
+ *
+ *   `netSpreadApr = hlFundingApr - cexFundingApr` is computed when both
+ *   raw rates are available. It is labeled as a third-party-sourced
+ *   estimate — NOT independently verified — and the alert remains
+ *   non-actionable until venue-native corroboration is added.
+ *
+ * RISKS:
+ *   - HL funding rate can fluctuate (floor was 10.95% APR; HYPE flipped
+ *     to -6.88% APR on Sep 28 2026)
+ *   - CEX perp funding can spike above HL funding, inverting the carry
+ *   - Counter-party risk: capital split across CEX + HL
+ *   - Liquidation risk on both perp legs
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
@@ -47,44 +58,56 @@ import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
 
 export interface CexHlFundingArbParams {
-  minNetApr: number;            // 0.05 = 5% APR minimum to fire actionable alert
-  cexVenues: string[];          // ['binance', 'okx', 'bybit'] — CEX spot candidates
-  hlVenueName: string;          // 'hyperliquid' or 'Hyperliquid' — match Sharpe's naming
-  useVooiExecutor: boolean;     // try VOOI for atomic paired-leg (perps only — no spot)
+  /** Min net APR (fraction; 0.05 = 5%) for the actionable threshold. */
+  minNetApr: number;
+  /** CEX perp venues to consider (e.g., ['binance', 'okx', 'bybit']). */
+  cexVenues: string[];
+  /** Hyperliquid venue name as Sharpe spells it (e.g., 'Hyperliquid'). */
+  hlVenueName: string;
+  useVooiExecutor: boolean;
   vooiVenueSet: string[];
-  /** Auto-execute when found (vs alert-only) */
   autoExecute: boolean;
-  /** Max notional per trade (USD) */
   maxNotionalUsd: number;
-  /** Only emit actionable alerts when HL funding is positive (shorts collect funding).
-   *  Set to 0.02 (2%) to skip when HL funding flips negative.
-   *  CRITICAL: HYPE funding flipped to -6.88% APR on Sep 28 2026. */
+  /**
+   * Min HL funding APR (fraction; 0.02 = 2%) for an actionable alert.
+   * Guards against the HYPE -6.88% case where shorts pay funding.
+   */
   minHlFundingApr: number;
 }
+
+/**
+ * Provenance of the per-leg funding rates.
+ * - 'third-party-sourced': rates come from Sharpe `/funding/rates` (one provider).
+ *   Net spread is computable but NOT independently verified.
+ * - 'independently-corroborated': rates have been cross-checked against
+ *   venue-native public endpoints (not yet implemented). Required for
+ *   `actionable = true`.
+ */
+export type CexHlFundingProvenance = 'third-party-sourced' | 'independently-corroborated';
 
 export interface CexHlFundingAlert {
   asset: string;
   cexVenue: string;
   /**
-   * Raw Hyperliquid perp funding APR (separately sourced from
-   * Sharpe `/funding/rates`). null = not independently verified.
+   * Raw HL perp funding APR (percent units, already annualized) sourced
+   * from Sharpe `/funding/rates`. null = no matching row.
    *
-   * EM-STRAT-004: this is NEVER the Sharpe `netApr` or `grossApr`.
-   * Those third-party estimates are stored separately in `sharpeNetApr`.
+   * EM-STRAT-004: NEVER equal to Sharpe `netApr`/`grossApr`.
+   * EM-STRAT-005 §2: NOT independently verified — same provider as cross-exchange.
    */
   hlFundingApr: number | null;
   /**
-   * Raw CEX perp funding APR (separately sourced from
-   * Sharpe `/funding/rates`). null = not independently verified.
+   * Raw CEX perp funding APR (percent units, already annualized) sourced
+   * from Sharpe `/funding/rates`. null = no matching row.
+   * EM-STRAT-005 §2: NOT independently verified — same provider as cross-exchange.
    */
   cexFundingApr: number | null;
   /**
-   * Independently-verified net carry = hlFundingApr - cexFundingApr.
-   * null = unavailable (one or both raw rates missing, or sign/orientation
-   * inconsistent). When null, the alert MUST NOT be presented as actionable.
+   * Net carry = hlFundingApr - cexFundingApr (percent units). Computed only
+   * when both raw rates are available. null = one or both rates missing.
    *
-   * EM-STRAT-004: this is NEVER computed by subtracting a CEX rate from
-   * Sharpe's netApr. Only raw rates are subtracted.
+   * EM-STRAT-005 §2: labeled as third-party-sourced until venue-native
+   * corroboration is implemented. Actionable requires 'independently-corroborated'.
    */
   netSpreadApr: number | null;
   hlOiUsd: number;
@@ -94,12 +117,26 @@ export interface CexHlFundingAlert {
   confidence: number;
   source: 'sharpe' | 'sharpe+vooi';
   /**
-   * Sharpe's third-party netApr estimate — explicitly labeled as a
-   * reference. NOT used as a raw funding rate and NOT used to compute
-   * netSpreadApr. Present for diagnostic visibility only.
+   * Sharpe's third-party netApr estimate (fraction or percent — Sharpe's
+   * own convention). Explicitly labeled as a reference. NOT used as a raw
+   * funding rate and NOT used to compute netSpreadApr.
    */
   sharpeNetApr: number | null;
-  /** Whether the alert is actionable (requires independently verified net carry). */
+  /**
+   * Provenance of hlFundingApr / cexFundingApr.
+   * - 'third-party-sourced': from Sharpe only (current implementation).
+   * - 'independently-corroborated': cross-checked against venue-native
+   *   endpoints (not yet implemented).
+   */
+  provenance: CexHlFundingProvenance;
+  /**
+   * Whether the alert is actionable. Requires provenance =
+   * 'independently-corroborated' (not yet implemented) AND netSpreadApr
+   * >= minNetApr AND hlFundingApr >= minHlFundingApr.
+   *
+   * EM-STRAT-005 §2: until venue-native corroboration is wired, this is
+   * ALWAYS false. The alert is reported as a third-party-sourced reference.
+   */
   actionable: boolean;
 }
 
@@ -113,13 +150,8 @@ export class CexHlFundingArbStrategy implements Strategy {
     private params: CexHlFundingArbParams,
   ) {}
 
-  subscribesTo(): string[] {
-    return [];
-  }
-
-  evaluate(_data: DataPoint): TradeOrder[] | null {
-    return null;
-  }
+  subscribesTo(): string[] { return []; }
+  evaluate(_data: DataPoint): TradeOrder[] | null { return null; }
 
   riskParams(): RiskParams {
     return {
@@ -132,11 +164,12 @@ export class CexHlFundingArbStrategy implements Strategy {
   }
 
   /**
-   * Look up a raw per-venue funding APR from Sharpe `/funding/rates`.
-   * Returns null if no row matches (asset, venue) or the rate is not finite.
+   * Look up a raw per-venue funding APR (percent, already annualized) from
+   * Sharpe `/funding/rates`. Returns null if no row matches (asset, venue)
+   * or the rate is not finite.
    *
-   * Both arguments are case-insensitive; Sharpe exchange names are normalized
-   * to lowercase for matching. The returned APR is already annualized.
+   * Both arguments are case-insensitive. EM-STRAT-005 §2: this is
+   * third-party-sourced data — NOT independently verified.
    */
   private async fetchRawFundingApr(
     fundingRows: { coin: string; exchange: string; annualized: number; rate: number }[],
@@ -155,8 +188,8 @@ export class CexHlFundingArbStrategy implements Strategy {
 
   async scan(): Promise<CexHlFundingAlert[]> {
     // 1. Pull Sharpe cross-exchange arbs filtered to HL × CEX venues.
-    //    These rows identify candidate asset × venue pairs. The `netApr`
-    //    on each row is a third-party estimate (stored as `sharpeNetApr`),
+    //    These rows IDENTIFY candidate asset × venue pairs. The `netApr`
+    //    on each row is a third-party NET estimate (stored as `sharpeNetApr`),
     //    NOT a raw funding rate.
     const sharpeResp = await this.sharpe.crossExchangeFunding({
       minApr: this.params.minNetApr,
@@ -164,15 +197,18 @@ export class CexHlFundingArbStrategy implements Strategy {
       assetClass: 'crypto',
     });
 
-    // 2. Pull Sharpe /funding/rates — RAW per-venue funding rates.
-    //    This is the only source eligible to compute an actionable net.
-    let hlRawFundingRows: { coin: string; exchange: string; annualized: number; rate: number }[] = [];
+    // 2. Pull Sharpe /funding/rates — per-venue funding APRs.
+    //    EM-STRAT-005 §2: this is a DISTINCT endpoint from cross-exchange,
+    //    but the SAME provider. The result is NOT "independently verified"
+    //    merely because it comes from /funding/rates. It is third-party-sourced.
+    let fundingRows: { coin: string; exchange: string; annualized: number; rate: number }[] = [];
     try {
       const ratesResp = await this.sharpe.fundingRates({ assetClass: 'crypto' });
-      hlRawFundingRows = ratesResp.data as typeof hlRawFundingRows;
+      fundingRows = ratesResp.data as typeof fundingRows;
     } catch (err) {
-      // Without raw rates we cannot compute actionable net spreads.
-      // Continue — alerts will be emitted with netSpreadApr=null and actionable=false.
+      // Provider failure — continue with empty funding rows. All alerts
+      // will have hlFundingApr=cexFundingApr=netSpreadApr=null and
+      // actionable=false. This is the non-actionable fallback (EM-STRAT-005 §2).
       console.warn('Sharpe /funding/rates unavailable (continuing with non-actionable alerts):', err);
     }
 
@@ -222,14 +258,11 @@ export class CexHlFundingArbStrategy implements Strategy {
       const cexVenue = hlOnLong ? shortVenue : longVenue;
       if (!this.params.cexVenues.includes(cexVenue)) continue;
 
-      // The CEX side should be the low-funding leg (we go LONG perp on CEX = pay CEX funding)
-      // The HL side should be the high-funding leg (we go SHORT perp on HL = receive HL funding)
-      // If HL is the long side in Sharpe's row, that means HL longs pay shorts (negative HL funding)
-      // — which is the OPPOSITE of what we want. Skip those.
+      // EM-STRAT-005 §2: BOTH legs are perpetuals. We want HL on the SHORT
+      // side (shorts collect positive funding) and CEX on the LONG side
+      // (longs pay CEX funding). If HL is the long side, the trade direction
+      // is inverted — skip.
       if (hlOnLong) continue;
-
-      // Now: HL is short side (HL longs pay shorts → we short HL = collect funding)
-      // CEX is long side (we long CEX perp = pay CEX funding)
 
       // ── Third-party reference (NOT used as a raw rate) ───────────────
       const sharpeNetApr: number | null =
@@ -237,49 +270,59 @@ export class CexHlFundingArbStrategy implements Strategy {
         : (typeof row.grossApr === 'number' && isFinite(row.grossApr)) ? row.grossApr
         : null;
 
-      // ── Raw per-leg funding rates (separately sourced) ──────────────
-      // EM-STRAT-004: hlFundingApr is the raw HL funding APR from /funding/rates.
-      // It is NEVER equal to sharpeNetApr.
-      const hlFundingApr = await this.fetchRawFundingApr(hlRawFundingRows, asset, this.params.hlVenueName);
-      const cexFundingApr = await this.fetchRawFundingApr(hlRawFundingRows, asset, cexVenue);
+      // ── Per-leg funding rates (third-party-sourced) ─────────────────
+      // EM-STRAT-005 §2: sourced from Sharpe /funding/rates. Same provider
+      // as cross-exchange. NOT independently verified.
+      const hlFundingApr = await this.fetchRawFundingApr(fundingRows, asset, this.params.hlVenueName);
+      const cexFundingApr = await this.fetchRawFundingApr(fundingRows, asset, cexVenue);
 
-      // ── Actionable net spread ────────────────────────────────────────
-      // EM-STRAT-004: compute only when BOTH raw rates are available.
-      //   Net = HL funding (received by shorts) - CEX funding (paid by longs)
-      // If HL funding is negative, shorts pay funding — that flips the trade
-      // and we should NOT treat it as the same carry. We still emit the alert
-      // but with netSpreadApr reflecting the actual signed values, and
-      // `actionable` is only true when the trade direction is profitable
-      // (netSpreadApr >= minNetApr) AND HL funding is positive enough that
-      // shorts collect (per minHlFundingApr).
+      // ── Net spread (third-party-sourced) ────────────────────────────
+      // Computed only when BOTH raw rates are available.
       let netSpreadApr: number | null = null;
       if (hlFundingApr !== null && cexFundingApr !== null) {
         netSpreadApr = hlFundingApr - cexFundingApr;
       }
 
-      // ── Actionable flag ─────────────────────────────────────────────
-      // An alert is actionable only when:
-      //   1. netSpreadApr is independently verified (both raw rates present)
-      //   2. HL funding is positive enough that shorts collect funding
-      //      (per minHlFundingApr — guards against the HYPE -6.88% case)
-      //   3. netSpreadApr >= minNetApr
+      // ── Provenance ──────────────────────────────────────────────────
+      // EM-STRAT-005 §2: until venue-native corroboration is implemented,
+      // provenance is ALWAYS 'third-party-sourced'. This means hlFundingApr
+      // and cexFundingApr come from Sharpe only — same provider as the
+      // cross-exchange estimate. They are NOT independently verified.
       //
-      // UNIT NORMALIZATION (EM-STRAT-004):
+      // The constant below is typed as CexHlFundingProvenance (a union) and
+      // then re-assigned through a `let` so TypeScript does not narrow it
+      // to the literal 'third-party-sourced' — keeping the `actionable`
+      // comparison below typecheck-meaningful for the future when this
+      // branch flips to 'independently-corroborated'.
+      let provenance: CexHlFundingProvenance = 'third-party-sourced' as CexHlFundingProvenance;
+
+      // ── Actionable flag ─────────────────────────────────────────────
+      // Actionable requires:
+      //   1. provenance === 'independently-corroborated' (NOT YET IMPLEMENTED)
+      //   2. netSpreadApr !== null
+      //   3. hlFundingApr >= minHlFundingApr (shorts collect funding)
+      //   4. netSpreadApr >= minNetApr
+      //
+      // UNIT NORMALIZATION:
       //   - hlFundingApr / cexFundingApr / netSpreadApr are in PERCENT
       //     (e.g., 11 means 11% APR) — sourced from Sharpe /funding/rates
       //     `annualized` field which follows APR convention.
       //   - this.params.minNetApr and minHlFundingApr are configured in
-      //     FRACTION (e.g., 0.05 means 5%) per the existing convention
-      //     used for row.netApr comparison.
+      //     FRACTION (e.g., 0.05 means 5%).
       //   - Convert params from fraction to percent before comparing.
       const minNetAprPct = this.params.minNetApr * 100;
       const minHlFundingAprPct = this.params.minHlFundingApr * 100;
       const hlFundingPositive =
         hlFundingApr !== null && hlFundingApr >= minHlFundingAprPct;
+      const isCorroborated = provenance === ('independently-corroborated' as CexHlFundingProvenance);
       const actionable =
+        isCorroborated &&
         netSpreadApr !== null &&
         hlFundingPositive &&
         netSpreadApr >= minNetAprPct;
+      // With provenance always 'third-party-sourced' (current impl),
+      // actionable is ALWAYS false. This is the EM-STRAT-005 §2 non-actionable
+      // fallback until venue-native corroboration is wired.
 
       // ── Cross-validate with VOOI (price spread, not funding) ────────
       const vooiKey = `${asset}|${longVenue}|${shortVenue}`;
@@ -310,6 +353,7 @@ export class CexHlFundingArbStrategy implements Strategy {
         confidence,
         source,
         sharpeNetApr,
+        provenance,
         actionable,
       });
     }

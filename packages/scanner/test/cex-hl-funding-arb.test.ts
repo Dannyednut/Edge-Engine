@@ -227,8 +227,11 @@ describe('CexHlFundingArbStrategy — EM-STRAT-004 signal-integrity regressions'
     });
   });
 
-  describe('valid leg rates produce independently verified net (EM-STRAT-004 §2)', () => {
+  describe('valid leg rates produce a computable (but NOT independently verified) net (EM-STRAT-005 §2)', () => {
     it('computes netSpreadApr = hlRaw - cexRaw when both raw rates are present', async () => {
+      // EM-STRAT-005 §2: net spread is computable but is third-party-sourced
+      // (Sharpe /funding/rates is the SAME provider as cross-exchange — not
+      // independent corroboration). Actionable remains false.
       const { sharpe, vooi } = makeFixture({
         crossExchange: {
           data: [{
@@ -254,10 +257,17 @@ describe('CexHlFundingArbStrategy — EM-STRAT-004 signal-integrity regressions'
       expect(a.hlFundingApr).toBe(11);
       expect(a.cexFundingApr).toBe(0.5);
       expect(a.netSpreadApr).toBeCloseTo(10.5, 5);
-      expect(a.actionable).toBe(true);
+      // EM-STRAT-005 §2: net spread is computable but NOT independently verified.
+      // Provenance is 'third-party-sourced' and actionable is FALSE.
+      expect(a.provenance).toBe('third-party-sourced');
+      expect(a.actionable).toBe(false);
     });
 
-    it('actionable flag is true when netSpreadApr >= minNetApr AND HL funding >= minHlFundingApr', async () => {
+    it('actionable is FALSE even when netSpreadApr >= minNetApr AND HL funding >= minHlFundingApr (provenance gating)', async () => {
+      // EM-STRAT-005 §2: even when the third-party-sourced rates look favorable,
+      // the alert is NOT actionable because Sharpe /funding/rates is the SAME
+      // provider as cross-exchange. Independent corroboration via venue-native
+      // endpoints is required (not yet implemented).
       const { sharpe, vooi } = makeFixture({
         crossExchange: {
           data: [{
@@ -278,7 +288,10 @@ describe('CexHlFundingArbStrategy — EM-STRAT-004 signal-integrity regressions'
       });
       const strat = new CexHlFundingArbStrategy(sharpe, vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
-      expect(alerts[0].actionable).toBe(true);
+      expect(alerts[0].netSpreadApr).toBeCloseTo(10.45, 5);
+      expect(alerts[0].provenance).toBe('third-party-sourced');
+      // EM-STRAT-005 §2: actionable is FALSE — provenance gating.
+      expect(alerts[0].actionable).toBe(false);
     });
   });
 
@@ -394,15 +407,18 @@ describe('CexHlFundingArbStrategy — EM-STRAT-004 signal-integrity regressions'
       const strat = new CexHlFundingArbStrategy(sharpe, vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
       const a = alerts[0] as CexHlFundingAlert;
-      // Required fields per EM-STRAT-004 §2:
+      // Required fields per EM-STRAT-004 §2 and EM-STRAT-005 §2:
       expect(a).toHaveProperty('asset', 'ETH');
       expect(a).toHaveProperty('cexVenue', 'binance');
       expect(a).toHaveProperty('hlFundingApr', 11); // raw, not null, not sharpeNetApr
       expect(a).toHaveProperty('cexFundingApr', 0.5); // raw, not null
-      expect(a).toHaveProperty('netSpreadApr'); // independently verified
+      expect(a).toHaveProperty('netSpreadApr'); // computable when both raw rates present
       expect(a.netSpreadApr).toBeCloseTo(10.5, 5);
       expect(a).toHaveProperty('sharpeNetApr', 10); // third-party reference
-      expect(a).toHaveProperty('actionable', true);
+      // EM-STRAT-005 §2: provenance field is present, third-party-sourced (not independently verified)
+      expect(a).toHaveProperty('provenance', 'third-party-sourced');
+      // EM-STRAT-005 §2: actionable is FALSE — provenance gating (no venue-native corroboration yet)
+      expect(a).toHaveProperty('actionable', false);
       // OI fields flow from Sharpe row.
       expect(a.hlOiUsd).toBe(2_000_000);
       expect(a.cexOiUsd).toBe(1_000_000);

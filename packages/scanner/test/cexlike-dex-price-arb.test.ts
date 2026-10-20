@@ -67,10 +67,32 @@ function makePair(opts: {
 
 // ─── Tests ─────────────────────────────────────────────────────────────
 
-describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressions', () => {
+describe('CexLikeDexPriceArbStrategy — EM-STRAT-005 §1 monitoring-only convergence model', () => {
 
-  describe('actionable flag (EM-STRAT-004 §4)', () => {
-    it('sets actionable=false when fundingSpread1h is null (economics incomplete)', async () => {
+  describe('estimatedProfitUsd is ALWAYS null (EM-STRAT-005 §1)', () => {
+    it('estimatedProfitUsd is null even when funding is present', async () => {
+      // EM-STRAT-005 §1: the previous code computed estimatedProfitUsd when
+      // fundingSpread1h was non-null, but did not actually incorporate
+      // funding into the profit estimate — it used an unverified 4 bps fee.
+      // The new implementation keeps estimatedProfitUsd ALWAYS null until
+      // a complete convergence model is implemented.
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 105,
+        priceSpread: 0.05,
+        fundingSpread1h: 0.0001, // funding present
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts.length).toBe(1);
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
+    });
+
+    it('estimatedProfitUsd is null when funding is null', async () => {
       const pair = makePair({ fundingSpread1h: null });
       const vooi = new VooiClient({
         apiToken: 'test',
@@ -79,22 +101,18 @@ describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressio
       const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
       expect(alerts.length).toBe(1);
-      const a = alerts[0] as PriceArbAlert;
-      expect(a.economicsComplete).toBe(false);
-      expect(a.estimatedProfitUsd).toBeNull();
-      // EM-STRAT-004 §4: actionable must be false when economics are incomplete.
-      expect(a.actionable).toBe(false);
-      // Trade type is convergence (not instant profit).
-      expect(a.tradeType).toBe('convergence');
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
     });
 
-    it('sets actionable=true when funding is present AND estimated profit is positive', async () => {
+    it('estimatedProfitUsd is null when funding is adverse (negative)', async () => {
+      // EM-STRAT-005 §1: adverse funding must not produce a verified profit
+      // estimate. The previous code would have computed a positive profit
+      // when |spread| > 4 bps, ignoring the adverse funding entirely.
       const pair = makePair({
         longPrice: 100,
-        shortPrice: 105,
-        priceSpread: 0.05,        // 5% headline
-        priceSpreadAtSize: 0.045, // 4.5% at-size
-        fundingSpread1h: 0.0001,  // 0.01% per hour
+        shortPrice: 102,
+        priceSpread: 0.02,
+        fundingSpread1h: -0.001, // adverse: -0.1% per hour
       });
       const vooi = new VooiClient({
         apiToken: 'test',
@@ -103,42 +121,153 @@ describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressio
       const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
       expect(alerts.length).toBe(1);
-      const a = alerts[0] as PriceArbAlert;
-      expect(a.economicsComplete).toBe(true);
-      expect(a.estimatedProfitUsd).not.toBeNull();
-      expect(a.estimatedProfitUsd!).toBeGreaterThan(0);
-      expect(a.actionable).toBe(true);
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
+      expect(alerts[0].fundingSpread1h).toBe(-0.001);
     });
 
-    it('sets actionable=false when economics are complete but profit is non-positive', async () => {
-      // Spread below fee threshold (4 bps round-trip = 0.04%).
-      // Effective spread = 0.03% < 0.04% fee → grossProfit < 0.
-      // Use a low minPriceSpreadPct so the alert is not pre-filtered.
+    it('estimatedProfitUsd is null when fee inputs are missing', async () => {
+      // EM-STRAT-005 §1: venue-specific fees are not in the VOOI response.
+      // The previous code used an unverified 4 bps assumption; the new
+      // implementation refuses to estimate profit until a verified
+      // per-venue fee schedule is provided.
       const pair = makePair({
         longPrice: 100,
-        shortPrice: 100.03,
-        priceSpread: 0.0003, // 0.03%
+        shortPrice: 102,
+        priceSpread: 0.02,
+        fundingSpread1h: 0.0001,
+        // No fee fields available in VOOI response.
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
+    });
+
+    it('estimatedProfitUsd is null when exit/close-out assumption is unavailable', async () => {
+      // EM-STRAT-005 §1: a verified convergence-economics model requires
+      // an explicit close-out assumption. The current implementation has
+      // no model for this, so profit must remain null.
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 102,
+        priceSpread: 0.02,
+        priceSpreadAtSize: 0.018,
         fundingSpread1h: 0.0001,
       });
       const vooi = new VooiClient({
         apiToken: 'test',
         fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
       });
-      const strat = new CexLikeDexPriceArbStrategy(vooi, {
-        ...DEFAULT_PARAMS,
-        minPriceSpreadPct: 0.01, // 0.01% — let the 0.03% spread through
-      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
-      expect(alerts.length).toBe(1);
-      const a = alerts[0] as PriceArbAlert;
-      expect(a.economicsComplete).toBe(true);
-      expect(a.estimatedProfitUsd).not.toBeNull();
-      expect(a.estimatedProfitUsd!).toBeLessThanOrEqual(0);
-      expect(a.actionable).toBe(false);
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
+    });
+
+    it('estimatedProfitUsd is null when holding-period assumption is absent', async () => {
+      // EM-STRAT-005 §1: a verified convergence-economics model requires
+      // an explicit holding-period assumption (funding accrues per hour).
+      // The current implementation has no holding-period model, so profit
+      // must remain null even if all other inputs are present.
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 102,
+        priceSpread: 0.02,
+        fundingSpread1h: 0.0001,
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts[0].estimatedProfitUsd).toBeNull();
     });
   });
 
-  describe('convergence-trade labeling (EM-STRAT-004 §4)', () => {
+  describe('actionable is ALWAYS false (EM-STRAT-005 §1)', () => {
+    it('actionable is false when funding is present', async () => {
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 105,
+        priceSpread: 0.05,
+        fundingSpread1h: 0.0001,
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts[0].actionable).toBe(false);
+    });
+
+    it('actionable is false when funding is null', async () => {
+      const pair = makePair({ fundingSpread1h: null });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts[0].actionable).toBe(false);
+    });
+
+    it('actionable is false when funding is adverse', async () => {
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 102,
+        priceSpread: 0.02,
+        fundingSpread1h: -0.001,
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts[0].actionable).toBe(false);
+    });
+  });
+
+  describe('monitoringOnly flag (EM-STRAT-005 §1)', () => {
+    it('monitoringOnly is true on every alert', async () => {
+      const pair = makePair({});
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      expect(alerts.length).toBeGreaterThan(0);
+      for (const a of alerts) {
+        expect(a.monitoringOnly).toBe(true);
+      }
+    });
+
+    it('economicsComplete is false on every alert (convergence model incomplete)', async () => {
+      const pair = makePair({
+        longPrice: 100,
+        shortPrice: 105,
+        priceSpread: 0.05,
+        fundingSpread1h: 0.0001,
+      });
+      const vooi = new VooiClient({
+        apiToken: 'test',
+        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
+      });
+      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
+      const alerts = await strat.scan();
+      // EM-STRAT-005 §1: economicsComplete is ALWAYS false — `fundingSpread1h !== null`
+      // does NOT make economics complete (need entry/exit, fees, funding with units/sign,
+      // holding period, position/margin costs).
+      expect(alerts[0].economicsComplete).toBe(false);
+    });
+  });
+
+  describe('convergence-trade labeling (EM-STRAT-004 §4, retained)', () => {
     it('all alerts carry tradeType=convergence (never "instant")', async () => {
       const pair = makePair({});
       const vooi = new VooiClient({
@@ -167,7 +296,6 @@ describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressio
       const a = alerts[0] as PriceArbAlert;
       expect(a.headlineSpreadPct).toBeCloseTo(3, 5);
       expect(a.atSizeSpreadPct).toBeCloseTo(2, 5);
-      // Effective spread = at-size when available.
       expect(a.effectiveSpreadPct).toBeCloseTo(2, 5);
     });
 
@@ -187,7 +315,7 @@ describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressio
     });
   });
 
-  describe('null preservation in alert fields (EM-STRAT-004 §3)', () => {
+  describe('null preservation in alert fields (EM-STRAT-004 §3, retained)', () => {
     it('fundingSpread1h is null in alert when source omits it', async () => {
       const pair = makePair({ fundingSpread1h: null });
       const vooi = new VooiClient({
@@ -197,17 +325,6 @@ describe('CexLikeDexPriceArbStrategy — EM-STRAT-004 signal-integrity regressio
       const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
       const alerts = await strat.scan();
       expect(alerts[0].fundingSpread1h).toBeNull();
-    });
-
-    it('estimatedProfitUsd is null when funding is unavailable', async () => {
-      const pair = makePair({ fundingSpread1h: null });
-      const vooi = new VooiClient({
-        apiToken: 'test',
-        fetchImpl: makeVooiFetch({ items: [{ asset: 'ETH', pairs: [pair] }], total: 1 }),
-      });
-      const strat = new CexLikeDexPriceArbStrategy(vooi, DEFAULT_PARAMS);
-      const alerts = await strat.scan();
-      expect(alerts[0].estimatedProfitUsd).toBeNull();
     });
   });
 

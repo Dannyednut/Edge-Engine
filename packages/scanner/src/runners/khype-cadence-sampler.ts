@@ -409,7 +409,26 @@ async function main() {
   process.on('SIGTERM', () => { console.log('[khype-cadence] SIGTERM, exiting'); process.exit(0); });
 }
 
-main().catch(err => {
-  console.error('[khype-cadence] fatal:', err);
-  process.exit(1);
-});
+// EM-STRAT-005 §3: only run main() when this file is the entry point
+// (not when imported by tests). The test suite must run offline —
+// importing constants from this module must NOT trigger live RPC.
+const isMainModule = (() => {
+  try {
+    // Node ESM: import.meta.url === pathToFileURL(process.argv[1])
+    const { fileURLToPath } = require('node:url');
+    const { resolve } = require('node:path');
+    if (typeof import.meta !== 'undefined' && (import.meta as any).url) {
+      const entryUrl = process.argv[1];
+      if (!entryUrl) return false;
+      return resolve(fileURLToPath((import.meta as any).url)) === resolve(entryUrl);
+    }
+  } catch { /* fall through */ }
+  return false;
+})();
+
+if (isMainModule) {
+  main().catch(err => {
+    console.error('[khype-cadence] fatal:', err);
+    process.exit(1);
+  });
+}

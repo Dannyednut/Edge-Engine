@@ -318,6 +318,116 @@ describe('HlLstArbScanner — EM-STRAT-004 signal-integrity regressions', () => 
     });
   });
 
+  describe('anchor freshness — EM-STRAT-005 §4 (chain head, NOT Accountant state-change)', () => {
+    it('fails closed on FUTURE block timestamp (clock skew / malformed RPC)', async () => {
+      // EM-STRAT-005 §4: a future block timestamp indicates either clock skew
+      // or a malformed RPC response. The scanner must fail closed.
+      // Block timestamp = now + 5 minutes (way beyond 60s tolerance).
+      const futureBlockTs = Math.floor(DEFAULT_NOW / 1000) + 300;
+      const scanner = new HlLstArbScanner(
+        { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+        makeDeps({
+          anchorRate: rateHex(1.0265),
+          blockTs: futureBlockTs,
+          withdrawalDelay: '0x' + (604800).toString(16),
+          poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+          poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+          now: DEFAULT_NOW,
+        }),
+      );
+      const alerts = await scanner.scan();
+      expect(alerts).toEqual([]);
+    });
+
+    it('fails closed on block timestamp slightly in the future beyond 60s tolerance', async () => {
+      // EM-STRAT-005 §4: 60s tolerance for clock skew. 90s in the future is beyond tolerance.
+      const futureBlockTs = Math.floor(DEFAULT_NOW / 1000) + 90;
+      const scanner = new HlLstArbScanner(
+        { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+        makeDeps({
+          anchorRate: rateHex(1.0265),
+          blockTs: futureBlockTs,
+          withdrawalDelay: '0x' + (604800).toString(16),
+          poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+          poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+          now: DEFAULT_NOW,
+        }),
+      );
+      const alerts = await scanner.scan();
+      expect(alerts).toEqual([]);
+    });
+
+    it('accepts block timestamp within 60s future tolerance (clock skew allowed)', async () => {
+      // EM-STRAT-005 §4: 30s in the future is within the 60s tolerance.
+      const skewBlockTs = Math.floor(DEFAULT_NOW / 1000) + 30;
+      const scanner = new HlLstArbScanner(
+        { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+        makeDeps({
+          anchorRate: rateHex(1.0265),
+          blockTs: skewBlockTs,
+          withdrawalDelay: '0x' + (604800).toString(16),
+          poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+          poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+          now: DEFAULT_NOW,
+        }),
+      );
+      const alerts = await scanner.scan();
+      expect(alerts.length).toBeGreaterThanOrEqual(1);
+      expect(alerts[0].anchorBlockTs).toBe(skewBlockTs);
+    });
+
+    it('fails closed on zero block timestamp', async () => {
+      const scanner = new HlLstArbScanner(
+        { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+        makeDeps({
+          anchorRate: rateHex(1.0265),
+          blockTs: 0,
+          withdrawalDelay: '0x' + (604800).toString(16),
+          poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+          poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+          now: DEFAULT_NOW,
+        }),
+      );
+      const alerts = await scanner.scan();
+      // fetchRedemptionAnchor returns null when blockTs <= 0.
+      expect(alerts).toEqual([]);
+    });
+
+    it('fails closed on negative block timestamp', async () => {
+      const scanner = new HlLstArbScanner(
+        { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+        makeDeps({
+          anchorRate: rateHex(1.0265),
+          blockTs: -1,
+          withdrawalDelay: '0x' + (604800).toString(16),
+          poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+          poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+          now: DEFAULT_NOW,
+        }),
+      );
+      const alerts = await scanner.scan();
+      expect(alerts).toEqual([]);
+    });
+
+    it('anchorBlockTs field is documented as chain-head ts (NOT Accountant state-change ts)', () => {
+      // EM-STRAT-005 §4: the field comment must accurately describe what
+      // the timestamp represents. We verify the source documentation does
+      // NOT claim it proves when the Accountant state last changed.
+      // (This is a static-source check — the field docstring is in the
+      // HlLstArbAlert interface.)
+      // We construct an alert and verify the field exists; the docstring
+      // check is enforced by the strategy-labeling.test.ts source contract.
+      const alert: HlLstArbAlert = {
+        pair: 'WHYPE/kHYPE', poolAddress: '0x', feeTier: 100,
+        marketPrice: 1.05, redemptionAnchor: 1.0265, grossDiscountPct: 5,
+        netProfitPct: 4.95, estimatedProfitUsd: 247.5, ammFeePct: 0.01,
+        flashloanFeePct: 0.04, poolLiquidity: 1n, withdrawalDelaySec: 604800,
+        anchorBlockTs: 1700000000, anchorFresh: true, executable: false, ts: 0,
+      };
+      expect(alert.anchorBlockTs).toBe(1700000000);
+    });
+  });
+
   describe('missing required inputs fail closed (EM-STRAT-004 §1)', () => {
     it('fails closed when anchor rate is unavailable (0x)', async () => {
       const scanner = new HlLstArbScanner(

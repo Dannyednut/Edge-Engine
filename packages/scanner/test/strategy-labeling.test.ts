@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { AirdropFarmingScanner } from '../src/strategies/airdrop-farming-scanner.js';
 import { LeverageLoopScanner } from '../src/strategies/leverage-loop-scanner.js';
-import { EulerLendingArbScanner } from '../src/strategies/euler-lending-arb-scanner.js';
+import { EulerLendingArbScanner, type EulerLendingArbDeps } from '../src/strategies/euler-lending-arb-scanner.js';
+import type { EulerVaultInfo } from '@edge/executor';
 import { CexLikeDexPriceArbStrategy, type PriceArbAlert } from '../src/strategies/cexlike-dex-price-arb.js';
 import { CexHlFundingArbStrategy, type CexHlFundingAlert } from '../src/strategies/cex-hl-funding-arb.js';
 import { HlLstArbScanner, type HlLstArbAlert } from '../src/strategies/hl-lst-arb-scanner.js';
@@ -52,24 +53,47 @@ describe('EM-STRAT-004 §4 — strategy-level flag enforcement', () => {
     }
   });
 
-  it('EulerLendingArbScanner sets monitoringOnly=true on every alert', async () => {
-    // Use try/catch since the scanner may attempt live RPC and fail in test env.
-    const scanner = new EulerLendingArbScanner({
-      minSpreadPct: 0.5, minLiquidityUsd: 10_000, maxSizeUsd: 5_000,
-    });
-    try {
-      const alerts = await scanner.scan();
-      for (const a of alerts) {
-        expect(a.monitoringOnly).toBe(true);
-        // EM-STRAT-004 §3: supplyApyPct, spreadPct, estimatedProfitUsd must be null.
-        expect(a.depositVault.supplyApyPct).toBeNull();
-        expect(a.borrowVault.supplyApyPct).toBeNull();
-        expect(a.spreadPct).toBeNull();
-        expect(a.estimatedProfitUsd).toBeNull();
-      }
-    } catch (e) {
-      // If live RPC fails, the scanner throws — that's acceptable for this test
-      // (we only assert on alerts that ARE returned). Skip silently.
+  it('EulerLendingArbScanner sets monitoringOnly=true on every alert (mocked vaults, NO live RPC)', async () => {
+    // EM-STRAT-005 §3: this test MUST NOT trigger live HyperEVM RPC. We inject
+    // a mock EulerClient that returns deterministic vault records. A failed
+    // assertion or unexpected exception must fail the test — no catch-and-skip.
+    const mockVaults: EulerVaultInfo[] = [
+      {
+        address: '0x0000000000000000000000000000000000000a01' as any,
+        name: 'eUSDC-3', symbol: 'eUSDC-3',
+        asset: '0x0000000000000000000000000000000000000b01' as any,
+        assetSymbol: 'USDC', assetDecimals: 6,
+        totalAssets: 258_000, totalBorrows: 200_000, totalSupply: 258_000, cash: 58_000,
+        interestRate: 0, interestRatePct: 7.12,
+        utilizationPct: 77.5, borrowable: true, collateral: false, ts: 0,
+      },
+      {
+        address: '0x0000000000000000000000000000000000000a02' as any,
+        name: 'eUSDC-4', symbol: 'eUSDC-4',
+        asset: '0x0000000000000000000000000000000000000b01' as any,
+        assetSymbol: 'USDC', assetDecimals: 6,
+        totalAssets: 241_000, totalBorrows: 150_000, totalSupply: 241_000, cash: 91_000,
+        interestRate: 0, interestRatePct: 4.50,
+        utilizationPct: 62.2, borrowable: true, collateral: false, ts: 0,
+      },
+    ];
+    const deps: EulerLendingArbDeps = {
+      eulerClient: { getAllVaults: async () => mockVaults },
+    };
+    const scanner = new EulerLendingArbScanner(
+      { minSpreadPct: 0.5, minLiquidityUsd: 10_000, maxSizeUsd: 5_000 },
+      deps,
+    );
+    // No try/catch — EM-STRAT-005 §3: a failed assertion or exception must fail the test.
+    const alerts = await scanner.scan();
+    expect(alerts.length).toBeGreaterThan(0);
+    for (const a of alerts) {
+      expect(a.monitoringOnly).toBe(true);
+      // EM-STRAT-004 §3 / EM-STRAT-005 §3: supplyApyPct, spreadPct, estimatedProfitUsd must be null.
+      expect(a.depositVault.supplyApyPct).toBeNull();
+      expect(a.borrowVault.supplyApyPct).toBeNull();
+      expect(a.spreadPct).toBeNull();
+      expect(a.estimatedProfitUsd).toBeNull();
     }
   });
 });
@@ -105,10 +129,12 @@ describe('EM-STRAT-004 §3 + §4 — presenter source contracts', () => {
       expect(eulerBlock).toContain('UNAVAILABLE');
     });
 
-    it('CEX-HL alerts downgrade severity to "info" when not actionable', () => {
+    it('CEX-HL alerts downgrade severity to "info" when not actionable (EM-STRAT-005 §2)', () => {
       // The CEX-HL dispatch must use a conditional severity `? 'opportunity' : 'info'`
-      // based on the actionable flag (either a.actionable directly or a local
-      // `actionable` variable derived from a.actionable).
+      // based on the actionable flag. With current implementation, actionable is
+      // always false (provenance = 'third-party-sourced' only), so every alert
+      // uses 'info' severity in practice — but the conditional expression must
+      // remain so future corroboration work only needs to flip provenance.
       const cexHlBlockMatch = src.match(/Process cex_hl alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
       expect(cexHlBlockMatch, 'CEX-HL alert block not found').not.toBeNull();
       const cexHlBlock = cexHlBlockMatch![0];
@@ -118,15 +144,27 @@ describe('EM-STRAT-004 §3 + §4 — presenter source contracts', () => {
       expect(cexHlBlock).toMatch(/a\.actionable/);
       // Must NOT use a hard-coded 'opportunity' severity for all CEX-HL alerts.
       expect(cexHlBlock).not.toMatch(/^severity:\s*'opportunity'\s*,\s*\n\s*strategyId:\s*'cex_hl_funding_arb'/m);
+      // EM-STRAT-005 §2: must surface provenance field and label as third-party-sourced.
+      expect(cexHlBlock).toMatch(/provenance/);
+      expect(cexHlBlock).toMatch(/third-party-sourced/);
     });
 
-    it('CEX-like price-arb alerts downgrade severity to "info" when not actionable', () => {
+    it('CEX-like price-arb alerts ALWAYS use severity "info" (monitoring-only, EM-STRAT-005 §1)', () => {
+      // EM-STRAT-005 §1: this strategy is monitoring-only. Every alert MUST
+      // use 'info' severity (never 'opportunity'). The previous conditional
+      // `a.actionable ? 'opportunity' : 'info'` has been replaced with a
+      // hard-coded `severity: 'info'`.
       const priceArbBlockMatch = src.match(/Process CexLikeDex price arb alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
       expect(priceArbBlockMatch, 'CEX-like price-arb alert block not found').not.toBeNull();
       const priceArbBlock = priceArbBlockMatch![0];
-      expect(priceArbBlock).toContain("a.actionable ? 'opportunity' : 'info'");
+      // Must contain a hard-coded 'info' severity.
+      expect(priceArbBlock).toMatch(/severity:\s*['"]info['"]/);
+      // Must NOT contain a conditional severity expression.
+      expect(priceArbBlock).not.toMatch(/a\.actionable\s*\?\s*['"]opportunity['"]/);
       // Must show 'UNAVAILABLE' for null profit (not coerce to 0).
       expect(priceArbBlock).toContain('UNAVAILABLE');
+      // Must explicitly label the alert as monitoring-only.
+      expect(priceArbBlock).toMatch(/monitoring[- ]only/i);
     });
 
     it('HL LST alerts preserve null withdrawal delay as UNAVAILABLE (not ?? 0)', () => {
@@ -375,32 +413,121 @@ describe('EM-STRAT-004 — alert-shape invariants', () => {
     expect(alert.ammFeePct).toBe(0.01);
   });
 
-  it('CexHlFundingAlert has hlFundingApr, cexFundingApr, netSpreadApr, sharpeNetApr as nullable', () => {
+  it('CexHlFundingAlert has hlFundingApr, cexFundingApr, netSpreadApr, sharpeNetApr as nullable, plus provenance field (EM-STRAT-005 §2)', () => {
     const alert: CexHlFundingAlert = {
       asset: 'ETH', cexVenue: 'binance',
       hlFundingApr: null, cexFundingApr: null, netSpreadApr: null,
       hlOiUsd: 0, cexOiUsd: 0, priceSpreadPct: 0,
       vooiExecutable: false, confidence: 0.6, source: 'sharpe',
-      sharpeNetApr: null, actionable: false,
+      sharpeNetApr: null,
+      provenance: 'third-party-sourced', // EM-STRAT-005 §2
+      actionable: false,
     };
     expect(alert.hlFundingApr).toBeNull();
     expect(alert.cexFundingApr).toBeNull();
     expect(alert.netSpreadApr).toBeNull();
     expect(alert.sharpeNetApr).toBeNull();
+    expect(alert.provenance).toBe('third-party-sourced');
     expect(alert.actionable).toBe(false);
   });
 
-  it('PriceArbAlert has actionable field', () => {
+  it('PriceArbAlert has actionable + monitoringOnly fields (EM-STRAT-005 §1)', () => {
     const alert: PriceArbAlert = {
       asset: 'ETH', longVenue: 'hl', shortVenue: 'lighter',
       longPrice: 100, shortPrice: 102, headlineSpreadPct: 2,
       atSizeSpreadPct: null, effectiveSpreadPct: 2, fundingSpread1h: null,
       longOiUsd: 0, shortOiUsd: 0, estimatedProfitUsd: null,
       economicsComplete: false, vooiExecutable: true, tradeType: 'convergence',
-      actionable: false, ts: 0,
+      actionable: false,
+      monitoringOnly: true, // EM-STRAT-005 §1
+      ts: 0,
     };
     expect(alert.actionable).toBe(false);
+    expect(alert.monitoringOnly).toBe(true);
     expect(alert.economicsComplete).toBe(false);
     expect(alert.estimatedProfitUsd).toBeNull();
+  });
+});
+
+// ─── Category D: EM-STRAT-005 §4 source documentation contracts ────────
+
+describe('EM-STRAT-005 §4 — kHYPE freshness documentation accuracy', () => {
+  const src = readFileSync(
+    resolve(SCANNER_RUNNERS_DIR, '..', 'strategies', 'hl-lst-arb-scanner.ts'),
+    'utf8',
+  );
+
+  it('documentation does NOT claim block timestamp proves Accountant state-change time', () => {
+    // EM-STRAT-005 §4: the block timestamp is the L1 chain-head timestamp,
+    // NOT a proof of when the Accountant state last changed. The docs must
+    // say so explicitly.
+    // Look for the SOURCE FRESHNESS section.
+    const freshnessSectionMatch = src.match(/SOURCE FRESHNESS[\s\S]*?(?=FAIL-CLOSED)/);
+    expect(freshnessSectionMatch, 'SOURCE FRESHNESS section not found').not.toBeNull();
+    const freshnessSection = freshnessSectionMatch![0];
+    // Must explicitly say it does NOT prove when Accountant state last changed.
+    // The phrase spans multiple lines; use [\s\S] to match across newlines.
+    expect(freshnessSection).toMatch(/does NOT prove when[\s\S]*?Accountant/i);
+    expect(freshnessSection).toMatch(/chain[- ]head/i);
+  });
+
+  it('documentation mentions fail-closed on future timestamps', () => {
+    const freshnessSectionMatch = src.match(/SOURCE FRESHNESS[\s\S]*?(?=FAIL-CLOSED)/);
+    expect(freshnessSectionMatch, 'SOURCE FRESHNESS section not found').not.toBeNull();
+    const freshnessSection = freshnessSectionMatch![0];
+    expect(freshnessSection).toMatch(/future/i);
+    expect(freshnessSection).toMatch(/clock skew/i);
+  });
+
+  it('field docstring for anchorBlockTs describes it as chain-head ts (not Accountant state-change)', () => {
+    // The HlLstArbAlert.anchorBlockTs docstring must accurately describe
+    // what the timestamp represents. The docstring appears BEFORE the field
+    // declaration in the interface.
+    // Pattern: capture from the docstring open to the field declaration.
+    const fieldDocMatch = src.match(/\/\*\*[\s\S]*?\*\/\s*anchorBlockTs:/);
+    expect(fieldDocMatch, 'anchorBlockTs field docstring not found').not.toBeNull();
+    const fieldDoc = fieldDocMatch![0];
+    expect(fieldDoc).toMatch(/chain[- ]head/i);
+    // The phrase "does NOT prove when the Accountant" spans multiple lines.
+    expect(fieldDoc).toMatch(/does NOT prove when[\s\S]*?Accountant/i);
+  });
+});
+
+describe('EM-STRAT-005 §2 — CEX-HL documentation accuracy', () => {
+  const src = readFileSync(
+    resolve(SCANNER_RUNNERS_DIR, '..', 'strategies', 'cex-hl-funding-arb.ts'),
+    'utf8',
+  );
+
+  it('TRADE STRUCTURE describes BOTH legs as perpetuals (not spot + perp)', () => {
+    // EM-STRAT-005 §2: previous documentation said "CEX spot (long) + HL perp (short)"
+    // while subtracting CEX perp funding — internally inconsistent.
+    const tradeSectionMatch = src.match(/TRADE STRUCTURE[\s\S]*?(?=\n \*\/|\n \* [A-Z])/);
+    expect(tradeSectionMatch, 'TRADE STRUCTURE section not found').not.toBeNull();
+    const tradeSection = tradeSectionMatch![0];
+    // The actual LONG/SHORT lines must contain "perp" (not "spot").
+    // Format: "LONG  perp ETH on a CEX venue" / "SHORT perp ETH on Hyperliquid"
+    const longLine = tradeSection.match(/LONG\s+\w+\s+\w+\s+on/i);
+    const shortLine = tradeSection.match(/SHORT\s+\w+\s+\w+\s+on/i);
+    expect(longLine, 'LONG line not found').not.toBeNull();
+    expect(shortLine, 'SHORT line not found').not.toBeNull();
+    expect(longLine![0]).toMatch(/perp/i);
+    expect(shortLine![0]).toMatch(/perp/i);
+    // The section must explicitly call out BOTH legs as perpetuals.
+    // The phrase spans a comment-wrapped line, so use [\s\S] to cross newlines
+    // and allow the comment prefix (" * ") between words.
+    expect(tradeSection).toMatch(/BOTH legs[\s\S]*?are perpetuals/i);
+  });
+
+  it('PROVENANCE MODEL section distinguishes third-party-sourced from independently-corroborated', () => {
+    const provenanceSectionMatch = src.match(/PROVENANCE MODEL[\s\S]*?(?=\n \*\/|\n \* [A-Z])/);
+    expect(provenanceSectionMatch, 'PROVENANCE MODEL section not found').not.toBeNull();
+    const provenanceSection = provenanceSectionMatch![0];
+    expect(provenanceSection).toMatch(/third-party-sourced/);
+    // The description uses "independently corroborated" (space); the type
+    // literal uses "independently-corroborated" (hyphen). Accept either.
+    expect(provenanceSection).toMatch(/independently[\s-]corroborated/i);
+    // Must explicitly say Sharpe /funding/rates is the SAME provider.
+    expect(provenanceSection).toMatch(/SAME provider/i);
   });
 });

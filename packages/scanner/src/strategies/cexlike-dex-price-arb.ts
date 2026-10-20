@@ -1,19 +1,35 @@
 /**
  * CexLikeDexPriceArbStrategy — price spread between CEX-like DEX perp venues.
  *
- * CORRECTED ECONOMICS (EM-STRAT-003):
+ * CORRECTED ECONOMICS (EM-STRAT-003, hardened EM-STRAT-004, finalized EM-STRAT-005):
  *   Perp-versus-perp price spreads are NOT instantly captureable profits.
  *   This is a CONVERGENCE TRADE whose realized result depends on:
  *   - Close-out spread at exit (may differ from entry spread)
- *   - Trading fees on both legs
- *   - Funding rate differential during the hold period
+ *   - Venue-specific trading fees (per leg, with verified schedule)
+ *   - Funding rate differential during the hold period (units + sign)
  *   - Margin requirements and liquidation risk
- *   - Time held (funding accrues per hour)
+ *   - Explicit holding-period assumption (funding accrues per hour)
+ *   - Position/margin costs
  *
- *   The scanner reports the observed spread as a SIGNAL, not a guaranteed
- *   profit. Net-profit estimates are only computed when all required
- *   economic inputs (fees, funding) are available. When inputs are
- *   missing, the alert is labeled as monitoring-only.
+ *   EM-STRAT-005 §1: A verified net-profit estimate requires ALL of the
+ *   above inputs to be available. The previous code equated
+ *   `fundingSpread1h !== null` with "complete economics" and computed
+ *   `estimatedProfitUsd = (|effectiveSpreadPct| - 0.04%) × maxSizeUsd`
+ *   using an UNVERIFIED 4 bps round-trip fee assumption that did not
+ *   actually incorporate the funding rate into the profit estimate.
+ *
+ *   Until a complete convergence model is implemented — including
+ *   entry/exit assumptions, venue-specific fee schedules, funding rates
+ *   with validated units and sign, an explicit holding-period assumption,
+ *   and position/margin costs — this scanner keeps every alert
+ *   MONITORING-ONLY:
+ *     - estimatedProfitUsd = null
+ *     - actionable = false
+ *     - monitoringOnly = true
+ *
+ *   The observed spread is reported as a SIGNAL. Presenters MUST NOT
+ *   present it as an actionable opportunity or display a numerical
+ *   net-profit figure.
  *
  *   At-size spread (priceSpreadAtSize) is preferred over headline spread
  *   (priceSpread) when available, as it accounts for depth/slippage.
@@ -49,27 +65,40 @@ export interface PriceArbAlert {
   atSizeSpreadPct: number | null;
   /** The spread used for alerting (at-size if available, else headline). */
   effectiveSpreadPct: number;
-  /** Funding spread 1h (if available). */
+  /** Funding spread 1h (if available). Diagnostic only — NOT incorporated into a profit estimate. */
   fundingSpread1h: number | null;
   longOiUsd: number;
   shortOiUsd: number;
-  /** Estimated net profit in USD. null = cannot compute (missing fees or funding). */
+  /**
+   * Estimated net profit in USD. ALWAYS null in the current implementation
+   * (EM-STRAT-005 §1) — a verified convergence-economics model is not yet
+   * implemented. Presenters MUST display this as 'UNAVAILABLE', not 0.
+   */
   estimatedProfitUsd: number | null;
-  /** Whether all economic inputs were available for the profit estimate. */
+  /**
+   * Whether all economic inputs were available for a verified profit
+   * estimate. ALWAYS false in the current implementation (EM-STRAT-005 §1).
+   * `fundingSpread1h !== null` does NOT by itself make economics complete.
+   */
   economicsComplete: boolean;
   vooiExecutable: boolean;
   /**
-   * CONVERGENCE TRADE: Result depends on close-out spread, fees, funding, margin, and time.
-   * EM-STRAT-004: when economicsComplete=false, this alert MUST NOT be presented
-   * with actionable-opportunity severity or an exact net-profit figure.
+   * CONVERGENCE TRADE: Result depends on close-out spread, fees, funding,
+   * margin, and time. No verified profit estimate is produced.
    */
   tradeType: 'convergence';
   /**
-   * Whether the alert is actionable. False when economicsComplete is false
-   * (missing funding or fee inputs). Presenters MUST downgrade severity
-   * to 'info' (or skip) when actionable=false.
+   * Whether the alert is actionable. ALWAYS false in the current
+   * implementation (EM-STRAT-005 §1) — the convergence-economics model
+   * is incomplete. Presenters MUST downgrade severity to 'info' (or skip).
    */
   actionable: boolean;
+  /**
+   * MONITORING ONLY: this alert is observed for informational purposes.
+   * Must NOT be presented as an actionable opportunity.
+   * (EM-STRAT-005 §1)
+   */
+  monitoringOnly: boolean;
   ts: number;
 }
 
@@ -128,7 +157,12 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
         const atSizeSpreadPct = atSizeSpread !== null ? Number(atSizeSpread) * 100 : null;
         const effectiveSpreadPct = atSizeSpreadPct ?? headlineSpreadPct;
 
-        // Funding spread — may be null if not provided
+        // Funding spread — may be null if not provided. Diagnostic only.
+        // EM-STRAT-005 §1: presence of this field does NOT make economics
+        // complete. A verified convergence model requires entry/exit
+        // assumptions, venue-specific fee schedules, funding rates with
+        // validated units and sign, an explicit holding-period assumption,
+        // and position/margin costs.
         const fundingSpread1h = pair.fundingSpread1h != null ? Number(pair.fundingSpread1h) : null;
 
         // Volume filter
@@ -147,22 +181,23 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
         const persistentCount = history.filter(s => Math.abs(s) >= this.params.minPriceSpreadPct).length;
         if (persistentCount < minPersistence) continue;
 
-        // Net profit estimate: only compute when we have fee data.
-        // VOOI fee estimate: 4 bps round-trip (2 bps per leg on DEX venues).
-        // If funding spread is available, include it as a cost/benefit.
-        const feePct = 0.04; // 4 bps round-trip
-        const grossProfitPct = Math.abs(effectiveSpreadPct) - feePct;
-
-        // We can only compute net profit if funding is available (or explicitly zero).
-        // If funding is null, we don't know the carry cost/benefit during the hold.
-        const economicsComplete = fundingSpread1h !== null;
-        const estimatedProfitUsd: number | null = economicsComplete
-          ? (grossProfitPct / 100) * this.params.maxSizeUsd
-          : null;
-
-        // EM-STRAT-004: alert is actionable only when economics are complete.
-        // When funding is missing, presenters MUST downgrade severity to 'info'.
-        const actionable = economicsComplete && estimatedProfitUsd !== null && estimatedProfitUsd > 0;
+        // ── EM-STRAT-005 §1: Monitoring-only convergence signal ─────────
+        // A verified net-profit estimate requires a complete convergence
+        // model (see module docstring). Until that model is implemented,
+        // every alert is monitoring-only with null economics:
+        //   - estimatedProfitUsd = null
+        //   - economicsComplete = false
+        //   - actionable = false
+        //   - monitoringOnly = true
+        //
+        // The previous code computed `estimatedProfitUsd` using an
+        // unverified 4 bps round-trip fee assumption and did not actually
+        // incorporate the funding rate into the profit estimate. We do
+        // NOT invent missing inputs to make tests pass.
+        const estimatedProfitUsd: number | null = null;
+        const economicsComplete = false;
+        const actionable = false;
+        const monitoringOnly = true;
 
         alerts.push({
           asset: item.asset,
@@ -181,6 +216,7 @@ export class CexLikeDexPriceArbStrategy implements Strategy {
           vooiExecutable: true,
           tradeType: 'convergence',
           actionable,
+          monitoringOnly,
           ts: Date.now(),
         });
       }

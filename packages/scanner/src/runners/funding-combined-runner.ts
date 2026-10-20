@@ -137,8 +137,11 @@ async function main() {
       ]);
 
       const filteredPerp = perpAlerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
-      // EM-STRAT-004: only include CEX-HL alerts with independently verified
-      // netSpreadApr (actionable=true). Non-actionable alerts are NOT sent.
+      // EM-STRAT-005 §2: CEX-HL alerts are non-actionable until venue-native
+      // corroboration is wired (provenance = 'independently-corroborated').
+      // Until then, the actionable flag is always false, so filteredCexHl
+      // is always empty. We keep the filter expression so that future
+      // corroboration work only needs to flip the provenance field.
       const filteredCexHl = cexHlAlerts.filter(a => a.actionable && (a.netSpreadApr ?? -Infinity) >= MIN_APR_FOR_ALERT);
 
       console.log(`[scan ${scanCount}] perp_funding: ${filteredPerp.length} opps | cex_hl: ${filteredCexHl.length} opps | ${Date.now() - start}ms`);
@@ -210,9 +213,11 @@ async function main() {
           }
         } else {
           const a = alert as CexHlFundingAlert;
-          // EM-STRAT-004: only actionable alerts reach this branch (filter
-          // above enforces a.actionable). Display raw rates as 'UNAVAILABLE'
-          // when null rather than coercing to 0.
+          // EM-STRAT-005 §2: only alerts with provenance = 'independently-corroborated'
+          // AND actionable=true reach this branch. Current implementation always
+          // sets provenance = 'third-party-sourced', so this branch is unreachable
+          // until venue-native corroboration is wired. Display raw rates with
+          // 'UNAVAILABLE' fallback when null.
           const fmtOrNull = (v: number | null, digits = 2) =>
             v === null ? 'UNAVAILABLE' : v.toFixed(digits);
           await alerter.sendAlert({
@@ -223,10 +228,11 @@ async function main() {
             title: `[CEX-HL] ${a.asset} ${(a.netSpreadApr ?? 0).toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
             body: [
               `*Long perp* ${a.cexVenue}  →  *Short perp* Hyperliquid`,
-              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%* (independently verified)`,
+              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%* (independently corroborated)`,
               `HL funding (raw): ${fmtOrNull(a.hlFundingApr)}% APR`,
               `CEX funding (raw): ${fmtOrNull(a.cexFundingApr)}% APR`,
               `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
+              `Provenance: ${a.provenance}`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,

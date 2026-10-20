@@ -247,32 +247,33 @@ async function main() {
         });
       }
 
-      // Process cex_hl alerts — only send actionable alerts when net carry is verified
-      // EM-STRAT-004: never present an alert with opportunity severity when
-      // netSpreadApr is null. When non-actionable, downgrade to 'info' and
-      // explicitly label the alert as "REFERENCE ONLY — net carry unverified".
+      // Process cex_hl alerts — EM-STRAT-005 §2: provenance model.
+      // Per-leg rates from Sharpe /funding/rates are third-party-sourced
+      // (same provider as cross-exchange). Until venue-native corroboration
+      // is wired, EVERY alert is non-actionable and MUST use 'info' severity.
+      // The alert body explicitly labels the provenance and reference nature.
       for (const a of cexHlAlerts.slice(0, 2)) {
         const key = `cex_hl|${a.asset}|${a.cexVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
-        const actionable = a.actionable && (a.netSpreadApr ?? -Infinity) >= 5;
         const fmtOrNull = (v: number | null, digits = 2) =>
           v === null ? 'UNAVAILABLE' : v.toFixed(digits);
         await alerter.sendAlert({
           id: `cex_hl_${a.asset}_${a.cexVenue}_${Date.now()}`,
           ts: Date.now(),
-          severity: actionable ? 'opportunity' : 'info',
+          severity: a.actionable ? 'opportunity' : 'info',
           strategyId: 'cex_hl_funding_arb',
-          title: actionable
+          title: a.actionable
             ? `[CEX-HL] ${a.asset} ${a.netSpreadApr!.toFixed(1)}% APR · ${a.cexVenue}↔HL`
-            : `[CEX-HL-REF] ${a.asset} ${a.cexVenue}↔HL — net carry unverified`,
+            : `[CEX-HL-REF] ${a.asset} ${a.cexVenue}↔HL — third-party-sourced (not independently verified)`,
           body: [
             `Long perp ${a.cexVenue} -> Short perp Hyperliquid`,
-            actionable
-              ? `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (independently verified)`
-              : `Net spread APR: UNAVAILABLE (raw rates incomplete — REFERENCE ONLY)`,
-            `HL funding (raw): ${fmtOrNull(a.hlFundingApr)}% / CEX funding (raw): ${fmtOrNull(a.cexFundingApr)}%`,
+            a.actionable
+              ? `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (independently corroborated)`
+              : `Net spread APR: ${fmtOrNull(a.netSpreadApr)} (third-party-sourced — REFERENCE ONLY)`,
+            `HL funding (raw, Sharpe): ${fmtOrNull(a.hlFundingApr)}% / CEX funding (raw, Sharpe): ${fmtOrNull(a.cexFundingApr)}%`,
             `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
+            `Provenance: ${a.provenance}`,
             `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
             `VOOI atomic: ${a.vooiExecutable ? 'YES' : 'NO (need direct SDK)'}`,
           ].join('\n'),
@@ -418,9 +419,9 @@ async function main() {
       }
 
       // Process CexLikeDex price arb alerts — convergence trades, not instant profit.
-      // EM-STRAT-004: when economicsComplete=false (missing funding/fees), the
-      // alert MUST NOT use 'opportunity' severity and MUST NOT show an exact
-      // net-profit figure. Downgrade to 'info' and show 'UNAVAILABLE' for profit.
+      // EM-STRAT-005 §1: this strategy is monitoring-only. Every alert MUST
+      // use 'info' severity (never 'opportunity'). estimatedProfitUsd is
+      // always null. The observed spread is a SIGNAL, not a verified profit.
       for (const a of priceArbAlerts.slice(0, 3)) {
         const key = `pricearb|${a.asset}|${a.longVenue}|${a.shortVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -428,18 +429,17 @@ async function main() {
         await alerter.sendAlert({
           id: `pricearb_${a.asset}_${Date.now()}`,
           ts: Date.now(),
-          severity: a.actionable ? 'opportunity' : 'info',
+          severity: 'info', // EM-STRAT-005 §1: always info (monitoring-only)
           strategyId: 'cexlike_dex_price_arb',
-          title: a.actionable
-            ? `[PRICE-CONVERGENCE] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread`
-            : `[PRICE-CONVERGENCE-INFO] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread (economics incomplete)`,
+          title: `[PRICE-CONVERGENCE-MONITOR] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread (monitoring only)`,
           body: [
+            `MONITORING ONLY — convergence-economics model not yet implemented`,
             `CONVERGENCE TRADE: result depends on close-out, fees, funding, margin, time`,
             `Long ${a.longVenue} $${a.longPrice} -> Short ${a.shortVenue} $${a.shortPrice}`,
             `Headline: ${a.headlineSpreadPct.toFixed(2)}%  At-size: ${a.atSizeSpreadPct?.toFixed(2) ?? 'UNAVAILABLE'}%  Effective: ${a.effectiveSpreadPct.toFixed(2)}%`,
-            `Funding 1h: ${a.fundingSpread1h !== null ? a.fundingSpread1h.toFixed(4) + '%' : 'UNAVAILABLE'}`,
-            `Est. profit: ${a.estimatedProfitUsd !== null ? '$' + a.estimatedProfitUsd.toFixed(2) : 'UNAVAILABLE (missing economics)'}`,
-            `Economics complete: ${a.economicsComplete}  Actionable: ${a.actionable}`,
+            `Funding 1h (diagnostic): ${a.fundingSpread1h !== null ? a.fundingSpread1h.toFixed(4) + '%' : 'UNAVAILABLE'}`,
+            `Est. profit: UNAVAILABLE (convergence-economics model incomplete)`,
+            `Economics complete: ${a.economicsComplete}  Actionable: ${a.actionable}  Monitoring only: ${a.monitoringOnly}`,
             `Long OI: $${a.longOiUsd.toFixed(0)}  Short OI: $${a.shortOiUsd.toFixed(0)}`,
           ].join('\n'),
           channels: ['telegram'],
@@ -805,26 +805,31 @@ async function main() {
         if (ts < cutoff) seenOpps.delete(k);
       }
 
-      // ─── EM-STRAT-004: Non-actionable strategy enforcement ───────────
+      // ─── EM-STRAT-004 / EM-STRAT-005: Non-actionable strategy enforcement ─
       // airdropAlerts and leverageAlerts carry `researchOnly: true` — they
       // are based on static campaign/rate tables, NOT live market data.
       // eulerLendingArbAlerts carry `monitoringOnly: true` — supply APY
       // cannot be verified, so no actionable spread/profit can be computed.
+      // priceArbAlerts (CexLikeDex) carry `monitoringOnly: true` (EM-STRAT-005 §1)
+      // — the convergence-economics model is incomplete; no verified profit
+      // estimate is produced.
       //
       // Policy: NONE of these alerts may be sent through `alerter.sendAlert()`
-      // with `severity: 'opportunity'` (or 'critical'). They are intentionally
-      // omitted from the alert dispatch blocks above. The per-scan log line
-      // records their counts for observability only.
+      // with `severity: 'opportunity'` (or 'critical'). They are dispatched
+      // above with 'info' severity only. The per-scan log line records their
+      // counts for observability.
       //
       // Regression tests in `strategy-labeling.test.ts` verify:
       //   1. airdropAlerts[i].researchOnly === true
       //   2. leverageAlerts[i].researchOnly === true
       //   3. eulerLendingArbAlerts[i].monitoringOnly === true
-      //   4. This file does not call alerter.sendAlert() with severity
-      //      'opportunity' for any of those three alert types.
-      void airdropAlerts;       // observed but never alerted
-      void leverageAlerts;      // observed but never alerted
+      //   4. priceArbAlerts[i].monitoringOnly === true (EM-STRAT-005 §1)
+      //   5. This file does not call alerter.sendAlert() with severity
+      //      'opportunity' for any of those four alert types.
+      void airdropAlerts;       // observed but never alerted as opportunity
+      void leverageAlerts;      // observed but never alerted as opportunity
       void eulerLendingArbAlerts; // monitoring-only: handled above with 'info' severity
+      // priceArbAlerts are dispatched above with 'info' severity (monitoring-only)
     } catch (err) {
       console.error(`[scan ${scanCount}] failed:`, err);
     }
