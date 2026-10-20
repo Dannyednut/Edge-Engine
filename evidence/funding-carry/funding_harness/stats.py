@@ -24,6 +24,26 @@ Overall verdict precedence (EI-STRAT-003): fewer than 3 majors with adequate
 CEX-leg coverage => UNRESOLVED before any PASS/FAIL/BETWEEN mapping (per-
 asset diagnostics remain visible in per_asset).
 
+Authorized-start boundary (EI-STRAT-004): an explicit --window-start is the
+Instructor-authorized series start and is applied as an EXACT UTC timestamp
+against each pair's/observation's actual collected_at_utc BEFORE slot
+aggregation/deduplication — a pre-authorization sample collected on the same
+UTC date (even in the same 12h slot) can never contribute to the authorized
+series. Excluded rows are counted and disclosed in the report; the underlying
+runs are never modified or deleted. The default anchor (earliest run
+timestamp) is diagnostic only and is labeled in every report as NOT an
+authorized series start (the earliest run may be the pre-authorization
+pilot).
+
+Completeness-definition metadata (EI-STRAT-004): the hash-locked
+GATE_CONFIG["completeness_definition"] string (".../(days_spanned *
+samples_per_day)") is LEGACY pre-registration metadata, superseded by the
+fixed pre-registered window above. GATE_CONFIG is hash-locked, so the string
+is retained verbatim; every report carries an explicit legacy-status block
+(completeness_definition_metadata) plus the effective definition
+(completeness_definition_effective) so the legacy string can never be read
+as the operative calculation.
+
 Threshold immutability: every run manifest embeds gate_config_sha256; if any
 run (or this module) disagrees with the pre-registered hash, stats refuses to
 produce a report (GateDriftError) instead of comparing against drifted
@@ -42,6 +62,12 @@ from . import config
 from .collect import GateDriftError
 from .convert import iso_date, iso_to_utc_slot12
 from .pairing import build_pairs, dedupe_slots
+
+
+def _slot_dt(slot_label: str) -> datetime:
+    """'YYYY-MM-DDT00Z|12Z' slot key -> aware UTC datetime of slot start."""
+    return datetime.strptime(slot_label, "%Y-%m-%dT%HZ").replace(
+        tzinfo=timezone.utc)
 
 VERDICT_PASS = "PASS"
 VERDICT_FAIL = "FAIL"
@@ -69,9 +95,14 @@ def _window_anchor(runs: list[dict], override: Optional[str]) -> Optional[str]:
 
     Default anchor: the earliest run timestamp (manifest started_utc, with
     fallbacks to the run's first pair / observation). An explicit override
-    (CLI --window-start) pins the Instructor-authorized series start; slots
-    before the anchor are excluded from metrics and the missing slots count
-    against completeness (missing-beginning coverage cannot hide).
+    (CLI --window-start) pins the Instructor-authorized series start; the
+    override is additionally applied as an EXACT UTC timestamp boundary
+    against every record's collected_at_utc BEFORE slot aggregation (see
+    compute_report — EI-STRAT-004), so pre-start samples on the anchor date
+    cannot contribute. Slots before the anchor are excluded from metrics and
+    missing slots count against completeness (missing-beginning coverage
+    cannot hide). The DEFAULT anchor is diagnostic only: it is NOT an
+    authorized series start and reports label it as such.
     """
     if override:
         return _parse_ts(override).strftime("%Y-%m-%d")
@@ -143,16 +174,42 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
     ``window_days`` is diagnostic only (reported as window_requested_days);
     the gate window length is fixed by GATE_CONFIG and never changes.
     ``window_start_utc`` optionally pins the authorized series start (UTC);
-    by default the window anchors at the earliest run timestamp.
+    it is applied as an EXACT timestamp boundary against every record's
+    collected_at_utc BEFORE slot aggregation (EI-STRAT-004). By default the
+    window anchors at the earliest run timestamp — a diagnostic anchor that
+    is NOT an authorized series start (see evaluation_window.anchor_note).
     """
     runs = load_runs(base_dir)
     check_gate_drift(runs)
     g = config.GATE_CONFIG
 
-    # flatten
-    all_pairs = [p for rec in runs for p in rec["pairs"]]
-    all_obs = [o for rec in runs for o in rec["observations"]]
-    all_gaps = [gp for rec in runs for gp in rec["gaps"]]
+    # ---- authorized-start boundary (EI-STRAT-004) -------------------------
+    # An explicit --window-start is the Instructor-authorized series start.
+    # It is compared (inclusive >=) against each pair/observation/gap's
+    # ACTUAL collected_at_utc at second resolution BEFORE slot aggregation /
+    # deduplication, so a pre-authorization pilot sample collected on the
+    # same UTC date — even inside the same 12h slot — can never contribute
+    # to the authorized series. Excluded rows are counted and disclosed
+    # below; the underlying runs are never modified or deleted.
+    boundary_utc = _parse_ts(window_start_utc) if window_start_utc else None
+
+    def _in_authorized_series(ts: str) -> bool:
+        return boundary_utc is None or _parse_ts(ts) >= boundary_utc
+
+    # flatten (boundary-filtered)
+    excluded_pairs: list[dict] = []
+    all_pairs: list[dict] = []
+    for rec in runs:
+        for p in rec["pairs"]:
+            (all_pairs if _in_authorized_series(p["collected_at_utc"])
+             else excluded_pairs).append(p)
+    all_obs = [o for rec in runs for o in rec["observations"]
+               if _in_authorized_series(o["collected_at_utc"])]
+    all_gaps = [gp for rec in runs for gp in rec["gaps"]
+                if _in_authorized_series(gp["collected_at_utc"])]
+    excluded_primary_slots = sorted({
+        iso_to_utc_slot12(p["collected_at_utc"]) for p in excluded_pairs
+        if p.get("primary_cex_leg")})
 
     report: dict = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -178,8 +235,20 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
                        "verdict_reasons": ["cannot determine the window "
                                            "anchor: no run timestamps"]})
         return report
-    window_end_exclusive = (date.fromisoformat(anchor_date)
-                            + timedelta(days=gate_window_days)).isoformat()
+    # Slot grid: the 28 half-day slots starting at the floor-12h of the
+    # window start (midnight for the default earliest-run anchor and for
+    # midnight overrides — identical to the EI-STRAT-003 date semantics).
+    if boundary_utc is not None:
+        first_slot_dt = boundary_utc.replace(minute=0, second=0,
+                                             microsecond=0)
+        first_slot_dt = first_slot_dt.replace(
+            hour=12 if first_slot_dt.hour >= 12 else 0)
+    else:
+        d0 = date.fromisoformat(anchor_date)
+        first_slot_dt = datetime(d0.year, d0.month, d0.day,
+                                 tzinfo=timezone.utc)
+    window_end_dt = first_slot_dt + timedelta(days=gate_window_days)
+    window_end_exclusive = window_end_dt.date().isoformat()
 
     # ---- per-asset gate metrics ------------------------------------------
     per_asset = {}
@@ -189,10 +258,13 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
         slots_all = dedupe_slots([(iso_to_utc_slot12(p["collected_at_utc"]),
                                    p["net_apr_pre_registered"],
                                    p["collected_at_utc"]) for p in primary])
-        # metrics use only slots inside the fixed evaluation window; slots
-        # outside are reported separately (never silently dropped or merged)
+        # metrics use only slots inside the fixed evaluation-window grid;
+        # slots outside are reported separately (never silently dropped or
+        # merged). Grid membership is a datetime comparison on the slot
+        # start (EI-STRAT-004), equivalent to the EI-STRAT-003 date-prefix
+        # test for midnight-anchored windows.
         slots = [(s, v) for s, v in slots_all
-                 if anchor_date <= s[:10] < window_end_exclusive]
+                 if first_slot_dt <= _slot_dt(s) < window_end_dt]
         slots_outside = len(slots_all) - len(slots)
         days: dict[str, list[float]] = {}
         for slot, net in slots:
@@ -291,24 +363,46 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
         gap_summary.setdefault(src, {}).setdefault(reason, 0)
         gap_summary[src][reason] += 1
     per_source_dates: dict[str, list[str]] = {}
-    for rec in runs:
-        d = iso_date(rec["manifest"]["started_utc"]) if rec.get("manifest") \
-            else rec["run_id"][:10]
-        obs_sources = {o["source"] for o in rec["observations"]}
-        for src in config.SOURCES:
-            if src in obs_sources:
-                per_source_dates.setdefault(src, []).append(d)
+    # built from the boundary-filtered observations (EI-STRAT-004): a source
+    # date is listed only when an in-boundary complete observation exists
+    for o in all_obs:
+        per_source_dates.setdefault(o["source"], []).append(
+            iso_date(o["collected_at_utc"]))
 
     report.update({
         "n_runs": len(runs),
         "window_requested_days": window_days,
         "evaluation_window": {
             "anchor_utc": anchor_date,
+            "anchor_basis": ("authorized_start_override"
+                             if boundary_utc is not None
+                             else "default_earliest_run"),
+            "authorized_boundary_utc": (
+                boundary_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if boundary_utc is not None else None),
+            "anchor_note": (
+                "window anchored at the Instructor-authorized series start "
+                "(--window-start), applied as an exact UTC timestamp "
+                "against each record's collected_at_utc before slot "
+                "aggregation; pre-start samples are excluded and disclosed "
+                "below"
+                if boundary_utc is not None else
+                "window anchored at the earliest recorded run timestamp; "
+                "this is NOT an authorized series start — the earliest run "
+                "may be a pre-authorization pilot sample, and under this "
+                "default anchor pre-start observations are included. Pass "
+                "--window-start with the Instructor-authorized start before "
+                "evaluating any authorized series"),
+            "first_slot_utc": first_slot_dt.strftime("%Y-%m-%dT%HZ"),
             "end_utc_exclusive": window_end_exclusive,
+            "end_slot_exclusive_utc": window_end_dt.strftime("%Y-%m-%dT%HZ"),
             "days": gate_window_days,
             "slots": window_slots,
+            "grid_slots": window_slots,
             "denominator_basis": "fixed_preregistered_window (EI-STRAT-003)",
             "window_start_override": bool(window_start_utc),
+            "pairs_before_boundary_excluded": len(excluded_pairs),
+            "boundary_excluded_primary_slots": excluded_primary_slots,
         },
         "per_asset": per_asset,
         "gaps_summary": gap_summary,
@@ -316,6 +410,34 @@ def compute_report(base_dir: Path, *, window_days: int = 14,
             k: sorted(set(v)) for k, v in per_source_dates.items()},
         "coverage_statement": _coverage_statement(per_asset, gap_summary),
     })
+
+    # ---- completeness-definition metadata clarity (EI-STRAT-004) ----------
+    # GATE_CONFIG is hash-locked, so its pre-audit completeness_definition
+    # string cannot be edited; the report states its legacy status explicitly
+    # so it can never be read as the operative definition.
+    report["completeness_definition_effective"] = (
+        "per asset: distinct 12h collection slots with >=1 complete paired "
+        "observation inside the fixed pre-registered 14-day window, divided "
+        "by window_days_min x samples_per_day = "
+        f"{window_slots} (the denominator NEVER derives from the observed "
+        "date span)")
+    report["completeness_definition_metadata"] = {
+        "hash_locked_string": g["completeness_definition"],
+        "string_status": "legacy_preregistration_metadata_superseded",
+        "explanation": (
+            "The hash-locked GATE_CONFIG['completeness_definition'] string "
+            "describes the pre-audit span-derived denominator "
+            "(days_spanned * samples_per_day). It is LEGACY METADATA, "
+            "superseded by the EI-STRAT-003 fixed pre-registered 14-day "
+            "window (window_days_min x samples_per_day = "
+            f"{window_slots} slots); the effective calculation never "
+            "derives the denominator from the observed date span. The "
+            "string is retained verbatim because GATE_CONFIG is hash-locked "
+            "(gate_config_sha256); changing it would change the hash and "
+            "requires explicit Instructor approval BEFORE any such change."),
+        "effective_calculation": report["completeness_definition_effective"],
+        "gate_config_sha256": report["gate_config_sha256"],
+    }
 
     # ---- overall verdict --------------------------------------------------
     # EI-STRAT-003: enforce the pre-registered three-major coverage condition

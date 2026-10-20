@@ -52,7 +52,7 @@ evidence/funding-carry/
 │   ├── stats.py               window metrics + pre-registered gate verdict engine
 │   ├── fees.py                NON-GATE fee sensitivity sidecar (never a verdict)
 │   └── cli.py                 collect / stats / verify / fees (exit codes 0/1/2/3)
-├── tests/                     75 offline tests (fixtures = bounded real payloads)
+├── tests/                     83 offline tests (fixtures = bounded real payloads)
 └── data/                      runtime only (gitignored): runs/<run_id>/…
 ```
 
@@ -148,6 +148,33 @@ sample is 1/28 = 3.6% (the pre-audit implementation computed 1/2 = 50% for the s
 sample — fixed and regression-tested). The observed span is reported separately as a
 diagnostic only.
 
+**Completeness-definition metadata (EI-STRAT-004):** the hash-locked
+`GATE_CONFIG["completeness_definition"]` string still carries the pre-audit
+formula "(days_spanned * samples_per_day)". It is **legacy pre-registration
+metadata, not the operative definition**: GATE_CONFIG is hash-locked, so the
+string is retained verbatim while every `stats` report states the effective
+calculation explicitly (`completeness_definition_effective` — the fixed
+28-slot window above) and labels the legacy string as superseded
+(`completeness_definition_metadata`, with the reason it cannot be edited).
+Byte-identity of both the string and `gate_config_sha256` is
+regression-tested; changing the string would change the hash and requires
+explicit Instructor approval BEFORE any such change.
+
+**Authorized-start boundary (EI-STRAT-004):** `stats --window-start` is the
+Instructor-authorized series start, applied as an EXACT UTC timestamp
+(inclusive ≥) against each pair's/observation's actual `collected_at_utc`
+BEFORE slot aggregation/deduplication. A pre-authorization sample collected
+on the same UTC date as the authorized start — even inside the same 12h slot
+(the real pilot was recorded 2026-10-20T04:56:54Z, so the same-day-start
+hazard is live) — can never contribute to the authorized series. The slot
+grid is the 28 half-day slots from the floor-12h of the start; excluded rows
+are disclosed in the report (`pairs_before_boundary_excluded`,
+`boundary_excluded_primary_slots`), never deleted. The default earliest-run
+anchor is labeled `default_earliest_run` with an explicit "NOT an authorized
+series start" note and remains diagnostic-only (the runbook mandates
+`--window-start` for any authorized evaluation). The fixed 28-slot
+denominator, the pre-registered gate and its hash are unchanged.
+
 **Three-major coverage condition (EI-STRAT-003):** a major (BTC/ETH/SOL) counts as
 adequately covered when it has ≥ ceil(0.85 × 28) = **24 complete paired slots** inside
 the evaluation window (the same 85% bar the per-asset gate applies). With fewer than
@@ -220,10 +247,11 @@ manifest-migration decision) — no such change is implemented here.
 |---|---|
 | Manually invoked read-only Python tool, free public sources, no credentials | `cli.py` (single-shot invocations); stdlib-only runtime |
 | New dedicated evidence path, no modification of existing data | `evidence/funding-carry/data/` (new; per-run dirs; append-only) |
-| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (75 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard) |
+| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (83 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard, exact-start boundary, legacy-metadata clarity) |
 | Fail closed, mark gaps, never manufacture rows | `models.validate_observation`, gap-row design, exit-code contract |
 | Runbook for twice-daily collection, append semantics, hash/consistency checks, derived stats | `RUNBOOK.md` + `store.verify` + `stats` |
 | No cron/GHA/daemon/daemon-like scheduling | none exists; runbook states the prohibition |
 | ≥14 days × 2/day, ≥85% completeness, CEX leg on ≥3 majors, honest gap reporting | `stats.py` gate engine (UNRESOLVED path unit-tested) |
 | EI-STRAT-003: fixed 28-slot completeness denominator · three-major overall condition · non-gate fee sensitivity sidecar · offline CI job | `stats.py` (fixed window + majors gate) · `fees.py` + `fees` CLI · `tests/test_gate_window.py` / `test_gate_majors.py` / `test_fees_sidecar.py` / `test_offline_guard.py` · `.github/workflows/evidence-funding-carry-tests.yml` |
+| EI-STRAT-004: exact authorized-start boundary before slot aggregation · legacy completeness-definition metadata labeled · authorized-start runbook procedure | `stats.py` (exact `collected_at_utc` boundary + 28-slot grid + exclusion disclosure + legacy-status block) · `tests/test_window_boundary.py` · `tests/test_completeness_definition.py` · `RUNBOOK.md` §0.1/§4 |
 | Pre-registered gate thresholds unchanged | `GATE_CONFIG` + `gate_config_sha256` drift lock (exit 3) |

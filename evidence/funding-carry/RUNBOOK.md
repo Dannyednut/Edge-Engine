@@ -21,6 +21,32 @@ no blockchain RPC · EI-S008 untouched.
   `ei/funding-carry-evidence-harness`. All commands below run from there.
   `python3 -m funding_harness --help` shows the CLI.
 
+### 0.1 Authorized series start (EI-STRAT-004 — read before any authorized run)
+
+- **The recurring twice-daily observation series has NOT been authorized or
+  started.** The only existing sample is the pre-authorization exploratory
+  run `20261020T045654Z` (collected `2026-10-20T04:56:54Z`) — evidence of
+  tool readiness, not part of any authorized series. It is kept intact;
+  it is never deleted or rewritten.
+- When the Instructor authorizes the series, record BEFORE the first
+  authorized `collect`: (a) the **exact authorized first-series start
+  timestamp** (UTC, to the second) and (b) the **two daily collection
+  windows** (e.g. the §0 slots). Both go into the session log.
+- Always pass the authorized start to stats:
+  `python3 -m funding_harness stats --window-start <exact UTC ts>`. The
+  boundary is applied as an **exact timestamp against each pair's/
+  observation's actual `collected_at_utc` before slot aggregation** — a
+  pre-start sample on the same UTC date (even inside the same 12h slot) is
+  excluded from the authorized series and disclosed in the report
+  (`evaluation_window.pairs_before_boundary_excluded`,
+  `evaluation_window.boundary_excluded_primary_slots`). The fixed 28-slot
+  denominator and the gate are unchanged.
+- **Never use the default anchor for authorized evaluation while the pilot
+  run exists.** Without `--window-start` the window anchors at the earliest
+  run timestamp — the pilot's own date — and the report labels this as
+  `anchor_basis: "default_earliest_run"` with an explicit "NOT an authorized
+  series start" note. Default-anchor reports are diagnostics only.
+
 ## 1. Collection (≈ 15–60 seconds)
 
 ```bash
@@ -102,6 +128,20 @@ python3 -m funding_harness stats
   never disappear from the denominator. If the Instructor authorizes an official
   series start date, pass `stats --window-start <UTC>` so the anchor is pinned rather
   than inferred.
+- **Authorized-start boundary is an exact timestamp (EI-STRAT-004):** `--window-start`
+  is compared (inclusive ≥) against every pair/observation's actual `collected_at_utc`
+  at second resolution BEFORE slot aggregation/dedup, so a pre-authorization sample
+  collected on the same UTC date — even in the same 12h slot — cannot
+  contribute to the authorized series. The slot grid is the 28 half-day slots from the
+  floor-12h of the start; excluded rows are disclosed, never deleted.
+- **Completeness-definition metadata (EI-STRAT-004):** the hash-locked
+  `GATE_CONFIG["completeness_definition"]` string ("…(days_spanned * samples_per_day)")
+  is **legacy pre-registration metadata** — the effective calculation is the fixed
+  28-slot window above. Every stats report carries
+  `completeness_definition_metadata` (legacy status + why the string cannot be
+  edited) and `completeness_definition_effective` (the operative definition); both the
+  string and `gate_config_sha256` are regression-pinned byte-identical. Editing the
+  string would change the hash and requires explicit Instructor approval.
 - **Overall verdict requires three adequately covered majors:** BTC, ETH and SOL each
   need ≥ 24 complete paired slots inside the window (the 85% bar); with fewer, the
   overall verdict is UNRESOLVED regardless of the per-asset numbers.
