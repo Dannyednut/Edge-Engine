@@ -746,7 +746,25 @@ async function main() {
   process.on('SIGTERM', () => { console.log('[limusd] SIGTERM, exiting'); process.exit(0); });
 }
 
-main().catch(err => {
-  console.error('[limusd] fatal:', err);
-  process.exit(1);
-});
+// EM-STRAT-006 §2: only run main() when this file is the entry point
+// (not when imported by tests). The test suite must run offline —
+// importing constants/functions from this module must NOT trigger live RPC.
+const isMainModule = (() => {
+  try {
+    const { fileURLToPath } = require('node:url');
+    const { resolve } = require('node:path');
+    if (typeof import.meta !== 'undefined' && (import.meta as any).url) {
+      const entryUrl = process.argv[1];
+      if (!entryUrl) return false;
+      return resolve(fileURLToPath((import.meta as any).url)) === resolve(entryUrl);
+    }
+  } catch { /* fall through */ }
+  return false;
+})();
+
+if (isMainModule) {
+  main().catch(err => {
+    console.error('[limusd] fatal:', err);
+    process.exit(1);
+  });
+}

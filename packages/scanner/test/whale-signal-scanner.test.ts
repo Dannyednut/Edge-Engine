@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { WhaleSignalScanner } from '../src/strategies/whale-signal-scanner.js';
+// EM-STRAT-006 §2: register offline mocks so scan() does NOT call live API.
+import "./_setup/offline-mocks.js";
 
 describe('WhaleSignalScanner', () => {
   const params = {

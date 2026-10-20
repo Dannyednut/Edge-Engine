@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { GoldArbScanner } from '../src/strategies/gold-arb-scanner.js';
+// EM-STRAT-006 §2: register offline mocks so scan() does NOT call live API.
+import "./_setup/offline-mocks.js";
 
 describe('GoldArbScanner', () => {
   const params = {
