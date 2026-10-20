@@ -1,11 +1,16 @@
 """HTTP transport layer: pluggable, timeout-bounded, retry-once, no proxies.
 
 The harness is stdlib-only (urllib). Tests inject a FakeTransport; nothing
-here ever reads credentials, env vars, or config files.
+here ever reads credentials or config files. The ONLY environment read is
+the explicit offline kill-switch ``FUNDING_HARNESS_OFFLINE=1`` (EI-STRAT-003
+task 4): when set, every request raises TransportBlockedError instead of
+contacting the network. CI runs the test suite with this switch so that a
+real HTTP attempt is structurally impossible, not merely untested.
 """
 from __future__ import annotations
 
 import json
+import os
 import ssl
 import time
 import urllib.error
@@ -15,9 +20,16 @@ from typing import Any, Optional, Protocol
 
 from . import config
 
+OFFLINE_ENV_VAR = "FUNDING_HARNESS_OFFLINE"
+
 
 class PayloadError(ValueError):
     """Raised when a body cannot be parsed as JSON."""
+
+
+class TransportBlockedError(RuntimeError):
+    """Raised when a network request is attempted while the offline
+    kill-switch is active (FUNDING_HARNESS_OFFLINE=1)."""
 
 
 @dataclass
@@ -51,6 +63,18 @@ class Transport(Protocol):
                 timeout_s: Optional[float] = None) -> HttpResult: ...
 
 
+def _raise_if_offline(url: str) -> None:
+    """Offline kill-switch: refuse ALL network when the env var is set.
+
+    Used by CI (and any offline operator run) so the offline property is
+    enforced at the transport layer, not only by test construction.
+    """
+    if os.environ.get(OFFLINE_ENV_VAR) == "1":
+        raise TransportBlockedError(
+            f"network disabled by {OFFLINE_ENV_VAR}=1 (offline test/CI "
+            f"mode); refusing to contact {url}")
+
+
 class UrllibTransport:
     """Single-shot transport with one bounded retry on network/5xx failures."""
 
@@ -67,6 +91,7 @@ class UrllibTransport:
     def request(self, url: str, method: str = "GET",
                 body: Optional[dict] = None,
                 timeout_s: Optional[float] = None) -> HttpResult:
+        _raise_if_offline(url)
         timeout = timeout_s if timeout_s is not None else self.timeout_s
         attempts = 0
         last: Optional[HttpResult] = None
