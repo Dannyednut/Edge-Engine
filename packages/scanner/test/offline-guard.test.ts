@@ -342,7 +342,7 @@ describe('EM-STRAT-008 §1 + EM-STRAT-009 §2 — fetch-override static detectio
   });
 });
 
-// ─── EM-STRAT-009 §1: Runtime guard-assertion correctness ─────────────
+// ─── EM-STRAT-009 §1 + EM-STRAT-010 §1: Runtime guard-assertion correctness ─
 //
 // EM-STRAT-009 §1: the previous runtime check had a bug where a fulfilled
 // fetch() would throw a synthetic error containing "offline guard", which
@@ -351,27 +351,37 @@ describe('EM-STRAT-008 §1 + EM-STRAT-009 §2 — fetch-override static detectio
 // helper), which structures the check so that:
 //   - A fulfilled fetch() result fails the test OUTSIDE the rejection-
 //     catching path.
-//   - A rejected result passes only when the rejection is the expected
-//     offline-guard error.
+//   - A rejected result passes only when the rejection matches the EXACT
+//     guard error signature (not a loose substring match).
 //   - An unrelated rejection fails the test.
 //   - The assertion does not use its own synthetic error as evidence.
+//
+// EM-STRAT-010 §1: the rejection-matching logic was further tightened to
+// match the specific stable error signature produced by the installed
+// guard (OFFLINE_GUARD_ERROR_SIGNATURE). A substituted fetch that rejects
+// with a generic message containing "offline guard" but lacking the full
+// guard signature (prefix + blocked-URL line) will FAIL the assertion.
+// This prevents false positives from lookalike rejections.
 
-describe('EM-STRAT-009 §1 — assertFetchIsGuarded correctness (regression tests for the helper itself)', () => {
+describe('EM-STRAT-009 §1 + EM-STRAT-010 §1 — assertFetchIsGuarded correctness', () => {
 
-  it('passes when the fetch function rejects with the expected offline-guard error', async () => {
-    // A properly guarded fetch rejects unregistered URLs with the
-    // offline-guard error. assertFetchIsGuarded should pass (not throw).
+  it('passes when the fetch function rejects with the exact guard signature', async () => {
+    // EM-STRAT-010 §1: a properly guarded fetch rejects unregistered URLs
+    // with the EXACT guard error format. assertFetchIsGuarded should pass
+    // (not throw). We construct the exact guard message format here.
+    const prefix = '[EM-STRAT-007 offline guard] External network request blocked:';
+    const url = 'https://test.example.com/';
     const guardedFetch = async () => {
-      throw new Error('EM-STRAT-007 offline guard: request blocked');
+      throw new Error(prefix + '\n  URL: ' + url + '\n  ...');
     };
     // Should NOT throw — the guard is working correctly.
-    await assertFetchIsGuarded(guardedFetch as any, 'https://test.example.com/');
+    await assertFetchIsGuarded(guardedFetch as any, url);
   });
 
   it('FAILS when the fetch function RESOLVES (guard bypassed)', async () => {
-    // EM-STRAT-009 §1: this is the key regression test. A resolving fetch
-    // means the guard has been bypassed. assertFetchIsGuarded MUST throw.
-    // The previous implementation would mistakenly pass in this case.
+    // EM-STRAT-009 §1: a resolving fetch means the guard has been bypassed.
+    // assertFetchIsGuarded MUST throw. The previous implementation would
+    // mistakenly pass in this case.
     const bypassedFetch = async () => new Response('{}', { status: 200 });
     await expect(
       assertFetchIsGuarded(bypassedFetch as any, 'https://test.example.com/'),
@@ -379,17 +389,45 @@ describe('EM-STRAT-009 §1 — assertFetchIsGuarded correctness (regression test
   });
 
   it('FAILS when the fetch function rejects with an unrelated error', async () => {
-    // If fetch was overwritten with a function that throws a different
-    // error (not the offline-guard error), assertFetchIsGuarded must fail.
+    // EM-STRAT-010 §1: if fetch was overwritten with a function that throws
+    // a completely different error (not containing any guard wording),
+    // assertFetchIsGuarded must fail.
     const customErrorFetch = async () => {
       throw new TypeError('network error');
     };
     await expect(
       assertFetchIsGuarded(customErrorFetch as any, 'https://test.example.com/'),
-    ).rejects.toThrow(/UNEXPECTED error/);
+    ).rejects.toThrow(/does NOT match the exact guard signature/);
   });
 
-  it('the failure message for a resolved fetch does NOT contain "offline guard"', async () => {
+  it('FAILS when a substituted fetch rejects with a lookalike containing the substring but not the full signature', async () => {
+    // EM-STRAT-010 §1: this is the KEY new regression test. A substituted
+    // fetch rejects with a generic message containing the words "offline
+    // guard" but NOT the actual guard signature (no prefix, no blocked-URL
+    // line format). The old /offline guard/i substring match would
+    // mistakenly PASS this case. The tightened assertion must FAIL it.
+    const lookalikeFetch = async () => {
+      throw new Error('something about offline guard went wrong');
+    };
+    await expect(
+      assertFetchIsGuarded(lookalikeFetch as any, 'https://test.example.com/'),
+    ).rejects.toThrow(/does NOT match the exact guard signature/);
+  });
+
+  it('FAILS when a substituted fetch rejects with only the prefix but no blocked-URL line', async () => {
+    // EM-STRAT-010 §1: even if a substituted fetch uses the exact prefix,
+    // the signature requires the blocked-URL line format. A rejection with
+    // only the prefix (no URL line) must FAIL — it does not prove the
+    // actual guard produced it.
+    const prefixOnlyFetch = async () => {
+      throw new Error('[EM-STRAT-007 offline guard] something else entirely');
+    };
+    await expect(
+      assertFetchIsGuarded(prefixOnlyFetch as any, 'https://test.example.com/'),
+    ).rejects.toThrow(/does NOT match the exact guard signature/);
+  });
+
+  it('the failure message for a resolved fetch does NOT contain the guard substring', async () => {
     // EM-STRAT-009 §1: the synthetic failure message must NOT contain
     // "offline guard" — otherwise it could be confused with the expected
     // rejection. This is the root cause of the original bug.
@@ -405,8 +443,9 @@ describe('EM-STRAT-009 §1 — assertFetchIsGuarded correctness (regression test
 
   it('the actual installed fetch passes the assertion (guard is active)', async () => {
     // Verify the real installed fetch (the guard) passes the assertion.
-    // This confirms the guard is working at the time this test runs.
-    await assertFetchIsGuarded(fetch, 'https://em-strat-009-real-check.example.com/');
+    // This confirms the guard is working at the time this test runs and
+    // that the assertion correctly accepts the real guard's error format.
+    await assertFetchIsGuarded(fetch, 'https://em-strat-010-real-check.example.com/');
   });
 });
 

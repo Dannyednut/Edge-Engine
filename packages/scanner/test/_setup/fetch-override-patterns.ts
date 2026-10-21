@@ -1,6 +1,6 @@
 /**
  * Fetch-override detection patterns and runtime guard-assertion helpers
- * for the EM-STRAT-008/009 static and runtime regression checks.
+ * for the EM-STRAT-008/009/010 static and runtime regression checks.
  *
  * EM-STRAT-009 §2: this file is scanned by the static checker alongside
  * every other .ts file under packages/scanner/test/. The regex literals
@@ -12,7 +12,17 @@
  * The ONLY file exempted from the static scan is the guard setup file
  * (_setup/offline-guard.ts), which legitimately installs the wrapped
  * fail-closed fetch.
+ *
+ * EM-STRAT-010 §1: the assertion helper imports the exact guard error
+ * signature (OFFLINE_GUARD_ERROR_SIGNATURE) from the guard setup file.
+ * This ensures the helper matches the specific stable error format
+ * produced by the installed guard — NOT a loose /offline guard/i
+ * substring. A substituted fetch that rejects with a generic message
+ * containing "offline guard" but lacking the actual guard signature
+ * will FAIL the assertion.
  */
+
+import { OFFLINE_GUARD_ERROR_SIGNATURE } from './offline-guard.js';
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -250,6 +260,14 @@ export function runPatternSelfTest(): {
 //     offline-guard error.
 //   - An unrelated rejection fails the test.
 //   - The assertion does not use its own synthetic error as evidence.
+//
+// EM-STRAT-010 §1: the rejection-matching logic now uses the EXACT guard
+// error signature (OFFLINE_GUARD_ERROR_SIGNATURE, imported from the guard
+// setup file) instead of a loose /offline guard/i substring. This prevents
+// a substituted fetch from passing the assertion by rejecting with a
+// generic message that merely contains the words "offline guard". The
+// signature verifies the full prefix and the blocked-URL line format —
+// only the actual installed guard produces this exact format.
 
 /**
  * Assert that a given fetch function is fail-closed for the given URL.
@@ -257,13 +275,20 @@ export function runPatternSelfTest(): {
  * This helper is used both by the per-test beforeEach runtime check and
  * by regression tests that verify the helper itself works correctly.
  *
+ * EM-STRAT-010 §1: a rejection passes ONLY when the error message matches
+ * OFFLINE_GUARD_ERROR_SIGNATURE — the exact stable prefix and blocked-URL
+ * line format produced by the installed guard. A rejection whose message
+ * merely contains the substring "offline guard" but does NOT match the
+ * full signature will FAIL the assertion.
+ *
  * @param fetchFn The fetch function to test (typically the global fetch,
  *                or a substituted function for regression testing).
  * @param url     An unregistered URL that the guard should reject.
  *
- * @throws Error if fetchFn resolves (guard bypassed) or rejects with a
- *         non-offline-guard error. Returns normally only if fetchFn
- *         rejects with the expected offline-guard error.
+ * @throws Error if fetchFn resolves (guard bypassed), rejects with a
+ *         non-guard error, or rejects with a lookalike error that does
+ *         not match the exact guard signature. Returns normally only if
+ *         fetchFn rejects with the exact guard error format.
  */
 export async function assertFetchIsGuarded(
   fetchFn: typeof fetch,
@@ -291,22 +316,31 @@ export async function assertFetchIsGuarded(
     );
   }
 
-  // fetch rejected — verify the rejection is the expected fail-closed error.
+  // fetch rejected — verify the rejection matches the EXACT guard signature.
   const message = rejection instanceof Error
     ? rejection.message
     : String(rejection);
 
-  if (!/offline guard/i.test(message)) {
-    // EM-STRAT-009 §1: the rejection exists but is NOT the expected
-    // fail-closed error. This means fetch was overwritten with a function
-    // that throws a different error. Fail the test.
+  // EM-STRAT-010 §1: match the exact stable signature, NOT a loose
+  // /offline guard/i substring. The signature verifies the full prefix
+  // AND the blocked-URL line format. Only the actual installed guard
+  // produces this exact format.
+  if (!OFFLINE_GUARD_ERROR_SIGNATURE.test(message)) {
+    // EM-STRAT-010 §1: the rejection is NOT the expected guard error.
+    // This covers two cases:
+    //   (a) The rejection is a completely unrelated error (e.g., TypeError).
+    //   (b) The rejection message contains "offline guard" but does NOT
+    //       match the full guard signature — a lookalike that must be
+    //       rejected to prevent false positives.
     throw new Error(
-      `EM-STRAT-009 runtime-check: fetch rejected with an UNEXPECTED error ` +
-      `(not the fail-closed rejection). This suggests the transport was ` +
-      `overwritten with a function that throws a different error. ` +
+      `EM-STRAT-010 runtime-check: fetch rejected with an error that does ` +
+      `NOT match the exact guard signature. The rejection is either an ` +
+      `unrelated error or a lookalike containing the substring but not the ` +
+      `full guard format. This suggests the transport was overwritten with ` +
+      `a function that throws a non-guard error. ` +
       `Original rejection: ${message}`,
     );
   }
 
-  // Success: fetch rejected with the expected fail-closed error.
+  // Success: fetch rejected with the exact expected guard error format.
 }

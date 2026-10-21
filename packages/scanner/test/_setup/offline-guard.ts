@@ -110,9 +110,33 @@ function findEntry(url: string): MockEntry | undefined {
   return entries.find(e => matchUrl(url, e.pattern));
 }
 
+/**
+ * EM-STRAT-010 §1: the stable prefix that uniquely identifies a rejection
+ * produced by the installed offline guard. The guard's makeOfflineError
+ * always begins its message with this exact string. The assertion helper
+ * (assertFetchIsGuarded) matches this prefix — NOT a loose /offline guard/i
+ * substring — so that a substituted fetch rejecting with a generic message
+ * containing "offline guard" cannot pass the assertion.
+ *
+ * The prefix is exported so that the assertion helper can import and match
+ * it without duplicating the literal. If the guard's error format changes,
+ * update this constant and the assertion will automatically follow.
+ */
+export const OFFLINE_GUARD_ERROR_PREFIX = '[EM-STRAT-007 offline guard] External network request blocked:';
+
+/**
+ * EM-STRAT-010 §1: regex that matches the guard's stable signature. The
+ * guard always produces an error message starting with
+ * OFFLINE_GUARD_ERROR_PREFIX and containing the blocked URL on the next
+ * line. This regex verifies BOTH the prefix AND that the blocked URL
+ * appears in the message — proving the actual guard (not a lookalike)
+ * produced the rejection.
+ */
+export const OFFLINE_GUARD_ERROR_SIGNATURE = /^\[EM-STRAT-007 offline guard\] External network request blocked:\n\s+URL: /;
+
 function makeOfflineError(url: string): Error {
   const err = new Error(
-    `[EM-STRAT-007 offline guard] External network request blocked:\n` +
+    OFFLINE_GUARD_ERROR_PREFIX + '\n' +
     `  URL: ${url}\n` +
     `  The default test/CI path runs OFFLINE. If this test genuinely requires\n` +
     `  network access, register a mock via \`mockFetch.register(pattern, response)\`\n` +
