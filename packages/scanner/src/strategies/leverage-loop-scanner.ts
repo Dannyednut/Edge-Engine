@@ -32,6 +32,9 @@ export interface LeverageLoopAlert {
   leverage: number;
   amplifiedYield: number;
   riskScore: number;
+  /** RESEARCH-ONLY: This alert is based on static rate tables, not live market data.
+   *  Must NOT be sent as an actionable opportunity alert. */
+  researchOnly: boolean;
   ts: number;
 }
 
@@ -91,6 +94,7 @@ export class LeverageLoopScanner implements Strategy {
         leverage: o.leverage,
         amplifiedYield,
         riskScore: o.riskScore,
+        researchOnly: true, // Static table — NOT live market data
         ts: Date.now(),
       });
     }

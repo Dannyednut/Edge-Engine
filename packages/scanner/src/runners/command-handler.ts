@@ -331,34 +331,46 @@ async function handleOpportunities(): Promise<string> {
     const lines: string[] = ['═══ Top Opportunities ═══', ''];
 
     // kHYPE LST carry arb
+    // EM-STRAT-004: fail-closed — if anchor/delay/fees missing, scanner returns [].
+    // estimatedProfitUsd is now always a number (scanner requires net >= 0.30%).
     const hlLstArb = new HlLstArbScanner({
       minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
     });
     const khypeAlerts = await hlLstArb.scan();
     if (khypeAlerts.length > 0) {
       const a = khypeAlerts[0];
       const annualProfit = a.estimatedProfitUsd * (365 / 8);
       lines.push(`#1 kHYPE LST carry arb`);
-      lines.push(`  Discount: ${a.discountPct.toFixed(2)}%  APR: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
+      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}%  APR: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
       lines.push(`  Est. profit: $${annualProfit.toFixed(0)}/yr on $5k`);
+      lines.push(`  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`);
+      lines.push('');
+    } else {
+      lines.push('#1 kHYPE LST carry arb — NO ACTIONABLE OPPORTUNITY (fail-closed: anchor/delay/fees or 0.30% net threshold not met)');
       lines.push('');
     }
 
-    // Euler lending arb
+    // Euler lending arb — MONITORING ONLY
+    // EM-STRAT-004: spreadPct and estimatedProfitUsd are null (supply APY unverified).
+    // NEVER display as verified-zero values.
     const eulerArb = new EulerLendingArbScanner({
       minSpreadPct: 0.5, minLiquidityUsd: 10_000, maxSizeUsd: 5_000,
     });
     const eulerAlerts = await eulerArb.scan();
     for (const a of eulerAlerts.slice(0, 3)) {
-      lines.push(`#${lines.filter(l => l.startsWith('#')).length + 1} Euler ${a.assetSymbol} lending arb`);
-      lines.push(`  Spread: ${a.spreadPct.toFixed(2)}%  Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`);
-      lines.push(`  Deposit: ${a.depositVault.apyPct.toFixed(2)}%  Borrow: ${a.borrowVault.apyPct.toFixed(2)}%`);
+      lines.push(`#${lines.filter(l => l.startsWith('#')).length + 1} Euler ${a.assetSymbol} lending arb — MONITORING ONLY`);
+      lines.push(`  Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'}  Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE' : '$' + a.estimatedProfitUsd.toFixed(0) + '/yr'}`);
+      lines.push(`  Deposit borrow: ${a.depositVault.borrowApyPct.toFixed(2)}%  Borrow vault: ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
+      lines.push(`  Supply APY: UNAVAILABLE (cannot verify)  Borrowable: ${a.borrowable}`);
       lines.push('');
     }
 
-    const totalProfit = (khypeAlerts[0] ? khypeAlerts[0].estimatedProfitUsd * (365 / 8) : 0)
-                      + eulerAlerts.slice(0, 3).reduce((s, a) => s + a.estimatedProfitUsd, 0);
-    lines.push(`Total: $${totalProfit.toFixed(0)}/yr on $20k = ${((totalProfit / 20000) * 100).toFixed(1)}% APR`);
+    // Total profit — only counts alerts where estimatedProfitUsd is verified non-null.
+    const khypeProfit = khypeAlerts[0]?.estimatedProfitUsd ?? 0;
+    const eulerProfit = eulerAlerts.slice(0, 3).reduce((s, a) => s + (a.estimatedProfitUsd ?? 0), 0);
+    const totalProfit = khypeProfit * (365 / 8) + eulerProfit;
+    lines.push(`Total verified profit: $${totalProfit.toFixed(0)}/yr (Euler alerts are monitoring-only; their P&L is not included)`);
 
     return lines.join('\n');
   } catch (e: any) {
@@ -370,28 +382,31 @@ async function handleKhype(): Promise<string> {
   try {
     const hlLstArb = new HlLstArbScanner({
       minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
     });
     const alerts = await hlLstArb.scan();
-    if (alerts.length === 0) return 'No kHYPE arb opportunity right now.';
+    if (alerts.length === 0) return 'No kHYPE arb opportunity right now (fail-closed: anchor/delay/fees or 0.30% net threshold not met).';
 
     const a = alerts[0];
     const annualProfit = a.estimatedProfitUsd * (365 / 8);
     return [
       '═══ kHYPE LST Carry Arb ═══',
       '',
-      `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
-      `kHYPE price: ${a.khypePrice.toFixed(6)} WHYPE`,
+      `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3`,
+      `kHYPE price: ${a.marketPrice.toFixed(6)} WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
       `Pool liquidity: ${a.poolLiquidity.toString()}`,
-      `Fee tier: ${a.feeTier/10000}%`,
+      // EM-STRAT-004: fee tier 100 = 0.01% (corrected conversion). ammFeePct is the pct value.
+      `Fee tier: ${a.feeTier} (${a.ammFeePct.toFixed(4)}%)`,
       `Flashloan fee: ${a.flashloanFeePct.toFixed(2)}%`,
+      `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
       '',
       `Net profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
       `Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(1)}% APR)`,
       '',
       'Execution:',
       '  1. Buy kHYPE on HyperSwap V3',
-      '  2. Queue 7-day Kinetiq withdrawal',
-      '  3. Claim HYPE after 7 days',
+      '  2. Queue Kinetiq withdrawal (delay above)',
+      '  3. Claim HYPE after delay',
       '  4. Wrap to WHYPE, repeat',
       '',
       '⚠️ Needs AGENT_HYPE_PRIVKEY to execute',
@@ -407,15 +422,16 @@ async function handleEuler(): Promise<string> {
       minSpreadPct: 0.5, minLiquidityUsd: 10_000, maxSizeUsd: 5_000,
     });
     const alerts = await eulerArb.scan();
-    if (alerts.length === 0) return 'No Euler lending arb right now.';
+    if (alerts.length === 0) return 'No Euler lending arb data right now.';
 
-    const lines: string[] = ['═══ Euler HL Lending Arb ═══', ''];
+    const lines: string[] = ['═══ Euler HL Lending Arb — MONITORING ONLY ═══', ''];
     for (const a of alerts) {
-      lines.push(`${a.assetSymbol}: ${a.spreadPct.toFixed(2)}% spread`);
-      lines.push(`  Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}%`);
-      lines.push(`  Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}%`);
-      lines.push(`  Profit:  $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`);
-      lines.push(`  TVL:     $${(a.totalLiquidityUsd / 1000).toFixed(0)}k combined`);
+      lines.push(`${a.assetSymbol}: ${a.spreadPct === null ? 'Spread UNAVAILABLE' : 'Spread ' + a.spreadPct.toFixed(2) + '%'}`);
+      lines.push(`  Deposit: ${a.depositVault.name} @ borrow ${a.depositVault.borrowApyPct.toFixed(2)}%`);
+      lines.push(`  Borrow:  ${a.borrowVault.name} @ borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
+      lines.push(`  Supply APY: UNAVAILABLE  Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE (cannot estimate)' : '$' + a.estimatedProfitUsd.toFixed(0) + '/yr'}`);
+      lines.push(`  TVL: ${a.totalLiquidityUsd === null ? 'UNAVAILABLE' : '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k combined'}`);
+      lines.push(`  Borrowable: ${a.borrowable}  Monitoring only — NOT an actionable opportunity`);
       lines.push('');
     }
     return lines.join('\n');

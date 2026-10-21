@@ -67,6 +67,7 @@ async function main() {
       minDiscountPct: 0.1,
       maxSizeUsd: 5_000,
       preferredFeeTier: 100,
+      minNetDiscountPct: 0.30, // EM-STRAT-004: required net threshold
     });
     const alerts = await hlLstArb.scan();
     for (const a of alerts) {
@@ -77,16 +78,17 @@ async function main() {
       opportunities.push({
         strategy: 'kHYPE LST carry arb',
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.discountPct,
+        spreadPct: a.grossDiscountPct,
         annualizedReturnPct,
         estimatedProfitUsd: annualProfit,
         capitalRequired: 5_000,
         details: [
-          `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3 (fee=${a.feeTier})`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
           `Net profit per 8-day cycle: $${profitPerCycle.toFixed(2)}`,
           `Annualized: $${annualProfit.toFixed(0)} (${annualizedReturnPct.toFixed(1)}% APR)`,
+          `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
-          `Execution: buy kHYPE → queue 7-day Kinetiq withdrawal → claim HYPE`,
+          `Execution: buy kHYPE → queue Kinetiq withdrawal → claim HYPE`,
         ],
         ts: a.ts,
       });
@@ -95,8 +97,13 @@ async function main() {
     console.log(`  ⚠ kHYPE scan failed: ${e.message}`);
   }
 
-  // 2. Euler HL lending arb
-  console.log('Scanning Euler HL lending arbs...');
+  // 2. Euler HL lending arb — MONITORING ONLY
+  // EM-STRAT-004: spreadPct and estimatedProfitUsd are null. NEVER display as 0.
+  // These entries are NOT added to the ranked `opportunities` array — they
+  // cannot be compared against actionable arbs. They are printed in a
+  // separate "Monitoring Only" section below.
+  console.log('Scanning Euler HL lending arbs (monitoring only)...');
+  const monitoringOnly: Array<{ asset: string; details: string[]; ts: number }> = [];
   try {
     const eulerArb = new EulerLendingArbScanner({
       minSpreadPct: 0.5,
@@ -105,19 +112,15 @@ async function main() {
     });
     const alerts = await eulerArb.scan();
     for (const a of alerts) {
-      opportunities.push({
-        strategy: 'Euler HL lending arb',
+      monitoringOnly.push({
         asset: a.assetSymbol,
-        spreadPct: a.spreadPct,
-        annualizedReturnPct: a.spreadPct * 0.8, // ~80% collateral factor
-        estimatedProfitUsd: a.estimatedProfitUsd,
-        capitalRequired: 5_000,
         details: [
-          `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-          `Spread:  ${a.spreadPct.toFixed(2)}%  Collateral factor: ${a.collateralFactorPct}%`,
-          `Combined liquidity: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
-          `Est. profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k collateral`,
+          `MONITORING ONLY — supply APY unavailable, cannot compute spread or profit`,
+          `Deposit: ${a.depositVault.name} @ borrow ${a.depositVault.borrowApyPct.toFixed(2)}%`,
+          `Borrow:  ${a.borrowVault.name} @ borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%`,
+          `Supply APY: UNAVAILABLE  Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'}  Profit: UNAVAILABLE`,
+          `Combined liquidity: ${a.totalLiquidityUsd === null ? 'UNAVAILABLE' : '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k'}`,
+          `Borrowable: ${a.borrowable}  CF: ${a.collateralFactorPct}% (assumed)`,
         ],
         ts: a.ts,
       });
@@ -258,25 +261,39 @@ async function main() {
   if (opportunities.length === 0) {
     console.log('  No actionable opportunities found.');
     console.log('  Try again later — markets fluctuate.');
-    return;
-  }
-
-  for (let i = 0; i < Math.min(10, opportunities.length); i++) {
-    const o = opportunities[i];
-    console.log(`  #${i + 1}  ${o.strategy} — ${o.asset}`);
-    console.log(`      Spread: ${o.spreadPct.toFixed(2)}%  |  APR: ${o.annualizedReturnPct.toFixed(2)}%  |  Est. profit: $${o.estimatedProfitUsd.toFixed(0)}/yr on $${o.capitalRequired.toLocaleString()}`);
-    for (const d of o.details) {
-      console.log(`      ${d}`);
-    }
     console.log('');
+  } else {
+    for (let i = 0; i < Math.min(10, opportunities.length); i++) {
+      const o = opportunities[i];
+      console.log(`  #${i + 1}  ${o.strategy} — ${o.asset}`);
+      console.log(`      Spread: ${o.spreadPct.toFixed(2)}%  |  APR: ${o.annualizedReturnPct.toFixed(2)}%  |  Est. profit: $${o.estimatedProfitUsd.toFixed(0)}/yr on $${o.capitalRequired.toLocaleString()}`);
+      for (const d of o.details) {
+        console.log(`      ${d}`);
+      }
+      console.log('');
+    }
+
+    // Summary
+    const totalProfit = opportunities.slice(0, 5).reduce((sum, o) => sum + o.estimatedProfitUsd, 0);
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log(`  Top 5 opportunities total: $${totalProfit.toFixed(0)}/yr on $25k capital`);
+    console.log(`  Combined APR: ${((totalProfit / 25_000) * 100).toFixed(1)}%`);
+    console.log('═══════════════════════════════════════════════════════════════');
   }
 
-  // Summary
-  const totalProfit = opportunities.slice(0, 5).reduce((sum, o) => sum + o.estimatedProfitUsd, 0);
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log(`  Top 5 opportunities total: $${totalProfit.toFixed(0)}/yr on $25k capital`);
-  console.log(`  Combined APR: ${((totalProfit / 25_000) * 100).toFixed(1)}%`);
-  console.log('═══════════════════════════════════════════════════════════════');
+  // ─── Monitoring-Only Section (EM-STRAT-004) ───────────────────────────
+  // Euler alerts (and any future monitoring-only strategies) appear here.
+  // They are NOT included in the top-5 totals above and do NOT carry an
+  // estimated profit — supply APY / spread / profit are all UNAVAILABLE.
+  if (monitoringOnly.length > 0) {
+    console.log('');
+    console.log('── MONITORING ONLY (not actionable) ──');
+    for (const m of monitoringOnly) {
+      console.log(`  ${m.asset}`);
+      for (const d of m.details) console.log(`    ${d}`);
+      console.log('');
+    }
+  }
 
   // Kinetiq status footer
   console.log('');

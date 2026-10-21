@@ -1,61 +1,86 @@
 /**
  * EulerLendingArbScanner — find Euler HL vault yield spreads.
  *
- * ARB STRUCTURE:
- *   Each asset on Euler has multiple vaults (eUSDC-1 through -6, etc.).
- *   These vaults can have different IRMs (interest rate models) → different APYs.
- *   When the same asset has different deposit/borrow rates across vaults:
- *     1. Deposit in highest-APY vault (earn that rate)
- *     2. Use deposit as collateral to borrow from lowest-APY vault (pay that rate)
- *     3. Net capture = (deposit APY - borrow APY) × collateral factor
+ * CORRECTED SEMANTICS (EM-STRAT-003, hardened EM-STRAT-004, test-safety EM-STRAT-005):
+ *   The difference between two interestRate() values is NOT "deposit APY
+ *   minus borrow APY." Euler's interestRate() returns the BORROW rate.
+ *   The supply (deposit) rate must be computed from the borrow rate,
+ *   utilization, and reserve factor, or obtained from a verified source.
  *
- * HYPERLIQUID-SPECIFIC ANGLE:
- *   - Multiple vaults per asset = Mewler (HypurrFi partnership) configuration
- *   - Some vaults may have promotional APYs to attract liquidity
- *   - Cross-vault EVC collateral = atomic delta-neutral possible
+ *   This scanner FAILS CLOSED when:
+ *   - Supply rate cannot be independently computed or verified
+ *   - Asset prices are unavailable (no stale hardcoded defaults)
+ *   - Borrowability/capacity cannot be verified
+ *
+ *   Until valid supply and borrow rates, live prices, and usable liquidity
+ *   are available, this scanner emits clearly labeled monitoring data
+ *   rather than an arbitrage profit estimate.
+ *
+ * TEST SEAM (EM-STRAT-005 §3):
+ *   The constructor accepts an optional `deps` argument with `eulerClient`
+ *   (an injectable EulerClient-like object) for deterministic testing.
+ *   Tests pass a mock client that returns canned vault records — no live
+ *   RPC. Production callers omit `deps`; the scanner constructs a real
+ *   EulerClient internally.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { EulerClient, type EulerVaultInfo } from '@edge/executor';
 
 export interface EulerLendingArbParams {
-  /** Min spread between deposit and borrow rate (default 1%) */
+  /** Min spread between supply and borrow rate (default 1%) */
   minSpreadPct: number;
   /** Min total liquidity (totalAssets of both vaults combined) in USD (default $50k) */
   minLiquidityUsd: number;
   /** Max position size (default $5000) */
   maxSizeUsd: number;
-  /** Asset price assumptions for converting to USD */
+  /** Asset price inputs — must be provided by the caller from a verified source. */
   assetPrices?: Record<string, number>;
+}
+
+/**
+ * Injectable dependencies. Tests pass `eulerClient` to override the live
+ * EulerClient. Production callers omit `deps`.
+ *
+ * EM-STRAT-005 §3: tests MUST NOT trigger live HyperEVM RPC. The mock
+ * client returns deterministic vault records.
+ */
+export interface EulerLendingArbDeps {
+  /**
+   * Override the internally-constructed EulerClient. Must expose
+   * `getAllVaults(): Promise<EulerVaultInfo[]>` (the only method this
+   * scanner calls).
+   */
+  eulerClient?: { getAllVaults(): Promise<EulerVaultInfo[]> };
 }
 
 export interface EulerLendingArbAlert {
   assetSymbol: string;
-  depositVault: { address: string; name: string; apyPct: number; tvl: number; };
-  borrowVault:  { address: string; name: string; apyPct: number; tvl: number; };
-  spreadPct: number;             // deposit APY - borrow APY
-  estimatedProfitUsd: number;    // on $5k collateral at collateral factor 0.8
+  depositVault: { address: string; name: string; borrowApyPct: number; supplyApyPct: number | null; tvl: number; };
+  borrowVault:  { address: string; name: string; borrowApyPct: number; supplyApyPct: number | null; tvl: number; };
+  /** Spread between highest supply APY and lowest borrow APY. null = supply APY unavailable. */
+  spreadPct: number | null;
+  /** Estimated profit in USD. null = cannot compute (missing supply rate or price). */
+  estimatedProfitUsd: number | null;
   collateralFactorPct: number;
-  totalLiquidityUsd: number;
+  totalLiquidityUsd: number | null;
+  /** Whether both vaults are borrowable. */
+  borrowable: boolean;
+  /** MONITORING ONLY: Do not present as an executable arbitrage. */
+  monitoringOnly: boolean;
   ts: number;
 }
-
-const DEFAULT_PRICES: Record<string, number> = {
-  USDC: 1, 'USDT0': 1, 'USD\u20E90': 1, USDH: 1, sUSN: 1, sUSDp: 1, USDXL: 1, USDG0: 1, syzUSD: 1, FXRP: 1,
-  WHYPE: 89.5, kHYPE: 87.3, wstHYPE: 89.5, lstHYPE: 89.5, beHYPE: 89.5, haHYPE: 89.5, hwHYPE: 89.5, xHYPE: 89.5, LHYPE: 89.5,
-  UBTC: 96000, UETH: 3300,
-  PURR: 0.01, UPUMP: 0.01, UFART: 0.01,
-  'PT-kHYPE-19MAR2026': 0.95,
-};
 
 export class EulerLendingArbScanner implements Strategy {
   readonly id = 'euler_lending_arb';
   readonly landscape = 'F_perps_funding' as const;
 
-  private euler: EulerClient;
+  private euler: { getAllVaults(): Promise<EulerVaultInfo[]> };
 
-  constructor(private params: EulerLendingArbParams) {
-    this.euler = new EulerClient();
+  constructor(private params: EulerLendingArbParams, deps: EulerLendingArbDeps = {}) {
+    // EM-STRAT-005 §3: injectable test seam. When deps.eulerClient is
+    // provided, no live EulerClient is constructed and no RPC is issued.
+    this.euler = deps.eulerClient ?? new EulerClient();
   }
 
   subscribesTo(): string[] { return []; }
@@ -85,62 +110,74 @@ export class EulerLendingArbScanner implements Strategy {
       byAsset.get(v.assetSymbol)!.push(v);
     }
 
-    const prices = { ...DEFAULT_PRICES, ...this.params.assetPrices };
+    // Use caller-provided prices only. No hardcoded defaults.
+    const prices = this.params.assetPrices ?? {};
 
-    // For each asset, find the best deposit (highest APY) and best borrow (lowest APY) vault
     for (const [asset, vaultsForAsset] of byAsset.entries()) {
-      if (vaultsForAsset.length < 2) continue; // need at least 2 vaults for spread
+      if (vaultsForAsset.length < 2) continue;
 
-      const price = prices[asset] ?? 0;
-      if (price === 0) continue;
+      const price = prices[asset] ?? null;
+      // If price is unavailable, we can still emit monitoring data (no USD estimates)
+      const hasPrice = price !== null && price > 0;
 
-      // Sort by APY
+      // Sort by borrow APY (interestRate is the borrow rate, NOT supply rate)
       const sorted = [...vaultsForAsset].sort((a, b) => b.interestRatePct - a.interestRatePct);
       const highest = sorted[0];
       const lowest = sorted[sorted.length - 1];
 
-      // Note: borrowable flag parsing may be off — skip the filter for now
-      // and rely on the borrow/lend rate spread to identify opportunities.
-      // The vault will reject the tx at execution time if borrowing is disabled.
-      // if (!highest.borrowable) continue;
-      // if (!lowest.borrowable) continue;
+      // Supply APY is NOT directly available from interestRate().
+      // It must be computed from borrow rate, utilization, and reserve factor.
+      // Since we cannot compute it here without additional on-chain reads,
+      // we mark it as null and fail closed on profit estimates.
+      const supplyApyHigh: number | null = null;
+      const supplyApyLow: number | null = null;
 
-      const spreadPct = highest.interestRatePct - lowest.interestRatePct;
-      if (spreadPct < this.params.minSpreadPct) continue;
+      // The spread between borrow rates is NOT the arbitrage spread.
+      // The true spread = supply APY of deposit vault - borrow APY of borrow vault.
+      // Since supply APY is null, spread is null.
+      const spreadPct: number | null = null;
 
-      const collateralFactorPct = 80; // assume 80% LTV (typical)
-      const totalLiquidityUsd =
-        (highest.totalAssets + lowest.totalAssets) * price;
-      if (totalLiquidityUsd < this.params.minLiquidityUsd) continue;
+      // Check borrowability
+      const borrowable = (highest as any).borrowable !== false && (lowest as any).borrowable !== false;
 
-      // Estimated profit on $5k collateral, borrow at 80% LTV
-      const borrowUsd = this.params.maxSizeUsd * (collateralFactorPct / 100);
-      const estimatedProfitUsd = (spreadPct / 100) * borrowUsd;
+      // Total liquidity (only if price available)
+      const totalLiquidityUsd: number | null = hasPrice
+        ? (highest.totalAssets + lowest.totalAssets) * price!
+        : null;
+
+      // Profit estimate: null (cannot compute without supply APY and verified price)
+      const estimatedProfitUsd: number | null = null;
+
+      // Emit as monitoring data, not actionable arbitrage
+      const monitoringOnly = true;
 
       alerts.push({
         assetSymbol: asset,
         depositVault: {
           address: highest.address,
           name: highest.name,
-          apyPct: highest.interestRatePct,
+          borrowApyPct: highest.interestRatePct,
+          supplyApyPct: supplyApyHigh,
           tvl: highest.totalAssets,
         },
         borrowVault: {
           address: lowest.address,
           name: lowest.name,
-          apyPct: lowest.interestRatePct,
+          borrowApyPct: lowest.interestRatePct,
+          supplyApyPct: supplyApyLow,
           tvl: lowest.totalAssets,
         },
         spreadPct,
         estimatedProfitUsd,
-        collateralFactorPct,
+        collateralFactorPct: 80, // assumed — not verified
         totalLiquidityUsd,
+        borrowable,
+        monitoringOnly,
         ts: Date.now(),
       });
     }
 
-    // Sort by spread (highest first)
-    alerts.sort((a, b) => b.spreadPct - a.spreadPct);
+    alerts.sort((a, b) => (b.depositVault.borrowApyPct - b.borrowVault.borrowApyPct) - (a.depositVault.borrowApyPct - a.borrowVault.borrowApyPct));
     return alerts;
   }
 
@@ -149,3 +186,4 @@ export class EulerLendingArbScanner implements Strategy {
     return this.euler.getAllVaults();
   }
 }
+

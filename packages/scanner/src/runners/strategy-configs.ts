@@ -169,6 +169,12 @@ export interface HlLstConfig {
   minDiscountPct: number;
   maxSizeUsd: number;
   preferredFeeTier: number;
+  /**
+   * Required minimum net discount % AFTER costs (AMM + flashloan fee).
+   * EM-STRAT-004: an alert is only emitted when netProfitPct >= this.
+   * Default 0.30 (0.30%) provides a conservative execution margin.
+   */
+  minNetDiscountPct?: number;
 }
 export interface GoldArbConfig {
   minSpreadPct: number;
@@ -443,6 +449,8 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
         minDiscountPct: num(s, 'min_spread_pct', 0.1),
         maxSizeUsd: num(s, 'max_position_usd', 5000),
         preferredFeeTier: 100,
+        // EM-STRAT-004: required minimum net discount after costs.
+        minNetDiscountPct: num(s, 'min_net_discount_pct', 0.30),
       };
     })(),
 

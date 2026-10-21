@@ -58,6 +58,7 @@ async function main() {
   
   const hlLstArb = new HlLstArbScanner({
     minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+    minNetDiscountPct: 0.30,
   });
   const eulerArb = new EulerLendingArbScanner({
     minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000,
@@ -136,25 +137,27 @@ async function main() {
     }
 
     // 2. kHYPE LST carry arb
+    // EM-STRAT-004: scanner is fail-closed. estimatedProfitUsd is a verified
+    // number when alerts exist (scanner requires net >= 0.30%). Anchor
+    // freshness and block timestamp are surfaced for diagnostic visibility.
     try {
       const alerts = await hlLstArb.scan();
       for (const a of alerts) {
         const key = `khype|${a.pair}`;
         if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
         seen.set(key, Date.now());
-        
-        const annualProfit = a.estimatedProfitUsd * (365 / 8);
-        if (annualProfit > 1000) {
+
+        if (a.estimatedProfitUsd > 10) {
           await alerter.sendAlert({
             id: `khype_${Date.now()}`,
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'hl_lst_arb',
-            title: `[kHYPE] ${a.discountPct.toFixed(2)}% discount = $${annualProfit.toFixed(0)}/yr`,
+            title: `[kHYPE] ${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)})`,
             body: [
-              `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
-              `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
-              `Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(0)}% APR)`,
+              `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+              `Anchor: ${a.redemptionAnchor.toFixed(6)}  Fresh: ${a.anchorFresh}  Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
+              `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`,
             ].join('\n'),
             channels: ['telegram'],
           }).catch(() => {});
@@ -164,28 +167,18 @@ async function main() {
       console.warn(`[opp-monitor] kHYPE scan failed: ${e.message}`);
     }
 
-    // 3. Euler lending arb
+    // 3. Euler lending arb — MONITORING ONLY
+    // EM-STRAT-004: Euler alerts are monitoring-only. supply APY / spread /
+    // profit are all null. They MUST NOT be sent as actionable opportunities.
+    // The for-loop below is a no-op (continue on monitoringOnly), preserved
+    // as an explicit guard so future edits cannot accidentally re-enable
+    // opportunity alerts for this strategy.
     try {
       const alerts = await eulerArb.scan();
       for (const a of alerts) {
-        if (a.estimatedProfitUsd < 200) continue;
-        const key = `euler|${a.assetSymbol}`;
-        if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
-        seen.set(key, Date.now());
-        
-        await alerter.sendAlert({
-          id: `euler_${a.assetSymbol}_${Date.now()}`,
-          ts: Date.now(),
-          severity: 'opportunity',
-          strategyId: 'euler_lending_arb',
-          title: `[EULER] ${a.assetSymbol} ${a.spreadPct.toFixed(1)}% spread = $${a.estimatedProfitUsd.toFixed(0)}/yr`,
-          body: [
-            `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}%`,
-            `Borrow: ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}%`,
-            `Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k`,
-          ].join('\n'),
-          channels: ['telegram'],
-        }).catch(() => {});
+        // Euler alerts are MONITORING ONLY — do not send as actionable opportunity alerts
+        // (supply APY unavailable, prices unverified, borrowability unconfirmed)
+        if (a.monitoringOnly) continue;
       }
     } catch (e: any) {
       console.warn(`[opp-monitor] Euler scan failed: ${e.message}`);
