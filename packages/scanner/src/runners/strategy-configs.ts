@@ -48,9 +48,11 @@
  *     maxSizeUsd param (lst_yield, hlp_yield, tokenized_equity): the
  *     value is parsed but not consumed. See docs/CONFIG_AUDIT.md.
  *
- *   - dex_dex, mev_backrun, cross_dex_arb, precompile_flashloan_arb:
- *     sections exist in TOML but no strategy is instantiated in
- *     all-runner.ts. Not in scope for this sprint.
+ *   - cross_dex_arb is wired to a discovery-only scanner with monitoringOnly
+ *     alerts; it cannot calculate verified net profit or executable routes.
+ *   - dex_dex was a duplicate, unwired placeholder and has been removed.
+ *   - mev_backrun and precompile_flashloan_arb remain intentionally unwired
+ *     placeholders pending a valid data/execution model.
  */
 
 import type { AppConfig } from '@edge/types';
@@ -261,6 +263,11 @@ export interface CexDexBridgeConfig {
   minSpreadPct: number;
   coins: string[];
 }
+export interface CrossDexArbConfig {
+  minSpreadPct: number;
+  minReserveUsd: number;
+  maxSizeUsd: number;
+}
 
 export interface StrategyConfigs {
   perpFunding: PerpFundingConfig;
@@ -292,6 +299,7 @@ export interface StrategyConfigs {
   leverageLoop: LeverageLoopConfig;
   whaleSignal: WhaleSignalConfig;
   cexDexBridge: CexDexBridgeConfig;
+  crossDexArb: CrossDexArbConfig;
 }
 
 // ─── The builder ────────────────────────────────────────────────────
@@ -632,6 +640,16 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
       return {
         minSpreadPct: num(s, 'min_spread_pct', 0.05),
         coins: strArr(s, 'coins', ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV']),
+      };
+    })(),
+
+    // ── 30. Cross-DEX reference-price divergence (monitoring only) ────
+    crossDexArb: (() => {
+      const s = section(cfg, 'cross_dex_arb');
+      return {
+        minSpreadPct: num(s, 'min_gross_spread_bps', 15) / 100,
+        minReserveUsd: num(s, 'min_reserve_usd', 50_000),
+        maxSizeUsd: num(s, 'max_position_usd', 8_000),
       };
     })(),
   };

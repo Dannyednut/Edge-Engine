@@ -99,9 +99,16 @@ describe('config wiring: strategies.toml → all-runner.ts', () => {
     expect(s.min_edge_bps).toBe(80);
   });
 
+  it('cross_dex_arb config uses gross bps and a minimum reserve', () => {
+    const s = cfg.strategies['cross_dex_arb'];
+    expect(s.min_gross_spread_bps).toBe(15);
+    expect(s.min_reserve_usd).toBe(50_000);
+    expect(s.max_position_usd).toBe(8_000);
+  });
+
   it('all expected strategy sections are present in TOML', () => {
     const expected = [
-      'perp_funding', 'cex_hl_funding_arb', 'dex_cex_flashloan', 'dex_dex',
+      'perp_funding', 'cex_hl_funding_arb', 'dex_cex_flashloan',
       'prediction_arb', 'sports_arb', 'mev_backrun', 'hl_spot_basis',
       'hlp_yield', 'pendle_boros', 'pt_yield_arb', 'pt_khype_yield_arb',
       'lst_yield_comparison', 'euler_lending_arb', 'tokenized_equity',
