@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mockFetch } from './_setup/offline-mocks.js';
+import {
+  FETCH_OVERRIDE_PATTERNS,
+  GUARD_SETUP_FILE,
+  scanForFetchOverrides,
+  scanForOriginalFetchExposure,
+  assertFetchIsGuarded,
+  runPatternSelfTest,
+} from './_setup/fetch-override-patterns.js';
 
 // ─── EM-STRAT-006 §2 + EM-STRAT-007 §2: Offline guard verification ──────
 //
@@ -12,7 +20,14 @@ import { mockFetch } from './_setup/offline-mocks.js';
 //   - Verify the guard CANNOT be disabled (no disable/enable escape hatch).
 //   - Verify the guard remains active after mock clearing.
 //   - Verify the guard remains active across sequential tests.
-//   - Verify the unwrapped real transport is NOT exposed on globalThis.
+//   - Verify the unwrapped real transport is NOT exposed on the global object.
+//
+// EM-STRAT-009 §1/§2: the runtime assertion uses assertFetchIsGuarded
+// (imported from the helper) which fixes the false-positive bug where a
+// fulfilled fetch could be mistaken for a guarded rejection. The static
+// scanner now covers EVERY .ts file under the test directory, including
+// this file — pattern definitions live in the helper to avoid
+// self-triggering.
 
 describe('EM-STRAT-006 §2 — offline guard verification', () => {
   beforeEach(() => {
@@ -115,32 +130,24 @@ describe('EM-STRAT-007 §1 — guard has no disable/enable escape hatch', () => 
   });
 
   it('mockFetch API does NOT expose a disable() method', () => {
-    // EM-STRAT-007 §1: the public mockFetch API must not include disable().
     expect(typeof (mockFetch as any).disable).toBe('undefined');
   });
 
   it('mockFetch API does NOT expose an enable() method', () => {
-    // EM-STRAT-007 §1: the public mockFetch API must not include enable().
     expect(typeof (mockFetch as any).enable).toBe('undefined');
   });
 
-  it('globalThis does NOT expose originalFetch (the unwrapped real transport)', () => {
-    // EM-STRAT-007 §1: the unwrapped real fetch is module-private.
-    // It must NOT be reachable from globalThis.
+  it('the global object does NOT expose the unwrapped real transport', () => {
     expect((globalThis as any).originalFetch).toBeUndefined();
   });
 
-  it('globalThis.fetch IS the wrapped (fail-closed) guard, not the real transport', async () => {
-    // EM-STRAT-007 §1: confirm globalThis.fetch is the guard, not the real
-    // transport. The guard rejects unregistered URLs; the real transport
-    // would attempt the network call.
+  it('the installed fetch IS the wrapped fail-closed guard, not the real transport', async () => {
     await expect(fetch('https://example.unregistered.test/api')).rejects.toThrow(
       /EM-STRAT-007 offline guard/,
     );
   });
 
   it('attempting to call disable() throws (method does not exist)', () => {
-    // EM-STRAT-007 §1: calling disable() must fail — it's not on the API.
     expect(() => (mockFetch as any).disable()).toThrow(TypeError);
   });
 
@@ -157,75 +164,57 @@ describe('EM-STRAT-007 §2 — guard remains active after clear() and across seq
   });
 
   it('guard is active BEFORE any mock is registered (test 1 of 3)', async () => {
-    // First test in the sequence — guard must be active.
     await expect(fetch('https://seq-test.example.com/1')).rejects.toThrow(/offline guard/);
   });
 
   it('guard remains active AFTER clear() in a previous test (test 2 of 3)', async () => {
-    // The previous test called no clear() but the afterEach did. The guard
-    // must still be active.
     await expect(fetch('https://seq-test.example.com/2')).rejects.toThrow(/offline guard/);
   });
 
   it('guard remains active after registering+clearing mocks (test 3 of 3)', async () => {
-    // Register a mock, use it, then clear. The guard must still be active
-    // for unregistered URLs.
     mockFetch.register('seq-test.example.com', { status: 200, json: async () => ({ ok: true }) });
     const res = await fetch('https://seq-test.example.com/mocked');
     expect(res.ok).toBe(true);
     mockFetch.clear();
-    // After clear, the same URL must be blocked.
     await expect(fetch('https://seq-test.example.com/mocked')).rejects.toThrow(/offline guard/);
-    // And a different unregistered URL must also be blocked.
     await expect(fetch('https://other.example.com/')).rejects.toThrow(/offline guard/);
   });
 
   it('clear() does NOT disable the guard — only clears the mock registry', async () => {
     mockFetch.register('api.example.com', { status: 200, json: async () => ({}) });
     mockFetch.clear();
-    // Guard must still block unregistered URLs.
     await expect(fetch('https://not-registered.example.com/')).rejects.toThrow(/offline guard/);
   });
 
   it('registering a mock does NOT disable the guard for other URLs', async () => {
     mockFetch.register('api.example.com', { status: 200, json: async () => ({ ok: true }) });
-    // Registered URL works.
     const res = await fetch('https://api.example.com/data');
     expect(res.ok).toBe(true);
-    // Unregistered URL is still blocked.
     await expect(fetch('https://other.example.com/')).rejects.toThrow(/offline guard/);
   });
 
-  it('current globalThis.fetch IS the fail-closed guard (no overwrite detected at test start)', async () => {
-    // EM-STRAT-008 §1: this test verifies that globalThis.fetch is currently
-    // the fail-closed guard (rejects unregistered URLs). It does NOT claim
-    // that reassignment is impossible — JavaScript allows arbitrary
-    // reassignment of globalThis.fetch at runtime. The protection against
-    // accidental bypass is:
+  it('current installed fetch IS the fail-closed guard (no overwrite detected at test start)', async () => {
+    // EM-STRAT-008 §1: this test verifies that the installed fetch is
+    // currently the fail-closed guard (rejects unregistered URLs). It does
+    // NOT claim that reassignment is impossible — JavaScript allows
+    // arbitrary reassignment at runtime. The protection against accidental
+    // bypass is:
     //   (a) the static regression check in the "fetch-override detection"
     //       suite below, which scans all test source files for reassignment
     //       patterns and fails if any are found; and
-    //   (b) the per-test beforeEach verification in this file (see
-    //       "guard is active at the start of every test" below), which
-    //       catches leaks from a previous test in the same file.
-    //
-    // What this test actually proves: at the point this test runs,
-    // globalThis.fetch rejects an unregistered URL with the offline-guard
-    // error. If a prior test in this file had overwritten globalThis.fetch
-    // and not restored it, this test would fail.
+    //   (b) the per-test runtime verification using assertFetchIsGuarded
+    //       (see the "guard is active at the start of every test" suite
+    //       below), which catches leaks from a previous test in the same
+    //       describe block.
     await expect(fetch('https://verify-guard.example.com/')).rejects.toThrow(/offline guard/);
   });
 });
 
 // ─── EM-STRAT-007 §2: Inventory of request mechanisms ──────────────────
 
-describe('EM-STRAT-007 §2 — no external-call mechanism bypasses global fetch', () => {
+describe('EM-STRAT-007 §2 — no external-call mechanism bypasses the installed fetch', () => {
   // These tests document that the test suite does not use any alternative
-  // request mechanism (http/https modules, axios, undici, node-fetch,
-  // WebSocket, XMLHttpRequest) that would bypass the global fetch guard.
-  //
-  // The offline-guard.test.ts file itself is EXCLUDED from the scan because
-  // it contains the pattern strings as test fixtures (self-reference).
+  // request mechanism that would bypass the installed fail-closed guard.
 
   it('test files do not import node:http or node:https directly', async () => {
     const fs = await import('node:fs');
@@ -276,117 +265,31 @@ describe('EM-STRAT-007 §2 — no external-call mechanism bypasses global fetch'
   });
 });
 
-// ─── EM-STRAT-008 §1: Fetch-override detection ─────────────────────────
+// ─── EM-STRAT-008 §1 + EM-STRAT-009 §2: Fetch-override static detection ─
 //
-// EM-STRAT-008 finding: the previous test named "guard cannot be bypassed
-// by overwriting globalThis.fetch" did not actually attempt an overwrite.
-// It only checked that the current globalThis.fetch rejects unregistered
-// URLs. The test name and comments implied a guarantee that the
-// implementation does not enforce.
+// EM-STRAT-009 §2: the static scanner now covers EVERY .ts file under
+// packages/scanner/test/, including this test file and the helper file.
+// The ONLY exempted file is the guard setup file (GUARD_SETUP_FILE) which
+// legitimately installs the wrapped fail-closed fetch.
 //
-// JavaScript allows arbitrary reassignment of globalThis.fetch at runtime.
-// The offline guard cannot prevent this at the language level. The
-// protection against accidental bypass is a STATIC regression check that
-// scans all test source files (and the setup files) for reassignment
-// patterns. If any file contains a fetch-override pattern, the static
-// check fails and the violation must be reviewed.
-//
-// The ONLY file allowed to assign globalThis.fetch is the offline guard
-// setup file itself (packages/scanner/test/_setup/offline-guard.ts), which
-// installs the wrapped fail-closed fetch. All other files are forbidden
-// from reassigning, stubbing, or redefining globalThis.fetch.
-//
-// Patterns detected:
-//   - globalThis.fetch = ...
-//   - global.fetch = ...
-//   - vi.stubGlobal('fetch', ...) / vi.stubGlobal("fetch", ...)
-//   - Object.defineProperty(globalThis, 'fetch', ...)
-//   - Object.defineProperty(global, 'fetch', ...)
-//   - Object.defineProperty(..., 'fetch', ...)  (any target)
-//
-// This is a code-review-time check. It does NOT prove that runtime
-// reassignment is impossible — it proves that no current test file
-// attempts it. A future test that attempts reassignment will be caught
-// here and must be reviewed before merging.
+// Pattern definitions live in _setup/fetch-override-patterns.ts to avoid
+// self-triggering. This test file imports and calls the scanner; it does
+// NOT contain the literal override syntax in its own source.
 
-describe('EM-STRAT-008 §1 — fetch-override detection (static regression check)', () => {
-  // The setup file that legitimately installs the guard.
-  const GUARD_SETUP_FILE = '_setup/offline-guard.ts';
+describe('EM-STRAT-008 §1 + EM-STRAT-009 §2 — fetch-override static detection (covers ALL test files)', () => {
 
-  // Fetch-override patterns. Each pattern is a regex that matches a
-  // reassignment, stub, or redefinition of the global fetch transport.
-  // Patterns are matched against the raw source text of each file.
-  const FETCH_OVERRIDE_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
-    // Direct assignment: globalThis.fetch = ... or global.fetch = ...
-    { name: 'globalThis.fetch = <assignment>', pattern: /globalThis\s*\.\s*fetch\s*=/ },
-    { name: 'global.fetch = <assignment>', pattern: /\bglobal\s*\.\s*fetch\s*=/ },
-    // vi.stubGlobal('fetch', ...) or vi.stubGlobal("fetch", ...)
-    { name: "vi.stubGlobal('fetch', ...)", pattern: /vi\s*\.\s*stubGlobal\s*\(\s*['"]fetch['"]\s*,/i },
-    // Object.defineProperty(globalThis, 'fetch', ...)
-    { name: "Object.defineProperty(globalThis, 'fetch', ...)", pattern: /Object\s*\.\s*defineProperty\s*\(\s*globalThis\s*,\s*['"]fetch['"]\s*,/i },
-    // Object.defineProperty(global, 'fetch', ...)
-    { name: "Object.defineProperty(global, 'fetch', ...)", pattern: /Object\s*\.\s*defineProperty\s*\(\s*global\s*,\s*['"]fetch['"]\s*,/i },
-    // Object.defineProperty(<any>, 'fetch', ...) — catches any target
-    { name: "Object.defineProperty(<any>, 'fetch', ...)", pattern: /Object\s*\.\s*defineProperty\s*\([^,]+,\s*['"]fetch['"]\s*,/i },
-    // Reflect.defineProperty(globalThis, 'fetch', ...) — same idea via Reflect
-    { name: "Reflect.defineProperty(<any>, 'fetch', ...)", pattern: /Reflect\s*\.\s*defineProperty\s*\([^,]+,\s*['"]fetch['"]\s*,/i },
-    // Object.defineProperty(globalThis, "fetch", ...) variants already covered above
-  ];
-
-  // Helper: scan a directory recursively for .ts files and return their
-  // paths relative to the test directory.
-  function scanTestFiles(testDir: string, fs: any, path: any): string[] {
-    const results: string[] = [];
-    function walk(dir: string) {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) {
-          walk(full);
-        } else if (e.isFile() && e.name.endsWith('.ts')) {
-          results.push(full);
-        }
-      }
-    }
-    walk(testDir);
-    return results;
-  }
-
-  it('no test file (except the guard setup) reassigns, stubs, or redefines globalThis.fetch', async () => {
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+  it('no test file (except the guard setup) contains a fetch-override pattern', () => {
+    const path = require('node:path');
     const testDir = path.resolve(__dirname);
-    const allTsFiles = scanTestFiles(testDir, fs, path);
-
-    // The guard setup file is the ONLY file allowed to assign globalThis.fetch.
-    // All other files (test files AND other setup files) are forbidden.
-    const violations: Array<{ file: string; pattern: string; line: string }> = [];
-    for (const filePath of allTsFiles) {
-      const relPath = path.relative(testDir, filePath);
-      // Allow the guard setup file to install the wrapped fetch.
-      if (relPath === GUARD_SETUP_FILE) continue;
-      // Skip this test file itself — it contains the pattern strings as
-      // documentation/fixtures and would self-trigger. The check is
-      // enforced on all OTHER test files.
-      if (relPath === 'offline-guard.test.ts') continue;
-
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        for (const { name, pattern } of FETCH_OVERRIDE_PATTERNS) {
-          if (pattern.test(line)) {
-            violations.push({ file: relPath, pattern: name, line: `${i + 1}: ${line.trim()}` });
-          }
-        }
-      }
-    }
+    const violations = scanForFetchOverrides(testDir);
 
     if (violations.length > 0) {
-      const detail = violations.map(v => `  ${v.file} — ${v.pattern}\n    ${v.line}`).join('\n');
+      const detail = violations
+        .map(v => `  ${v.file} — ${v.patternId} (line ${v.line}): ${v.source}`)
+        .join('\n');
       expect.fail(
-        `EM-STRAT-008 §1: found ${violations.length} fetch-override pattern(s) in test files.\n` +
-        `Only ${GUARD_SETUP_FILE} is allowed to assign globalThis.fetch.\n` +
+        `EM-STRAT-009 §2: found ${violations.length} fetch-override pattern(s).\n` +
+        `Only ${GUARD_SETUP_FILE} is allowed to assign the fetch transport.\n` +
         `Review each finding and either remove the override or document why it is safe.\n` +
         `Violations:\n${detail}`,
       );
@@ -394,135 +297,157 @@ describe('EM-STRAT-008 §1 — fetch-override detection (static regression check
     expect(violations).toEqual([]);
   });
 
-  it('the guard setup file IS allowed to assign globalThis.fetch (it installs the guard)', async () => {
-    // EM-STRAT-008 §1: verify the guard setup file exists and contains the
-    // legitimate guard-installation assignment. This confirms the allow-list
+  it('the guard setup file IS allowed to install the wrapped fetch', () => {
+    // EM-STRAT-009 §2: verify the guard setup file exists and contains the
+    // legitimate guard-installation assignment. This confirms the exemption
     // is not vacuous — the setup file really does install the guard.
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+    const fs = require('node:fs');
+    const path = require('node:path');
     const guardSetupPath = path.resolve(__dirname, GUARD_SETUP_FILE);
     expect(fs.existsSync(guardSetupPath)).toBe(true);
     const content = fs.readFileSync(guardSetupPath, 'utf8');
     // The setup file must contain the guard installation line.
     expect(content).toMatch(/globalThis\s*\.\s*fetch\s*=\s*wrappedFetch/);
-    // The setup file must NOT expose the original real fetch on globalThis.
+    // The setup file must NOT expose the original real fetch on the global object.
     expect(content).not.toMatch(/globalThis\s*\.\s*originalFetch\s*=/);
   });
 
-  it('the guard setup file does NOT expose the unwrapped real transport on globalThis', async () => {
-    // EM-STRAT-008 §1: confirm no globalThis.originalFetch assignment exists
-    // in any file under the test directory (including the setup file).
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+  it('no file exposes the unwrapped real transport on the global object', () => {
+    const path = require('node:path');
     const testDir = path.resolve(__dirname);
-    const allTsFiles = scanTestFiles(testDir, fs, path);
-    const violations: string[] = [];
-    for (const filePath of allTsFiles) {
-      const relPath = path.relative(testDir, filePath);
-      const content = fs.readFileSync(filePath, 'utf8');
-      if (/globalThis\s*\.\s*originalFetch\s*=/.test(content)) {
-        violations.push(relPath);
-      }
-    }
+    const violations = scanForOriginalFetchExposure(testDir);
     expect(violations).toEqual([]);
   });
 
-  it('detection patterns actually match known override forms (self-test)', async () => {
-    // EM-STRAT-008 §1: verify the detection patterns are not vacuous —
-    // they must match real override examples. This catches regressions
-    // where a pattern is accidentally weakened.
-    const examples: Array<{ pattern: RegExp; sample: string }> = [
-      { pattern: FETCH_OVERRIDE_PATTERNS[0].pattern, sample: 'globalThis.fetch = customFetch;' },
-      { pattern: FETCH_OVERRIDE_PATTERNS[0].pattern, sample: '  globalThis.fetch=customFetch;' },
-      { pattern: FETCH_OVERRIDE_PATTERNS[1].pattern, sample: 'global.fetch = customFetch;' },
-      { pattern: FETCH_OVERRIDE_PATTERNS[2].pattern, sample: "vi.stubGlobal('fetch', customFetch);" },
-      { pattern: FETCH_OVERRIDE_PATTERNS[2].pattern, sample: 'vi.stubGlobal("fetch", customFetch);' },
-      { pattern: FETCH_OVERRIDE_PATTERNS[3].pattern, sample: "Object.defineProperty(globalThis, 'fetch', { value: customFetch });" },
-      { pattern: FETCH_OVERRIDE_PATTERNS[4].pattern, sample: 'Object.defineProperty(global, "fetch", { value: customFetch });' },
-      { pattern: FETCH_OVERRIDE_PATTERNS[5].pattern, sample: "Object.defineProperty(someObj, 'fetch', { value: customFetch });" },
-      { pattern: FETCH_OVERRIDE_PATTERNS[6].pattern, sample: "Reflect.defineProperty(globalThis, 'fetch', { value: customFetch });" },
-    ];
-    for (const { pattern, sample } of examples) {
-      expect(pattern.test(sample)).toBe(true);
+  it('detection patterns actually match known override forms (self-test)', () => {
+    // EM-STRAT-009 §2: verify the detection patterns are not vacuous —
+    // they must match real override examples. The sample strings are
+    // constructed via concatenation in the helper file to avoid
+    // self-triggering the static scanner.
+    const { matches } = runPatternSelfTest();
+    for (const result of matches) {
+      expect(result.matched).toBe(true);
     }
+    // Verify we tested at least one sample per pattern.
+    expect(matches.length).toBeGreaterThanOrEqual(FETCH_OVERRIDE_PATTERNS.length);
   });
 
-  it('detection patterns do NOT match non-override fetch usage (false-positive check)', async () => {
-    // EM-STRAT-008 §1: verify the patterns do not match legitimate fetch
-    // calls or mock registrations (which use mockFetch.register, not
-    // globalThis.fetch assignment).
-    const nonViolations = [
-      'const res = await fetch("https://api.example.com/data");',
-      'mockFetch.register("api.example.com", { status: 200, json: async () => ({}) });',
-      'expect(globalThis.fetch).toBeDefined();',  // read, not write
-      'const orig = globalThis.fetch;',  // read, not write (no = after fetch)
-      '// globalThis.fetch = wrappedFetch;',  // comment, not code — but we flag it anyway (conservative)
-    ];
-    // The patterns should NOT match the first 4 (legitimate reads/calls).
-    // The 5th (comment) WILL match — that's intentional (conservative).
-    for (let i = 0; i < 4; i++) {
-      const sample = nonViolations[i];
-      let matched = false;
-      for (const { pattern } of FETCH_OVERRIDE_PATTERNS) {
-        if (pattern.test(sample)) { matched = true; break; }
-      }
-      expect(matched).toBe(false);
+  it('detection patterns do NOT match non-override fetch usage (false-positive check)', () => {
+    // EM-STRAT-009 §2: verify the patterns do not match legitimate fetch
+    // calls or mock registrations. Samples are constructed in the helper.
+    const { falsePositives } = runPatternSelfTest();
+    for (const result of falsePositives) {
+      expect(result.matched).toBe(false);
     }
   });
 });
 
-// ─── EM-STRAT-008 §2: Per-test guard-active verification ───────────────
+// ─── EM-STRAT-009 §1: Runtime guard-assertion correctness ─────────────
 //
-// EM-STRAT-008 §2: ensure an accidental replacement cannot leak into
-// subsequent tests. The beforeEach hook in this describe block verifies
-// the guard is active at the start of every test. If a prior test in this
-// file overwrote globalThis.fetch and did not restore it, the beforeEach
-// will fail and prevent the next test from running with a broken guard.
-//
-// Note: this is a runtime check local to this test file. The static check
-// above is the primary protection — it catches overrides at code-review
-// time before they ever run. This runtime check is a defense-in-depth
-// backup for the case where a test somehow bypasses the static check
-// (e.g., via dynamic code evaluation, which is not currently used).
+// EM-STRAT-009 §1: the previous runtime check had a bug where a fulfilled
+// fetch() would throw a synthetic error containing "offline guard", which
+// was then caught by the same catch block and accepted as evidence that
+// the guard worked. The fix is assertFetchIsGuarded (imported from the
+// helper), which structures the check so that:
+//   - A fulfilled fetch() result fails the test OUTSIDE the rejection-
+//     catching path.
+//   - A rejected result passes only when the rejection is the expected
+//     offline-guard error.
+//   - An unrelated rejection fails the test.
+//   - The assertion does not use its own synthetic error as evidence.
 
-describe('EM-STRAT-008 §2 — guard is active at the start of every test (runtime defense-in-depth)', () => {
-  // This beforeEach runs before every test in this describe block. If a
-  // prior test overwrote globalThis.fetch, this check fails immediately.
-  beforeEach(async () => {
-    // Verify the guard is active by attempting an unregistered fetch.
-    // We do NOT call mockFetch.clear() here — the test body is responsible
-    // for its own mock setup. We only verify the guard itself is intact.
+describe('EM-STRAT-009 §1 — assertFetchIsGuarded correctness (regression tests for the helper itself)', () => {
+
+  it('passes when the fetch function rejects with the expected offline-guard error', async () => {
+    // A properly guarded fetch rejects unregistered URLs with the
+    // offline-guard error. assertFetchIsGuarded should pass (not throw).
+    const guardedFetch = async () => {
+      throw new Error('EM-STRAT-007 offline guard: request blocked');
+    };
+    // Should NOT throw — the guard is working correctly.
+    await assertFetchIsGuarded(guardedFetch as any, 'https://test.example.com/');
+  });
+
+  it('FAILS when the fetch function RESOLVES (guard bypassed)', async () => {
+    // EM-STRAT-009 §1: this is the key regression test. A resolving fetch
+    // means the guard has been bypassed. assertFetchIsGuarded MUST throw.
+    // The previous implementation would mistakenly pass in this case.
+    const bypassedFetch = async () => new Response('{}', { status: 200 });
+    await expect(
+      assertFetchIsGuarded(bypassedFetch as any, 'https://test.example.com/'),
+    ).rejects.toThrow(/RESOLVED but should have REJECTED/);
+  });
+
+  it('FAILS when the fetch function rejects with an unrelated error', async () => {
+    // If fetch was overwritten with a function that throws a different
+    // error (not the offline-guard error), assertFetchIsGuarded must fail.
+    const customErrorFetch = async () => {
+      throw new TypeError('network error');
+    };
+    await expect(
+      assertFetchIsGuarded(customErrorFetch as any, 'https://test.example.com/'),
+    ).rejects.toThrow(/UNEXPECTED error/);
+  });
+
+  it('the failure message for a resolved fetch does NOT contain "offline guard"', async () => {
+    // EM-STRAT-009 §1: the synthetic failure message must NOT contain
+    // "offline guard" — otherwise it could be confused with the expected
+    // rejection. This is the root cause of the original bug.
+    const bypassedFetch = async () => new Response('{}', { status: 200 });
     try {
-      await fetch('https://em-strat-008-guard-check.example.com/');
-      // If fetch did NOT throw, the guard has been bypassed.
-      throw new Error(
-        'EM-STRAT-008 §2: globalThis.fetch did NOT reject an unregistered URL. ' +
-        'The offline guard may have been overwritten by a prior test. ' +
-        'Review the test file for globalThis.fetch reassignment.',
-      );
+      await assertFetchIsGuarded(bypassedFetch as any, 'https://test.example.com/');
+      expect.fail('should have thrown');
     } catch (e: any) {
-      // Expected: the guard rejects with the offline-guard error message.
-      // If the error is NOT the offline-guard error, something else is wrong.
-      if (!/offline guard/i.test(e.message)) {
-        throw new Error(
-          `EM-STRAT-008 §2: fetch threw an unexpected error (not the offline-guard error). ` +
-          `This suggests globalThis.fetch was overwritten with a function that throws a different error. ` +
-          `Original error: ${e.message}`,
-        );
-      }
+      expect(e.message).not.toMatch(/offline guard/i);
+      expect(e.message).toMatch(/RESOLVED but should have REJECTED/);
     }
   });
 
-  it('test A: guard is active at start (verifies beforeEach works)', async () => {
+  it('the actual installed fetch passes the assertion (guard is active)', async () => {
+    // Verify the real installed fetch (the guard) passes the assertion.
+    // This confirms the guard is working at the time this test runs.
+    await assertFetchIsGuarded(fetch, 'https://em-strat-009-real-check.example.com/');
+  });
+});
+
+// ─── EM-STRAT-009 §2: Per-test runtime guard-active verification ───────
+//
+// EM-STRAT-009 §2: the beforeEach in this describe block uses
+// assertFetchIsGuarded to verify the guard is active at the start of
+// every test in THIS describe block. If a prior test in this block
+// overwrote the fetch transport, the beforeEach will fail immediately.
+//
+// SCOPE LIMITATION (documented accurately):
+// This beforeEach is LOCAL to this describe block. It does NOT protect
+// tests in other describe blocks or other test files. Suite-wide
+// protection relies on:
+//   (a) the static scanner (covers ALL .ts files — see the
+//       "fetch-override static detection" suite above), which catches
+//       override patterns at code-review time before they ever run; and
+//   (b) the vitest setupFiles mechanism, which re-installs the guard
+//       before each test FILE's imports (so overrides in one file cannot
+//       leak into another file).
+//
+// The runtime beforeEach here is a defense-in-depth backup for the
+// describe block it protects. It is NOT a suite-wide invariant.
+
+describe('EM-STRAT-009 §2 — guard is active at the start of every test in this describe block', () => {
+  // This beforeEach runs before every test in THIS describe block only.
+  // See the SCOPE LIMITATION comment above for why this is not suite-wide.
+  beforeEach(async () => {
+    await assertFetchIsGuarded(fetch, 'https://em-strat-009-beforeEach-check.example.com/');
+  });
+
+  it('test A: guard is active at start (verifies beforeEach works)', () => {
     // If we got here, the beforeEach passed — the guard is active.
     expect(true).toBe(true);
   });
 
-  it('test B: guard is still active after test A (no leak)', async () => {
+  it('test B: guard is still active after test A (no leak)', () => {
     expect(true).toBe(true);
   });
 
-  it('test C: guard is still active after test B (no leak)', async () => {
+  it('test C: guard is still active after test B (no leak)', () => {
     expect(true).toBe(true);
   });
 });
