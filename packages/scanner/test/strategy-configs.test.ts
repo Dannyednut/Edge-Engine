@@ -394,9 +394,9 @@ describe('buildStrategyConfigs — malformed input handling', () => {
     expect(sc.perpFunding.longVenues).toContain('pacifica');  // fallback array
   });
 
-  it('empty strategies object produces all 29 configs with defaults', () => {
+  it('empty strategies object produces all 30 configs with defaults', () => {
     const sc = buildStrategyConfigs(makeEmptyConfig());
-    expect(Object.keys(sc).length).toBe(29);
+    expect(Object.keys(sc).length).toBe(30);
     // Spot-check that defaults are sensible
     expect(sc.goldArb.minSpreadPct).toBe(0.3);
     expect(sc.fundingDivergence.extremeFundingThreshold).toBe(50);
