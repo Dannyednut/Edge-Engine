@@ -21,7 +21,7 @@ no blockchain RPC · EI-S008 untouched.
   `ei/funding-carry-evidence-harness`. All commands below run from there.
   `python3 -m funding_harness --help` shows the CLI.
 
-### 0.1 Authorized series start (EI-STRAT-004/005 — read before any authorized run)
+### 0.1 Authorized series start (EI-STRAT-004/005/006 — read before any authorized run)
 
 - **The recurring twice-daily observation series has NOT been authorized or
   started.** The only existing sample is the pre-authorization exploratory
@@ -30,8 +30,8 @@ no blockchain RPC · EI-S008 untouched.
   it is never deleted or rewritten.
 - When the Instructor authorizes the series, record BEFORE the first
   authorized `collect`: (a) the **authorized gate-window anchor** (UTC —
-  see the slot-alignment rule below) and (b) the **two daily collection
-  windows** (e.g. the §0 slots). Both go into the session log.
+  see the anchor-selection rules below) and (b) the **two daily
+  collection windows** (e.g. the §0 slots). Both go into the session log.
 - **The anchor must be slot-aligned (EI-STRAT-005): exactly `00:00:00Z`
   or `12:00:00Z`.** The pre-registered evaluation window is the FIXED
   14-day UTC slot window `[anchor, anchor + 14 days)` — 28 consecutive
@@ -51,12 +51,36 @@ no blockchain RPC · EI-S008 untouched.
   admitted collection is disclosed in every report as an observed fact
   (`window_semantics.first_accepted_collection_utc`) and never moves the
   window. Do not conflate the two meanings.
-- Practically: pick the slot boundary the intended first collection falls
-  into (first collection ~08:00–10:00Z → anchor `00:00:00Z` that day;
-  first collection ~20:00–22:00Z → anchor `12:00:00Z` that day), and
-  always choose the anchor **strictly after every pre-authorization
-  sample** (the 04:56:54Z pilot). Slot alignment alone does not detect
-  pilots — the anchor choice does.
+- **Anchor selection — practical guidance (EI-STRAT-006).** An authorized
+  anchor is valid only if ALL of the following hold:
+  1. **It is a valid slot boundary:** exactly `00:00:00Z` or `12:00:00Z`
+     on some UTC date (`stats` refuses anything else with exit 4).
+     Alignment is necessary but NOT sufficient.
+  2. **It is strictly later than every pre-authorization observation.**
+     The known pilot `2026-10-20T04:56:54Z` makes `2026-10-20T00:00:00Z`
+     INVALID even though it is a slot boundary: it predates the pilot and
+     would admit the pilot into the first slot. The generic "first
+     collection expected ~08:00–10:00Z → anchor `00:00:00Z` that day"
+     pattern is therefore conditional, never a rule by itself — it yields
+     a valid anchor only on a UTC day with no pre-authorization sample,
+     and it never overrides this bullet. Slot alignment does not detect
+     pilots; this ordering rule does.
+  3. **It is selected as part of explicit authorization.** The anchor is
+     fixed by the Principal/Instructor's authorization act and recorded
+     in the session log BEFORE the first authorized `collect`. It is
+     never inferred from the pilot, never backdated from the first
+     observed collection, and never derived from exploratory timing.
+  4. **The historical demo is not an authorized start.** The slot-aligned
+     `2026-10-20T12:00:00Z` window used as a read-only demonstration in
+     EI-STRAT-005 verification is NOT an authorized start and MUST NOT be
+     presented or reused as a usable future start.
+  5. **The intended first collection is an observed event at or after the
+     anchor** (typically inside the first slot, e.g. ~08:00–10:00Z or
+     ~20:00–22:00Z per §0). It never changes the window boundaries: the
+     grid stays `[anchor, anchor + 14 days)` regardless of when the first
+     collection actually lands.
+  No authorized timestamp is selected or announced in this runbook; the
+  actual anchor decision rests with the Principal.
 - Always pass the authorized anchor to stats:
   `python3 -m funding_harness stats --window-start <slot-aligned UTC ts>`.
   The boundary is applied as an **exact timestamp against each pair's/

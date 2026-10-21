@@ -52,7 +52,7 @@ evidence/funding-carry/
 │   ├── stats.py               window metrics + pre-registered gate verdict engine
 │   ├── fees.py                NON-GATE fee sensitivity sidecar (never a verdict)
 │   └── cli.py                 collect / stats / verify / fees (exit codes 0/1/2/3)
-├── tests/                     83 offline tests (fixtures = bounded real payloads)
+├── tests/                     103 offline tests (fixtures = bounded real payloads)
 └── data/                      runtime only (gitignored): runs/<run_id>/…
 ```
 
@@ -267,7 +267,7 @@ manifest-migration decision) — no such change is implemented here.
 |---|---|
 | Manually invoked read-only Python tool, free public sources, no credentials | `cli.py` (single-shot invocations); stdlib-only runtime |
 | New dedicated evidence path, no modification of existing data | `evidence/funding-carry/data/` (new; per-run dirs; append-only) |
-| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (94 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard, exact-start boundary, legacy-metadata clarity, slot-aligned window semantics) |
+| Raw responses or bounded equivalents + normalized JSONL + unit tests for conversions/nulls/duplicates/malformed/endpoint-failure | `store.py` + `tests/` (103 offline tests incl. 418/403, malformed, missing-asset, duplicate-timestamp, tamper, fixed-denominator window, majors gate, fee sidecar, offline guard, exact-start boundary, legacy-metadata clarity, slot-aligned window semantics, anchor-guidance documentation regression) |
 | Fail closed, mark gaps, never manufacture rows | `models.validate_observation`, gap-row design, exit-code contract |
 | Runbook for twice-daily collection, append semantics, hash/consistency checks, derived stats | `RUNBOOK.md` + `store.verify` + `stats` |
 | No cron/GHA/daemon/daemon-like scheduling | none exists; runbook states the prohibition |
@@ -275,4 +275,5 @@ manifest-migration decision) — no such change is implemented here.
 | EI-STRAT-003: fixed 28-slot completeness denominator · three-major overall condition · non-gate fee sensitivity sidecar · offline CI job | `stats.py` (fixed window + majors gate) · `fees.py` + `fees` CLI · `tests/test_gate_window.py` / `test_gate_majors.py` / `test_fees_sidecar.py` / `test_offline_guard.py` · `.github/workflows/evidence-funding-carry-tests.yml` |
 | EI-STRAT-004: exact authorized-start boundary before slot aggregation · legacy completeness-definition metadata labeled · authorized-start runbook procedure | `stats.py` (exact `collected_at_utc` boundary + 28-slot grid + exclusion disclosure + legacy-status block) · `tests/test_window_boundary.py` · `tests/test_completeness_definition.py` · `RUNBOOK.md` §0.1/§4 |
 | EI-STRAT-005: slot-aligned authorized window anchors (00:00:00Z/12:00:00Z, exit-4 refusal) · gate-window anchor vs first-collection clarification · fixed-14-day-UTC-slot-window disclosure | `stats.py` (`WindowAnchorError` + `_require_slot_aligned` + `window_semantics` report block incl. `first_accepted_collection_utc`) · `cli.py` (exit 4) · `tests/test_window_semantics.py` · `RUNBOOK.md` §0.1/§4 |
+| EI-STRAT-006: safe anchor-selection guidance — anchor must be a slot boundary AND strictly later than every pre-authorization observation (2026-10-20T00:00:00Z invalid: predates the 2026-10-20T04:56:54Z pilot) · explicit-authorization-only, never inferred/backdated · 2026-10-20T12:00:00Z demo is NOT an authorized start · first collection is an observed event, never moves the window · anchor decision reserved to the Principal | `RUNBOOK.md` §0.1 (practical guidance rules 1–5) · `tests/test_anchor_guidance.py` (documentation regression + alignment-vs-ordering distinction) |
 | Pre-registered gate thresholds unchanged | `GATE_CONFIG` + `gate_config_sha256` drift lock (exit 3) |
