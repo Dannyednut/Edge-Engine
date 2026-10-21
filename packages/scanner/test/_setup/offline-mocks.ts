@@ -1,5 +1,5 @@
 /**
- * Test helpers for the EM-STRAT-006 offline guard (EM-STRAT-006 §2).
+ * Test helpers for the EM-STRAT-006/007 offline guard.
  *
  * These helpers register deterministic mock responses for the external APIs
  * that scanners call. Tests that exercise `scanner.scan()` should import
@@ -8,11 +8,15 @@
  * Mocks are registered via the global `mockFetch` API exposed by the
  * offline-guard setup file. Tests should call `mockFetch.clear()` in a
  * `beforeEach` to prevent mocks from leaking across test boundaries.
+ *
+ * EM-STRAT-007 §1: the mockFetch API has NO disable/enable escape hatch.
+ * The guard is unconditionally fail-closed for the default test suite.
  */
 
 import { beforeEach, afterEach } from 'vitest';
 
 // Re-export the global mockFetch for ergonomic test access.
+// EM-STRAT-007 §1: no disable/enable methods on the type.
 export const mockFetch = (globalThis as any).mockFetch as {
   register(
     pattern: RegExp | string,
@@ -23,8 +27,6 @@ export const mockFetch = (globalThis as any).mockFetch as {
   clear(): void;
   callCount(pattern: RegExp | string): number;
   calls: Array<{ url: string; init?: RequestInit }>;
-  disable(): void;
-  enable(): void;
 };
 
 // ─── Default mock responses ────────────────────────────────────────────

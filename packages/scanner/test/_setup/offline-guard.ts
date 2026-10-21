@@ -1,5 +1,5 @@
 /**
- * Offline guard for the @edge/scanner test suite (EM-STRAT-006 §2).
+ * Offline guard for the @edge/scanner test suite (EM-STRAT-006 §2, hardened EM-STRAT-007 §1).
  *
  * This setup file is loaded by vitest BEFORE any test file runs. It installs
  * a global fetch interceptor that:
@@ -21,9 +21,16 @@
  * opt-in via a separate vitest project/config that does NOT load this setup
  * file. No such integration tests exist in the current repository.
  *
- * EM-STRAT-006 §2 requirement:
- *   "The default test/CI path must fail if an unexpected external network
- *    request is attempted."
+ * EM-STRAT-007 §1 hardening:
+ *   - The guard is UNCONDITIONALLY fail-closed. There is NO disable/enable
+ *     escape hatch exposed to tests. The guard cannot be turned off from
+ *     any test file in the default suite.
+ *   - The unwrapped real transport (originalFetch) is kept PRIVATE to this
+ *     module. It is NOT exposed on globalThis or anywhere else. No test
+ *     path can invoke the unwrapped real transport.
+ *   - If integration tests are needed in the future, they must use a
+ *     separate vitest configuration that does NOT load this setup file.
+ *     No network-enabled tests or workflows are added as part of this task.
  */
 
 //
@@ -43,10 +50,16 @@ type MockEntry = {
   pattern: RegExp | string;
   /** The mock response to serve, OR a function that returns one. */
   response: MockResponse | ((url: string, init?: RequestInit) => MockResponse | Promise<MockResponse>);
-  /** Optional call counter for assertion. */
+  /** Call counter for assertion. */
   callCount: number;
 };
 
+/**
+ * Public API exposed to tests via `globalThis.mockFetch`.
+ *
+ * EM-STRAT-007 §1: there is NO disable/enable method. The guard is
+ * unconditionally fail-closed for the default test suite.
+ */
 interface MockFetchApi {
   /**
    * Register a deterministic mock response for a URL pattern.
@@ -62,19 +75,29 @@ interface MockFetchApi {
   callCount(pattern: RegExp | string): number;
   /** All recorded fetch calls (URL + init) for debugging. */
   calls: Array<{ url: string; init?: RequestInit }>;
-  /** Disable the offline guard entirely (for explicit opt-in integration tests). */
-  disable(): void;
-  /** Re-enable the offline guard (default state). */
-  enable(): void;
 }
 
 //
 // Implementation
 //
+// EM-STRAT-007 §1: the entries array, calls log, and the original (real)
+// fetch reference are all module-private. They are NOT exposed on
+// globalThis. Tests can only interact with the guard via the public
+// MockFetchApi (register/clear/callCount/calls).
+//
 
 const entries: MockEntry[] = [];
 const calls: Array<{ url: string; init?: RequestInit }> = [];
-let guardEnabled = true;
+
+// EM-STRAT-007 §1: the original real fetch is captured ONCE at setup time
+// and held in a module-private closure variable. It is NOT exposed on
+// globalThis. No test path can reach it.
+//
+// We never call it from the default test suite — the guard is unconditionally
+// fail-closed. The reference is retained only so a future explicitly-opt-in
+// integration configuration could import this module's internals if needed;
+// it is not reachable from any test in the default suite.
+const originalFetch: typeof globalThis.fetch = globalThis.fetch;
 
 function matchUrl(url: string, pattern: RegExp | string): boolean {
   if (typeof pattern === 'string') {
@@ -89,18 +112,18 @@ function findEntry(url: string): MockEntry | undefined {
 
 function makeOfflineError(url: string): Error {
   const err = new Error(
-    `[EM-STRAT-006 offline guard] External network request blocked:\n` +
+    `[EM-STRAT-007 offline guard] External network request blocked:\n` +
     `  URL: ${url}\n` +
     `  The default test/CI path runs OFFLINE. If this test genuinely requires\n` +
     `  network access, register a mock via \`mockFetch.register(pattern, response)\`\n` +
     `  in the test setup. If this is an integration test, move it to a separate\n` +
     `  vitest project that does NOT load the offline guard.\n` +
-    `  See packages/scanner/test/_setup/offline-guard.ts for details.`,
+    `  See packages/scanner/test/_setup/offline-guard.ts for details.\n` +
+    `  EM-STRAT-007 §1: the guard is unconditionally fail-closed — there is no\n` +
+    `  disable/enable escape hatch in the default test suite.`,
   );
   return err;
 }
-
-const originalFetch = globalThis.fetch;
 
 const wrappedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = typeof input === 'string'
@@ -111,11 +134,6 @@ const wrappedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promi
 
   // Always record the call for debugging.
   calls.push({ url, init });
-
-  if (!guardEnabled) {
-    // Guard explicitly disabled — pass through to real fetch.
-    return originalFetch(input as any, init);
-  }
 
   const entry = findEntry(url);
   if (entry) {
@@ -138,15 +156,17 @@ const wrappedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promi
     });
   }
 
-  // No mock registered — block the request.
+  // No mock registered — block the request. EM-STRAT-007 §1: this is
+  // unconditional. There is no guardEnabled flag and no escape hatch.
   throw makeOfflineError(url);
 };
 
 // Install the wrapped fetch BEFORE any test imports scanner modules.
-(globalThis as any).fetch = wrappedFetch;
-(globalThis as any).originalFetch = originalFetch;
+// EM-STRAT-007 §1: the original (real) fetch is NOT exposed on globalThis.
+// Only the wrapped (fail-closed) fetch is installed.
+globalThis.fetch = wrappedFetch;
 
-// Export the mock API for tests to use.
+// Public API exposed to tests. EM-STRAT-007 §1: no disable/enable methods.
 const mockFetchApi: MockFetchApi = {
   register(pattern, response) {
     entries.push({ pattern, response, callCount: 0 });
@@ -160,8 +180,6 @@ const mockFetchApi: MockFetchApi = {
     return e?.callCount ?? 0;
   },
   calls,
-  disable() { guardEnabled = false; },
-  enable() { guardEnabled = true; },
 };
 
 // Expose globally so test files can access without import.
