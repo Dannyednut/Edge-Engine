@@ -1,0 +1,47 @@
+# EI-STRAT-003 (task 4) — narrowly scoped OFFLINE test job for the
+# funding-carry evidence harness (evidence/funding-carry/).
+#
+# Hard scope rules (per the EI-STRAT-003 instruction):
+#   - runs ONLY the harness's offline pytest suite with the mocked transport
+#   - NEVER invokes `collect`, NEVER contacts any public API, requires no
+#     credentials, creates NO schedule (no `schedule:` trigger exists), and
+#     starts NO background process
+#   - FUNDING_HARNESS_OFFLINE=1 makes any real network attempt raise
+#     TransportBlockedError at the transport layer (defense in depth — the
+#     offline property is enforced, not merely assumed)
+#
+# Triggers: pull requests touching the harness directory (or this file), and
+# manual workflow_dispatch. There is deliberately NO push/schedule trigger
+# beyond the PR path filter.
+
+name: evidence-funding-carry-tests
+
+on:
+  pull_request:
+    paths:
+      - "evidence/funding-carry/**"
+      - ".github/workflows/evidence-funding-carry-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-pytest:
+    name: harness offline tests (mocked transport only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FUNDING_HARNESS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the single test-layer dependency (pytest)
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r evidence/funding-carry/requirements-dev.txt
+      - name: Run offline pytest suite (no collect, no network, no credentials)
+        working-directory: evidence/funding-carry
+        run: python -m pytest tests -q
