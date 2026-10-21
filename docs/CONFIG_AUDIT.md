@@ -80,7 +80,7 @@ The following TOML keys are parsed by `loadConfig()` but are **NOT consumed** by
 
 Before this sprint, config values were inline in `all-runner.ts` and could not be tested without starting the trading system (which requires API clients, network access, and credentials).
 
-**Extraction:** All 29 strategy constructor param objects are now built by the pure function `buildStrategyConfigs(cfg)` in `packages/scanner/src/runners/strategy-configs.ts`. This function:
+**Historical extraction:** All 29 strategy constructor param objects are now built by the pure function `buildStrategyConfigs(cfg)` in `packages/scanner/src/runners/strategy-configs.ts`. This function:
 - Takes an `AppConfig` and returns a typed `StrategyConfigs` object.
 - Has no side effects, no client creation, no network access.
 - Can be unit-tested with synthetic configs (empty, partial, malformed).
@@ -116,3 +116,17 @@ execution layer is added, the wiring should be done at that point, reading
 from TOML via the existing `buildStrategyConfigs()` infrastructure.
 
 **Priority downgrade:** P4 (was P3) — deferred until execution layer exists.
+
+
+## Update — 2026-10-21 (post-merge strategy-wiring review)
+
+The live runner now uses `buildStrategyConfigs(cfg)`; older passages in this document describing the pre-refactor drift are historical. The follow-up change in the Draft strategy-wiring PR wires one more candidate as monitoring-only.
+
+- `cross_dex_arb`: selected as a discovery candidate only. The prior scanner assigned a zero price to every pool, so it emitted no valid cross-DEX comparison. The replacement uses GeckoTerminal's exact base/quote token relationship IDs and canonicalizes pair orientation. It explicitly leaves net profit unavailable and marks every alert non-executable because fees, trade-size slippage, gas and execution routes have not been validated.
+- `dex_dex`: duplicate placeholder consolidated into `cross_dex_arb`; do not keep two config sections implying distinct implementations.
+- `mev_backrun`: remains unwired. The config's Jito/Flashbots flags are not implementations; production support needs a defined chain-specific transaction stream, searcher/relay integration, simulation, inclusion economics and risk policy.
+- `precompile_flashloan_arb`: remains unwired. The current POC compares a HyperCore oracle price with a mark price rather than a validated HyperSwap quote and includes hard-coded sample BTC prices. Hyperliquid documents that CoreWriter actions are processed later than the EVM transaction, so the perp leg cannot be treated as an atomic in-callback repayment leg for a same-transaction flashloan. See https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/interacting-with-hypercore.
+- GeckoTerminal documents a one-minute cache, beta schema and approximate 10 calls/minute public rate limit. The scanner caches for at least 60 seconds and is discovery/monitoring-only. See https://api.geckoterminal.com/docs/index.html.
+- Ramses documents dynamic swap fees. A constant generic 0.30% fee assumption is not reliable enough to claim net profitability. See https://ramsesx.org/.
+
+The earlier section-count findings predate this change. Revalidate TOML sections and runner instantiations on each future audit; configured, instantiated, monitoring-only, economically verified and executable are distinct states.
