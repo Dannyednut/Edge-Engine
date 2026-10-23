@@ -23,6 +23,7 @@ import type { ChainId } from '@edge/types';
 import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, type Chain as ViemChain, defineChain } from 'viem';
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { assertExecutionAuthorized } from '@edge/risk';
 
 // ─── HyperEVM chain definition (Hyperliquid L1 EVM, chain ID 999) ──────
 export const hyperEvm = defineChain({
@@ -160,6 +161,11 @@ export class EvmExecutor {
   readonly aaveV3PoolAddress: `0x${string}` | null;
 
   constructor(opts: EvmExecutorOptions) {
+    // EM-STRAT-012 Phase-0: fail-closed gate BEFORE any signer/key material
+    // is touched. Construction enables submission, so it requires the
+    // 'evm-executor:construct-signer' scope.
+    assertExecutionAuthorized('evm-executor:construct-signer');
+
     this.chainId = opts.chainId;
     const chain = CHAIN_MAP[opts.chainId];
     if (!chain) throw new Error(`EvmExecutor: unsupported chainId ${opts.chainId}`);
@@ -190,6 +196,9 @@ export class EvmExecutor {
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
   }): Promise<{ txHash: `0x${string}`; success: boolean }> {
+    // EM-STRAT-012 Phase-0: re-checked per submission so an existing instance
+    // cannot submit after authorization expires.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     // Encode the call to AgentVault.execute(target, data)
     const callData = encodeFunctionCall('execute', [params.target, params.data]);
 
@@ -228,6 +237,9 @@ export class EvmExecutor {
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
   }): Promise<{ txHash: `0x${string}` }> {
+    // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
+    // encoding, or transport work.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.balancerVaultAddress) {
       throw new Error(`Balancer V2 not available on ${this.chainId}`);
     }
@@ -244,7 +256,6 @@ export class EvmExecutor {
       [params.flashloanAmount],
       userData,
     ]);
-
     const txHash = await this.walletClient.sendTransaction({
       to: this.agentVaultAddress,
       data: callData,
@@ -272,6 +283,9 @@ export class EvmExecutor {
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
   }): Promise<{ txHash: `0x${string}` }> {
+    // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
+    // encoding, or transport work.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.aaveV3PoolAddress) {
       throw new Error(`Aave V3 not available on ${this.chainId}`);
     }
@@ -286,7 +300,6 @@ export class EvmExecutor {
       params.flashloanAmount,
       userData,
     ]);
-
     const txHash = await this.walletClient.sendTransaction({
       to: this.agentVaultAddress,
       data: callData,

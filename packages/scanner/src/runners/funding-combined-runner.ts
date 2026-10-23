@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { loadConfig } from '@edge/config';
 import { TelegramAlerter } from '@edge/alerts';
 import { PnlDb } from '@edge/pnl';
-import { RiskGuard } from '@edge/risk';
+import { RiskGuard, assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient } from '@edge/vooi-client';
 import { PerpFundingStrategy, type PerpFundingAlert } from '../strategies/perp-funding.js';
@@ -28,23 +28,45 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
 
-// Load .env
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch { /* .env not present */ }
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:funding-combined-runner';
 
-const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
-const MIN_APR_FOR_ALERT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
-const AUTO_EXECUTE = process.env.AUTO_EXECUTE === 'true';
-const DRY_RUN = process.env.DRY_RUN !== 'false';   // default true — safe
+// EM-STRAT-012 Phase-0: .env loading moved out of module-import scope into
+// an explicitly-invoked function so importing this module does not mutate
+// process.env. Called from main() only.
+function loadDotEnvIntoProcessEnv(): void {
+  try {
+    const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
+    for (const line of env.split('\n')) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const [, k, v] = m;
+      if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
+    }
+  } catch { /* .env not present */ }
+}
 
 async function main() {
+  // EM-STRAT-012 Phase-0: .env loading is explicitly invoked here (entrypoint
+  // code), not at module import time.
+  loadDotEnvIntoProcessEnv();
+
+  // Env-derived run configuration is read inside main() (not at module scope)
+  // so importing this module has no env-dependent side effects.
+  const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
+  const MIN_APR_FOR_ALERT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
+  const AUTO_EXECUTE = process.env.AUTO_EXECUTE === 'true';
+  const DRY_RUN = process.env.DRY_RUN !== 'false';   // default true — safe
+
+  // EM-STRAT-012 Phase-0: defense-in-depth entrypoint gate at the live
+  // transition. Alert-only scanning (AUTO_EXECUTE=false, DRY_RUN=true) remains
+  // usable without authorization; any configuration that can submit orders
+  // requires the entrypoint scope (the VooiExecutor.executeArb and client
+  // sink scopes are checked additionally at their own layers).
+  if (AUTO_EXECUTE || !DRY_RUN) {
+    assertExecutionAuthorized(ENTRYPOINT_SCOPE);
+  }
+
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / Combined Perp-Funding Scanner');
   console.log('═══════════════════════════════════════════════════');
@@ -269,7 +291,12 @@ async function main() {
   });
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+// EM-STRAT-012 Phase-0: import.meta.url main guard — importing this module
+// no longer runs main() or starts the scan loop. This is hygiene; the
+// authorization gates above are the containment barrier.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
+}

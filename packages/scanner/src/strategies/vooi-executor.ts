@@ -27,6 +27,7 @@
 
 import { VooiClient, type VooiArbitrageOrder, type VooiArbitrageOrderLeg, type VooiArbitrageOrderRequest } from '@edge/vooi-client';
 import type { TelegramAlerter } from '@edge/alerts';
+import { assertExecutionAuthorized } from '@edge/risk';
 
 export interface VooiExecutorOptions {
   vooi: VooiClient;
@@ -84,7 +85,11 @@ export class VooiExecutor {
     this.defaultNotionalUsd = opts.defaultNotionalUsd ?? 5000;
     this.defaultLeverage = opts.defaultLeverage ?? 2;
     this.maxHoldHours = opts.maxHoldHours ?? 72;
-    this.dryRun = opts.dryRun ?? false;
+    // EM-STRAT-012 Phase-0: safe-by-default. A caller that omits dryRun gets
+    // DRY-RUN (not live). Note: a dry-run option is NOT a replacement for the
+    // shared submission guard — executeArb asserts authorization separately
+    // even when a caller explicitly passes dryRun: false.
+    this.dryRun = opts.dryRun ?? true;
   }
 
   /**
@@ -173,7 +178,14 @@ export class VooiExecutor {
       };
     }
 
-    // 6. Submit
+    // 5b. EM-STRAT-012 Phase-0: fail-closed execution authorization.
+    // Defense-in-depth ahead of the client-level sink guard — a dry-run
+    // option is NOT a replacement for the shared submission guard. This
+    // check runs AFTER the dry-run early-return so dry-run stays usable
+    // without authorization, and immediately BEFORE the live submission.
+    assertExecutionAuthorized('vooi-executor:execute-arb');
+
+    // 6. Submit (the client sink re-checks 'vooi:place-arbitrage-order')
     try {
       const order = await this.vooi.placeArbitrageOrder(orderReq);
 
@@ -225,6 +237,14 @@ export class VooiExecutor {
 
   /**
    * Close an existing paired-leg position by submitting reverse orders.
+   *
+   * Risk classification: RISK-REDUCING (documented per EM-STRAT-012 Phase-0).
+   * Both legs carry `reduceOnly: true`, so the venue rejects any order that
+   * would increase exposure — this path can only shrink or flatten a
+   * position. It is deliberately NOT gated by the execution guard so that
+   * risk-reducing exits remain available without opening execution
+   * authorization; the client sink call passes `intent: 'close'` to bypass
+   * the open-order guard on that documented basis.
    */
   async closeArb(params: {
     orderId: string;
@@ -265,7 +285,7 @@ export class VooiExecutor {
         partialFillPolicy: 'fullFill',
         hedgeFailurePolicy: 'alertAndHold',
         clientOrderId: `edge_close_${Date.now()}_${params.orderId}`,
-      });
+      }, { intent: 'close' });
       return {
         orderId: order.id,
         status: order.status,

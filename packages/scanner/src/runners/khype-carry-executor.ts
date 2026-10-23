@@ -32,6 +32,10 @@ import { KinetiqClient, KHYPE_TOKEN, hyperEvm } from '@edge/executor';
 import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, encodeFunctionData, type Address, type Hash } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { HYPERSWAP_V3_POOLS, HYPERSWAP_V3_SWAP_ROUTER_02, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman } from '../lib/hyperliquid-defi.js';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:khype-carry-executor';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -137,6 +141,10 @@ export class KhypeCarryExecutor {
 
     // Initialize wallet client if private key is available
     if (process.env.AGENT_HYPE_PRIVKEY && !opts.dryRun) {
+      // EM-STRAT-012 Phase-0: signer construction enables submission — it
+      // requires the entrypoint scope (the sendTransaction sites re-check
+      // 'evm-executor:send-transaction' scopes via the shared guard).
+      assertExecutionAuthorized(ENTRYPOINT_SCOPE);
       const account = privateKeyToAccount(process.env.AGENT_HYPE_PRIVKEY as `0x${string}`);
       this.walletClient = createWalletClient({
         account,
@@ -156,6 +164,11 @@ export class KhypeCarryExecutor {
     if (!this.walletClient || !this.publicClient || !this.walletClient.account) {
       throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
     }
+    // EM-STRAT-012 Phase-0: raw EVM submission sink. Re-checked per call so an
+    // existing instance cannot submit after authorization expires. The
+    // 'evm-executor:send-transaction' scope names the capability (send an EVM
+    // transaction) regardless of which runner performs it.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     const txHash = await this.walletClient.sendTransaction({
       account: this.walletClient.account,
       chain: hyperEvm,

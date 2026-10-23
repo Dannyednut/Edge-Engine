@@ -16,8 +16,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@edge/types": "workspace:*",
     "@edge/config": "workspace:*",
+    "@edge/risk": "workspace:*",
+    "@edge/types": "workspace:*",
     "ccxt": "^4.4.0"
   },
   "devDependencies": {

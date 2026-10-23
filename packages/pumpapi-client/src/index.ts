@@ -188,6 +188,8 @@ export interface PumpStreamEvent {
 
 // ─── Client ────────────────────────────────────────────────────────────
 
+import { assertExecutionAuthorized } from '@edge/risk';
+
 export class PumpApiClient {
   private readonly privateKey?: string;
   private readonly apiKey?: string;
@@ -319,6 +321,12 @@ export class PumpApiClient {
     priorityFee?: number;
     jitoTip?: number;
   }): Promise<PumpTxResponse> {
+    // EM-STRAT-012 Phase-0 sink guard. Risk classification: RISK-INCREASING —
+    // submits real buy+sell Solana transactions that open and close a
+    // transient position; there is no reduce-only/close variant, so the
+    // whole method is guarded with no risk-reducing exemption. Dormant sink
+    // — no callers on current main; guarded so it cannot be silently adopted.
+    assertExecutionAuthorized('pumpapi-client:atomic-two-leg-arb');
     if (!this.isLightning) {
       throw new Error('atomicTwoLegArb requires Lightning mode (privateKey or apiKey)');
     }

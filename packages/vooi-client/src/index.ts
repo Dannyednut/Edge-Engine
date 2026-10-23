@@ -6,7 +6,14 @@
  *
  * Public arbitrage scanner endpoints need NO auth.
  * Trading endpoints (POST /arbitrage-orders, POST /bots) require Bearer.
+ *
+ * EM-STRAT-012 Phase-0: risk-increasing mutation methods (placeArbitrageOrder
+ * with open intent, createBot, startBot) are gated by the shared fail-closed
+ * execution guard from @edge/risk. Safety-positive methods (stopBot,
+ * cancelArbitrageOrder, deleteBot) are deliberately ungated.
  */
+
+import { assertExecutionAuthorized } from '@edge/risk';
 
 const VOOI_BASE = 'https://perps-api.vooi.io';
 
@@ -196,9 +203,33 @@ export class VooiClient {
   }
 
   // ─── Authenticated trading endpoints ─────────────────────────────────
+  //
+  // EM-STRAT-012 Phase-0: risk-increasing mutation sinks are gated by the
+  // shared fail-closed execution guard at this choke point, so direct method
+  // calls cannot bypass containment. Safety-positive (risk-reducing) methods
+  // — stopBot, cancelArbitrageOrder, deleteBot — are deliberately UNGATED so
+  // emergency stop/cancel remains available without execution authorization.
 
-  async placeArbitrageOrder(req: VooiArbitrageOrderRequest): Promise<VooiArbitrageOrder> {
+  /**
+   * Submit a paired-leg arbitrage order.
+   *
+   * Risk classification: RISK-INCREASING by default. The optional
+   * `intent: 'close'` marks the call as a strictly risk-reducing exit
+   * (used by VooiExecutor.closeArb whose legs carry reduceOnly: true —
+   * the venue rejects reduce-only orders that would increase exposure).
+   * Close-intent calls are permitted without execution authorization so
+   * risk-reducing exits stay available; every other call requires the
+   * 'vooi:place-arbitrage-order' scope. Default when intent is omitted:
+   * 'open' (guarded — fail-closed).
+   */
+  async placeArbitrageOrder(
+    req: VooiArbitrageOrderRequest,
+    opts?: { intent?: 'open' | 'close' },
+  ): Promise<VooiArbitrageOrder> {
     if (!this.apiToken) throw new Error('VooiClient.placeArbitrageOrder: apiToken required');
+    if ((opts?.intent ?? 'open') !== 'close') {
+      assertExecutionAuthorized('vooi:place-arbitrage-order');
+    }
     return this.request<VooiArbitrageOrder>('POST', '/arbitrage-orders', req);
   }
 
@@ -211,8 +242,14 @@ export class VooiClient {
     return this.request('DELETE', `/arbitrage-orders/${id}`);
   }
 
+  /**
+   * Create an autonomous arb bot. Risk classification: RISK-INCREASING —
+   * once started, the bot trades 24/7 outside this engine's process.
+   * Requires the 'vooi:create-bot' scope.
+   */
   async createBot(req: VooiBotRequest): Promise<VooiBot> {
     if (!this.apiToken) throw new Error('VooiClient.createBot: apiToken required');
+    assertExecutionAuthorized('vooi:create-bot');
     return this.request<VooiBot>('POST', '/bots', req);
   }
 
@@ -220,14 +257,25 @@ export class VooiClient {
     return this.request<VooiBot[]>('GET', '/bots');
   }
 
+  /**
+   * Start a created bot. Risk classification: RISK-INCREASING — the bot
+   * begins trading autonomously. Requires the 'vooi:start-bot' scope.
+   */
   async startBot(id: string): Promise<VooiBot> {
+    assertExecutionAuthorized('vooi:start-bot');
     return this.request<VooiBot>('POST', `/bots/${id}/start`);
   }
 
+  // SAFETY-POSITIVE (risk-reducing): stopBot halts an autonomous bot and
+  // deliberately carries NO execution guard so emergency stops remain
+  // available without execution authorization (EM-STRAT-012 Phase-0).
   async stopBot(id: string): Promise<VooiBot> {
     return this.request<VooiBot>('POST', `/bots/${id}/stop`);
   }
 
+  // SAFETY-POSITIVE (risk-reducing/cleanup): deleteBot removes a (necessarily
+  // stopped) bot configuration. It cannot open or increase exposure and is
+  // deliberately ungated so cleanup remains available (EM-STRAT-012 Phase-0).
   async deleteBot(id: string): Promise<{ ok: boolean }> {
     return this.request('DELETE', `/bots/${id}`);
   }

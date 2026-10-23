@@ -30,21 +30,29 @@ import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { VooiClient } from '@edge/vooi-client';
 import { getAliasInfo } from '../lib/alias-ticker-map.js';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
 
-// Load .env
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+// EM-STRAT-012 Phase-0: .env loading moved out of module-import scope into
+// an explicitly-invoked function so importing this module does not mutate
+// process.env. Called from main() only.
+function loadDotEnvIntoProcessEnv(): void {
+  try {
+    const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
+    for (const line of env.split('\n')) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const [, k, v] = m;
+      if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
+    }
+  } catch {}
+}
+
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:vooi-price-spread-executor';
 
 const VOOI_VENUES = new Set(['hyperliquid', 'lighter', 'aster', 'extended', 'trade.xyz', 'kinetiq', 'robinhood', 'ondo', 'binance', 'bybit', 'mexc', 'gate']);
 
@@ -75,8 +83,10 @@ export class VooiPriceSpreadExecutor {
     minSpreadPct?: number;
     minOiUsd?: number;
     dryRun?: boolean;
+    /** Injectable client (for deterministic offline tests). Defaults to a real VooiClient. */
+    vooi?: VooiClient;
   }) {
-    this.vooi = new VooiClient({ apiToken: opts.apiToken });
+    this.vooi = opts.vooi ?? new VooiClient({ apiToken: opts.apiToken });
     this.maxSizeUsd = opts.maxSizeUsd ?? 5000;
     this.minSpreadPct = opts.minSpreadPct ?? 1.5;
     this.minOiUsd = opts.minOiUsd ?? 100_000;
@@ -162,6 +172,11 @@ export class VooiPriceSpreadExecutor {
       return { success: false, error: 'dry-run mode' };
     }
 
+    // EM-STRAT-012 Phase-0: fail-closed authorization ahead of the live
+    // submission. The client sink (placeArbitrageOrder, open intent) re-checks
+    // its own scope — this is defense-in-depth, not a replacement.
+    assertExecutionAuthorized('vooi-price-spread-executor:execute-opp');
+
     try {
       // Compute size in contracts
       const size = Math.floor(this.maxSizeUsd / opp.buyPrice);
@@ -198,11 +213,22 @@ export class VooiPriceSpreadExecutor {
 
 // ─── CLI ───────────────────────────────────────────────────────────────
 async function main() {
+  // EM-STRAT-012 Phase-0: .env loading is explicitly invoked here (entrypoint
+  // code), not at module import time.
+  loadDotEnvIntoProcessEnv();
+
   const args = new Set(process.argv.slice(2));
   const apiToken = process.env.VOOI_API_TOKEN;
   if (!apiToken) {
     console.error('VOOI_API_TOKEN not set');
     process.exit(1);
+  }
+
+  // EM-STRAT-012 Phase-0: defense-in-depth entrypoint gate at the live
+  // transition. Dry-run scanning remains usable without authorization; going
+  // live requires the entrypoint scope (plus the executor and sink scopes).
+  if (args.has('--live')) {
+    assertExecutionAuthorized(ENTRYPOINT_SCOPE);
   }
 
   const executor = new VooiPriceSpreadExecutor({

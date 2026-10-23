@@ -31,6 +31,10 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EulerClient, hyperEvm, type EulerVaultInfo } from '@edge/executor';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:euler-lending-executor';
 import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, type Address, type Hash } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
@@ -123,6 +127,10 @@ export class EulerLendingArbExecutor {
     this.state = loadState();
 
     if (process.env.AGENT_HYPE_PRIVKEY && !opts.dryRun) {
+      // EM-STRAT-012 Phase-0: signer construction enables submission — it
+      // requires the entrypoint scope (the sendTransaction sites re-check
+      // 'evm-executor:send-transaction' scopes via the shared guard).
+      assertExecutionAuthorized(ENTRYPOINT_SCOPE);
       const account = privateKeyToAccount(process.env.AGENT_HYPE_PRIVKEY as `0x${string}`);
       this.walletClient = createWalletClient({
         account,
@@ -142,6 +150,11 @@ export class EulerLendingArbExecutor {
     if (!this.walletClient || !this.publicClient || !this.walletClient.account) {
       throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
     }
+    // EM-STRAT-012 Phase-0: raw EVM submission sink. Re-checked per call so an
+    // existing instance cannot submit after authorization expires. The
+    // 'evm-executor:send-transaction' scope names the capability (send an EVM
+    // transaction) regardless of which runner performs it.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     const txHash = await this.walletClient.sendTransaction({
       account: this.walletClient.account,
       chain: hyperEvm,

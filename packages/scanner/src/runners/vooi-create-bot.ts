@@ -3,11 +3,11 @@
  *
  * Usage: npx tsx packages/scanner/src/runners/vooi-create-bot.ts --live
  *
- * This script creates a VOOI arb bot that automatically:
- *   1. Scans for funding rate spreads across 12+ venues
- *   2. Opens paired-leg positions when spread > threshold
- *   3. Closes positions when spread converges or after max hold time
- *   4. Runs 24/7 without manual intervention
+ * EM-STRAT-012 Phase-0: this script is behind the shared fail-closed execution
+ * guard. `--live` alone is NOT sufficient — a valid scoped authorization
+ * descriptor (EDGE_EXECUTION_AUTH) covering at least 'entrypoint:vooi-create-bot'
+ * plus 'vooi:create-bot' and 'vooi:start-bot' is required before any bot is
+ * created or started. Importing this module has no side effects.
  *
  * BOT CONFIGURATION:
  *   - exchanges: hyperliquid, binance, bybit, mexc, gate (top 5 by liquidity)
@@ -16,34 +16,41 @@
  *   - maxHoldHours: 24 (close after 24h regardless)
  *   - maxRoundTripCostBps: 12 (0.12% max fees)
  *   - categories: crypto, stocks-us, commodities (exclude forex for now)
- *
- * EXPECTED PERFORMANCE:
- *   - Top 10 opportunities: $400-600/day = $146-219k/yr on $50k
- *   - Bot captures ~50% of available opportunities
- *   - Realistic: $200-300/day = $73-110k/yr on $50k
  */
 
 import { VooiClient } from '@edge/vooi-client';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
 
-// Load .env
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch { /* .env not present */ }
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:vooi-create-bot';
+
+// EM-STRAT-012 Phase-0: .env loading moved out of module-import scope into
+// an explicitly-invoked function so importing this module does not mutate
+// process.env. Called from main() only.
+function loadDotEnvIntoProcessEnv(): void {
+  try {
+    const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
+    for (const line of env.split('\n')) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const [, k, v] = m;
+      if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
+    }
+  } catch { /* .env not present */ }
+}
 
 async function main() {
+  // EM-STRAT-012 Phase-0: .env loading is explicitly invoked here (entrypoint
+  // code), not at module import time.
+  loadDotEnvIntoProcessEnv();
+
   const args = new Set(process.argv.slice(2));
   const liveMode = args.has('--live');
 
@@ -57,6 +64,14 @@ async function main() {
   if (!apiToken) {
     console.error('VOOI_API_TOKEN not set');
     process.exit(1);
+  }
+
+  // EM-STRAT-012 Phase-0: defense-in-depth entrypoint gate at the live
+  // transition. Preview mode remains usable without authorization; creating
+  // and starting a bot requires the entrypoint scope (plus the client sink
+  // scopes, which createBot/startBot check themselves).
+  if (liveMode) {
+    assertExecutionAuthorized(ENTRYPOINT_SCOPE);
   }
 
   const vooi = new VooiClient({ apiToken });
@@ -112,12 +127,13 @@ async function main() {
 
   if (!liveMode) {
     console.log('\n⚠ DRY-RUN MODE — no bot will be created');
-    console.log('To create the bot, run with --live flag');
-    console.log('⚠ REQUIRES: Principal approval + VOOI capital deposit');
+    console.log('To create the bot, run with --live flag plus a valid scoped authorization');
+    console.log('(EDGE_EXECUTION_AUTH with entrypoint:vooi-create-bot, vooi:create-bot, vooi:start-bot)');
     return;
   }
 
-  // Create the bot
+  // Create the bot — the client sinks (createBot / startBot) re-check their
+  // own scopes; failures here surface ExecutionNotAuthorizedError messages.
   console.log('\nCreating VOOI arb bot...');
   try {
     const bot = await vooi.createBot(botConfig);
@@ -143,4 +159,9 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('Fatal:', e); process.exit(1); });
+// EM-STRAT-012 Phase-0: import.meta.url main guard — importing this module
+// no longer runs main(). This is hygiene; the authorization gates above are
+// the containment barrier.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(e => { console.error('Fatal:', e); process.exit(1); });
+}

@@ -1,3 +1,5 @@
+import { assertExecutionAuthorized } from '@edge/risk';
+
 /**
  * @edge/backpack-client — TypeScript client for Backpack Exchange API.
  *
@@ -191,6 +193,16 @@ export class BackpackClient {
     postOnly?: boolean;
     reduceOnly?: boolean;
   }): Promise<BackpackOrder> {
+    // EM-STRAT-012 Phase-0 sink guard. Risk classification: RISK-INCREASING
+    // by default; an explicit `reduceOnly: true` order can only shrink or
+    // flatten an existing position (the venue rejects it otherwise) and is
+    // classified RISK-REDUCING, deliberately usable without execution
+    // authorization so exits stay available. All other orders require the
+    // 'backpack-client:place-order' scope. Dormant sink — no callers on
+    // current main; guarded so it cannot be silently adopted.
+    if (params.reduceOnly !== true) {
+      assertExecutionAuthorized('backpack-client:place-order');
+    }
     return this.privatePost<BackpackOrder>('/order', {
       symbol: params.symbol,
       side: params.side,

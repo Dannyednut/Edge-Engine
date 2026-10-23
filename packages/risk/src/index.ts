@@ -156,3 +156,22 @@ export class RiskGuard {
     }
   }
 }
+
+// ─── Execution authorization guard (EM-STRAT-012 Phase-0) ──────────────
+// Fail-closed gate checked before every risk-increasing submission,
+// signer construction, or bot start. See ./execution-guard.ts for the
+// design contract and packages/scanner/test/execution-sink-census.test.ts
+// for the enforced sink inventory.
+export {
+  EXECUTION_SCOPES,
+  EXECUTION_AUTH_ENV_VAR,
+  type ExecutionScope,
+  type ExecutionAuthorization,
+  ExecutionNotAuthorizedError,
+  assertExecutionAuthorized,
+  parseExecutionAuthorization,
+  setExecutionClockForTesting,
+  resetExecutionClockForTesting,
+  setExecutionAuditLoggerForTesting,
+  resetExecutionAuditLoggerForTesting,
+} from './execution-guard.js';
