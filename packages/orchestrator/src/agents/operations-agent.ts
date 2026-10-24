@@ -45,6 +45,12 @@ export class OperationsAgent extends BaseAgent {
     }
   }
 
+  // NOT-A-SINK (EM-STRAT-012-R2 census): this method is an offline stub —
+  // it constructs no signer, performs no broadcast, and touches no network.
+  // The name matches the deployContract census pattern because the method
+  // is a dispatch placeholder. If it is ever wired to the REAL deployment
+  // utility, that path is guarded by 'entrypoint:contracts-deploy' inside
+  // contracts/scripts/deploy.ts (guard fires before any signer/network).
   private async deployContract(chain: string, contractName: string): Promise<unknown> {
     console.log(`[operations] deploying ${contractName} on ${chain}...`);
     // Would call: pnpm --filter @edge/contracts deploy --chain=<chain>

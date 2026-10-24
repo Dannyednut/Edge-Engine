@@ -89,6 +89,7 @@ export class SharpeClient {
     this.base = usePublic ? SHARPE_BASE_PUBLIC : SHARPE_BASE_V1;
   }
 
+  // NOT-A-SINK: read-only market-data transport (GET endpoints only); inventoried in the submission-sink census.
   private async request<T>(path: string, params?: Record<string, string | number | boolean | string[] | undefined>): Promise<T> {
     const url = new URL(`${this.base}${path}`);
     if (params) {
