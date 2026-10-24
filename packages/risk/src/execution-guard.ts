@@ -127,6 +127,30 @@ export const EXECUTION_SCOPES = [
   // third party is a credential-exposure risk and is therefore fail-closed
   // gated like a submission sink, even though it does not move capital.
   'pumpapi-client:generate-wallet',
+
+  // EM-STRAT-014-B1 (work order B1): CexExecutor — CCXT order/withdrawal
+  // containment. The class wraps a raw CCXT Exchange; previously its
+  // `exchange` property was PUBLIC and marketOrder/limitOrder/withdraw were
+  // ungated. Now the Exchange instance lives in the hard-private #exchange
+  // field and:
+  //   - every market/limit order submission requires 'cex-executor:place-order',
+  //     asserted immediately before the CCXT createOrder call, re-checked on
+  //     EVERY invocation (an instance created under a valid descriptor
+  //     cannot submit after the descriptor expires);
+  //   - every withdrawal requires the SEPARATE 'cex-executor:withdraw'
+  //     scope. Order authority NEVER implies withdrawal authority and vice
+  //     versa; there is deliberately no broad shared scope for both.
+  // Construction is deliberately UNGATED (unlike EvmExecutor): the
+  // constructor derives no signer, transmits no credential, and performs no
+  // network I/O, and the read-only market/account-data methods
+  // (fetchTicker/fetchOrderBook/fetchBalance/fetchPositions/
+  // fetchDepositAddress) must remain available without execution
+  // authorization. cancelOrder is inventoried SAFETY-POSITIVE (cancellation
+  // cannot open or increase exposure). The sink census inventories both
+  // createOrder call sites, the withdrawal sink, and the cancellation sink
+  // in packages/scanner/test/execution-sink-census.test.ts.
+  'cex-executor:place-order',
+  'cex-executor:withdraw',
 ] as const;
 
 export type ExecutionScope = (typeof EXECUTION_SCOPES)[number];
