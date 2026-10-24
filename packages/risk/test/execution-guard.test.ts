@@ -7,6 +7,7 @@ import {
   MAX_AUTH_LIFETIME_MS,
   ExecutionNotAuthorizedError,
   assertExecutionAuthorized,
+  isExecutionAuthorized,
   parseExecutionAuthorization,
   setExecutionClockForTesting,
   resetExecutionClockForTesting,
@@ -51,6 +52,7 @@ describe('EXECUTION_SCOPES taxonomy', () => {
   it('covers the client sinks and executor layers', () => {
     for (const s of [
       'vooi:place-arbitrage-order',
+      'vooi:close-arbitrage-order',
       'vooi:create-bot',
       'vooi:start-bot',
       'vooi-executor:execute-arb',
@@ -59,6 +61,7 @@ describe('EXECUTION_SCOPES taxonomy', () => {
       'evm-executor:send-transaction',
       'backpack-client:place-order',
       'pumpapi-client:atomic-two-leg-arb',
+      'pumpapi-client:generate-wallet',
     ]) {
       expect(EXECUTION_SCOPES).toContain(s);
     }
@@ -161,6 +164,25 @@ describe('assertExecutionAuthorized — fail-closed gate matrix', () => {
   it('throws a programming error for an unknown scope (never authorizable)', () => {
     // @ts-expect-error — deliberately passing an invalid scope
     expect(() => assertExecutionAuthorized('made-up-scope')).toThrow(/unknown scope/);
+  });
+
+  it('isExecutionAuthorized (Phase-0.5): returns true under the same conditions the asserting variant passes', () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    expect(isExecutionAuthorized('vooi:place-arbitrage-order')).toBe(false);
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, authJson());
+    expect(isExecutionAuthorized('vooi:place-arbitrage-order')).toBe(true);
+    // Wrong scope → false.
+    expect(isExecutionAuthorized('evm-executor:send-transaction')).toBe(false);
+    // Expired → false (injectable clock).
+    setExecutionClockForTesting(() => VALID_AUTH.expiresAtMs + 1);
+    expect(isExecutionAuthorized('vooi:place-arbitrage-order')).toBe(false);
+  });
+
+  it('isExecutionAuthorized throws (not returns false) for an unknown scope (programming error)', () => {
+    // A typo'd scope is a programming error, not a denial — the non-throwing
+    // variant must not silently swallow it.
+    // @ts-expect-error — deliberately passing an invalid scope
+    expect(() => isExecutionAuthorized('made-up-scope')).toThrow(/unknown scope/);
   });
 
   it('logs scope, decision, timestamp, and authId — never credentials', () => {

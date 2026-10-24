@@ -80,6 +80,7 @@ async function main() {
   console.log('  This is a 1-week build.');
   console.log('');
   console.log('ALTERNATIVE: Use PumpApi atomicTwoLegArb() directly');
+  // NOT-A-SINK: instructional console.log text — no atomicTwoLegArb call expression exists in this file.
   console.log('  - Provide buyMint + sellMint');
   console.log('  - PumpApi finds best execution across all AMMs');
   console.log('  - Atomic execution = no inventory risk');

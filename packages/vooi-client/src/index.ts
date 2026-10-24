@@ -11,9 +11,33 @@
  * with open intent, createBot, startBot) are gated by the shared fail-closed
  * execution guard from @edge/risk. Safety-positive methods (stopBot,
  * cancelArbitrageOrder, deleteBot) are deliberately ungated.
+ *
+ * EM-STRAT-012 Phase-0.5 (work order C/D):
+ *   - The transport helper is now an ECMAScript HARD-PRIVATE method
+ *     (`#request`). TypeScript `private` is compile-time only — the compiled
+ *     JS exposed `request()` as a regular runtime property that untyped
+ *     callers could invoke to bypass every wrapper guard. A `#` private
+ *     method is a runtime slot that is NOT an own property of the instance
+ *     and is unreachable from outside the class body (no cast, no
+ *     reflection, no transpiled-JS caller can reach it).
+ *   - Defense in depth: `#request` classifies every (method, path) pair at
+ *     the LOWEST actual submission boundary. Risk-increasing mutations
+ *     require their specific scope; safety-positive stop/cancel/delete and
+ *     read-only GETs pass without authorization; any UNLISTED mutation
+ *     (method + path combination that is not classified) is DENIED — a new
+ *     VOOI mutation endpoint cannot be adopted silently.
+ *   - The close-intent exemption is REMOVED (work order D): no authoritative
+ *     VOOI documentation proves paired-leg reduce-only venue semantics.
+ *     Closing requires the narrow 'vooi:close-arbitrage-order' scope AND a
+ *     request body whose both legs carry reduceOnly === true. The close
+ *     scope does NOT authorize opening orders (tested).
  */
 
-import { assertExecutionAuthorized } from '@edge/risk';
+import {
+  assertExecutionAuthorized,
+  isExecutionAuthorized,
+  ExecutionNotAuthorizedError,
+} from '@edge/risk';
 
 const VOOI_BASE = 'https://perps-api.vooi.io';
 
@@ -151,7 +175,93 @@ export class VooiClient {
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  // ─── Transport-level action classification (Phase-0.5, work order C) ───
+  //
+  // This is the LOWEST submission boundary: every HTTP request this client
+  // can ever make flows through #request, and #request classifies the
+  // (method, path, body) triple BEFORE any fetch happens. Public wrappers
+  // add their own (earlier, better-erroring) guards; this layer guarantees
+  // that no code path — current or future, inside or outside the class —
+  // can reach the network with an unclassified risk-increasing mutation.
+  //
+  // Classification table (fail-closed — unlisted mutations are DENIED):
+  //   POST /arbitrage-orders        → 'vooi:place-arbitrage-order'
+  //                                   OR 'vooi:close-arbitrage-order' when
+  //                                   BOTH legs carry reduceOnly === true
+  //                                   (body-validated at this layer)
+  //   POST /bots                    → 'vooi:create-bot'
+  //   POST /bots/{id}/start         → 'vooi:start-bot'
+  //   POST /bots/{id}/stop          → SAFETY-POSITIVE (ungated)
+  //   DELETE /arbitrage-orders/{id} → SAFETY-POSITIVE (ungated)
+  //   DELETE /bots/{id}             → SAFETY-POSITIVE (ungated)
+  //   GET *                         → read-only (ungated)
+  //   anything else                 → DENIED (unclassified mutation)
+  #assertTransportAuthorization(method: string, path: string, body?: unknown): void {
+    const pathOnly = path.split('?')[0];
+
+    if (method === 'GET') return; // read-only
+
+    if (method === 'POST' && pathOnly === '/arbitrage-orders') {
+      if (isExecutionAuthorized('vooi:place-arbitrage-order')) return;
+      // Close path: body-validated reduce-only + narrow close scope. The
+      // venue semantics are NOT proven (work order D) — the reduceOnly flags
+      // alone never authorize; the close scope is additionally required.
+      const req = body as VooiArbitrageOrderRequest | undefined;
+      const bothLegsReduceOnly =
+        !!req &&
+        req.primary?.reduceOnly === true &&
+        req.hedge?.reduceOnly === true;
+      if (bothLegsReduceOnly && isExecutionAuthorized('vooi:close-arbitrage-order')) return;
+      throw new ExecutionNotAuthorizedError(
+        bothLegsReduceOnly ? 'vooi:close-arbitrage-order' : 'vooi:place-arbitrage-order',
+        'transport-level classification: order submission requires vooi:place-arbitrage-order' +
+        (bothLegsReduceOnly
+          ? ' (close-shaped body detected; vooi:close-arbitrage-order with both legs reduceOnly:true is the alternative)'
+          : ' (body is not a two-leg reduce-only close)'),
+      );
+    }
+
+    if (method === 'POST' && pathOnly === '/bots') {
+      assertExecutionAuthorized('vooi:create-bot');
+      return;
+    }
+
+    const startMatch = /^\/bots\/[^/]+\/start$/.exec(pathOnly);
+    if (method === 'POST' && startMatch) {
+      assertExecutionAuthorized('vooi:start-bot');
+      return;
+    }
+
+    // Safety-positive (risk-reducing) operations — deliberately ungated so
+    // emergency stop/cancel and cleanup remain available (Phase-0).
+    const stopMatch = /^\/bots\/[^/]+\/stop$/.exec(pathOnly);
+    if (method === 'POST' && stopMatch) return;
+    if (method === 'DELETE' && /^\/arbitrage-orders\/[^/]+$/.test(pathOnly)) return;
+    if (method === 'DELETE' && /^\/bots\/[^/]+$/.test(pathOnly)) return;
+
+    // FAIL-CLOSED: any other method/path combination is an UNCLASSIFIED
+    // mutation. Deny it — a new VOOI mutation endpoint must be added to this
+    // classifier (with a scope) before it can be used.
+    throw new ExecutionNotAuthorizedError(
+      'vooi:place-arbitrage-order',
+      `transport-level classification: unclassified mutation ${method} ${pathOnly} is denied by default`,
+    );
+  }
+
+  /**
+   * HARD-PRIVATE transport helper (ECMAScript `#` method).
+   *
+   * Phase-0.5 (work order C): this replaces the old TypeScript-private
+   * `request()`. A TS `private` method survives compilation as a normal
+   * runtime property — untyped/JS callers could invoke it directly and
+   * bypass every wrapper guard. An `#` method is NOT an own property of the
+   * instance: `(client as any).request` is undefined, and no cast,
+   * reflection API, or external caller can reach it.
+   */
+  async #request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    // Transport-level classification FIRST — before headers, before fetch.
+    this.#assertTransportAuthorization(method, path, body);
+
     const url = `${VOOI_BASE}${path}`;
     const headers: Record<string, string> = { 'Accept': 'application/json' };
     if (body) headers['Content-Type'] = 'application/json';
@@ -188,7 +298,7 @@ export class VooiClient {
     if (params.query)    query.set('query', params.query);
     if (params.symbol)   query.set('symbol', params.symbol);
 
-    return this.request<VooiArbitrageScanResponse>('GET', `/arbitrage-scanner?${query.toString()}`);
+    return this.#request<VooiArbitrageScanResponse>('GET', `/arbitrage-scanner?${query.toString()}`);
   }
 
   /** Per-minute funding rates for a pair. */
@@ -199,7 +309,7 @@ export class VooiClient {
       shortExchange: params.shortExchange,
       limit: String(params.limit ?? 60),
     });
-    return this.request('GET', `/arbitrage-scanner/funding-candles?${q.toString()}`);
+    return this.#request('GET', `/arbitrage-scanner/funding-candles?${q.toString()}`);
   }
 
   // ─── Authenticated trading endpoints ─────────────────────────────────
@@ -209,32 +319,42 @@ export class VooiClient {
   // calls cannot bypass containment. Safety-positive (risk-reducing) methods
   // — stopBot, cancelArbitrageOrder, deleteBot — are deliberately UNGATED so
   // emergency stop/cancel remains available without execution authorization.
+  // Phase-0.5: #request additionally classifies every (method, path) pair at
+  // the lowest submission boundary (see #assertTransportAuthorization).
 
   /**
    * Submit a paired-leg arbitrage order.
    *
-   * Risk classification: RISK-INCREASING by default. The optional
-   * `intent: 'close'` marks the call as a strictly risk-reducing exit
-   * (used by VooiExecutor.closeArb whose legs carry reduceOnly: true —
-   * the venue rejects reduce-only orders that would increase exposure).
+   * Risk classification: RISK-INCREASING for opening orders
+   * ('vooi:place-arbitrage-order' scope). Close-intent orders
+   * (`intent: 'close'`) require the narrow 'vooi:close-arbitrage-order'
+   * scope — that scope is distinct from the open scope and CANNOT authorize
+   * opening orders.
    *
-   * EM-STRAT-012 Phase-0 R1: caller-supplied `intent: 'close'` is NOT
-   * trusted as proof of risk-reduction on its own. The guard additionally
-   * requires BOTH legs to carry `reduceOnly === true`. If either leg is
-   * missing `reduceOnly` or has it set to `false`, the close exemption
-   * does NOT apply and the call is treated as an opening (risk-increasing)
-   * order requiring the 'vooi:place-arbitrage-order' scope.
+   * EM-STRAT-012 Phase-0.5 (work order D): the R1 UNGATED close exemption is
+   * REMOVED. Reason: the exemption relied on the claim that VOOI honours
+   * `reduceOnly` on paired-leg orders, and no authoritative VOOI API
+   * documentation proves that semantics (checked docs.vooi.io — the
+   * Arbitrage Desk and Perps API overview pages do not document the
+   * /arbitrage-orders reduceOnly parameter). Setting a flag in a request
+   * body is not proof the venue honours it, so reduce-only validation alone
+   * no longer authorizes anything.
    *
-   * Venue semantics: VOOI honours `reduceOnly` on perp legs — a reduce-only
-   * order can only shrink or flatten an existing position in that direction,
-   * never open or increase one. A two-leg order where BOTH legs are
-   * reduce-only therefore cannot add exposure on either side. If the venue
-   * ever changes this semantics, the exemption must be removed.
+   * Close-intent requirements (all enforced, fail-closed):
+   *   1. `intent: 'close'` is supplied.
+   *   2. BOTH legs carry `reduceOnly === true` (body-validated — a
+   *      close-intent call with missing/false flags throws a plain
+   *      validation error BEFORE the guard, because such a request is not a
+   *      close at all).
+   *   3. The 'vooi:close-arbitrage-order' scope is authorized.
+   * The transport layer (#request) independently re-validates conditions
+   * 2 and 3 against the actual body at the lowest submission boundary.
    *
-   * Close-intent calls that pass the reduce-only validation are permitted
-   * without execution authorization so risk-reducing exits stay available;
-   * every other call requires the 'vooi:place-arbitrage-order' scope.
-   * Default when intent is omitted: 'open' (guarded — fail-closed).
+   * Scope isolation (tested): 'vooi:close-arbitrage-order' does NOT
+   * authorize opening orders; 'vooi:place-arbitrage-order' does NOT
+   * authorize close-intent submissions.
+   *
+   * Default when intent is omitted: 'open' (open scope required).
    */
   async placeArbitrageOrder(
     req: VooiArbitrageOrderRequest,
@@ -242,25 +362,31 @@ export class VooiClient {
   ): Promise<VooiArbitrageOrder> {
     if (!this.apiToken) throw new Error('VooiClient.placeArbitrageOrder: apiToken required');
     const intent = opts?.intent ?? 'open';
-    // Validate close-intent: BOTH legs must carry reduceOnly === true.
-    // A caller-supplied intent label alone is not proof of risk-reduction.
-    const closeExemptionApplies =
-      intent === 'close' &&
-      req.primary.reduceOnly === true &&
-      req.hedge.reduceOnly === true;
-    if (!closeExemptionApplies) {
+    if (intent === 'close') {
+      // A close-intent order that is not a two-leg reduce-only close is not
+      // a close at all — reject it as a malformed close BEFORE any guard
+      // evaluation (it must never be submitted under either scope).
+      if (!(req.primary.reduceOnly === true && req.hedge.reduceOnly === true)) {
+        throw new Error(
+          'VooiClient.placeArbitrageOrder: intent "close" requires reduceOnly:true on BOTH legs ' +
+          '(primary and hedge). Refusing to submit — a close with non-reduce-only legs could ' +
+          'increase exposure.',
+        );
+      }
+      assertExecutionAuthorized('vooi:close-arbitrage-order');
+    } else {
       assertExecutionAuthorized('vooi:place-arbitrage-order');
     }
-    return this.request<VooiArbitrageOrder>('POST', '/arbitrage-orders', req);
+    return this.#request<VooiArbitrageOrder>('POST', '/arbitrage-orders', req);
   }
 
   async listArbitrageOrders(status?: 'open' | 'history'): Promise<{ cursor: string | null; items: VooiArbitrageOrder[] }> {
     const q = status ? `?status=${status}` : '';
-    return this.request<{ cursor: string | null; items: VooiArbitrageOrder[] }>('GET', `/arbitrage-orders${q}`);
+    return this.#request<{ cursor: string | null; items: VooiArbitrageOrder[] }>('GET', `/arbitrage-orders${q}`);
   }
 
   async cancelArbitrageOrder(id: string): Promise<{ ok: boolean }> {
-    return this.request('DELETE', `/arbitrage-orders/${id}`);
+    return this.#request('DELETE', `/arbitrage-orders/${id}`);
   }
 
   /**
@@ -271,11 +397,11 @@ export class VooiClient {
   async createBot(req: VooiBotRequest): Promise<VooiBot> {
     if (!this.apiToken) throw new Error('VooiClient.createBot: apiToken required');
     assertExecutionAuthorized('vooi:create-bot');
-    return this.request<VooiBot>('POST', '/bots', req);
+    return this.#request<VooiBot>('POST', '/bots', req);
   }
 
   async listBots(): Promise<VooiBot[]> {
-    return this.request<VooiBot[]>('GET', '/bots');
+    return this.#request<VooiBot[]>('GET', '/bots');
   }
 
   /**
@@ -284,20 +410,20 @@ export class VooiClient {
    */
   async startBot(id: string): Promise<VooiBot> {
     assertExecutionAuthorized('vooi:start-bot');
-    return this.request<VooiBot>('POST', `/bots/${id}/start`);
+    return this.#request<VooiBot>('POST', `/bots/${id}/start`);
   }
 
   // SAFETY-POSITIVE (risk-reducing): stopBot halts an autonomous bot and
   // deliberately carries NO execution guard so emergency stops remain
   // available without execution authorization (EM-STRAT-012 Phase-0).
   async stopBot(id: string): Promise<VooiBot> {
-    return this.request<VooiBot>('POST', `/bots/${id}/stop`);
+    return this.#request<VooiBot>('POST', `/bots/${id}/stop`);
   }
 
   // SAFETY-POSITIVE (risk-reducing/cleanup): deleteBot removes a (necessarily
   // stopped) bot configuration. It cannot open or increase exposure and is
   // deliberately ungated so cleanup remains available (EM-STRAT-012 Phase-0).
   async deleteBot(id: string): Promise<{ ok: boolean }> {
-    return this.request('DELETE', `/bots/${id}`);
+    return this.#request('DELETE', `/bots/${id}`);
   }
 }

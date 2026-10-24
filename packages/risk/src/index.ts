@@ -170,6 +170,7 @@ export {
   type ExecutionAuthorization,
   ExecutionNotAuthorizedError,
   assertExecutionAuthorized,
+  isExecutionAuthorized,
   parseExecutionAuthorization,
   setExecutionClockForTesting,
   resetExecutionClockForTesting,

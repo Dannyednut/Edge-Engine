@@ -201,7 +201,13 @@ describe('VooiExecutor — safe default and fail-closed gate (EM-STRAT-012)', ()
     expect(calls).toEqual(['placeArbitrageOrder']);
   });
 
-  it('RISK-REDUCING: closeArb does NOT require execution authorization (reduceOnly exit path)', async () => {
+  it('Phase-0.5: closeArb routes through the client sink which requires vooi:close-arbitrage-order (mock client records the call)', async () => {
+    // Work order D: the R1 ungated close exemption was REMOVED. The executor
+    // layer itself does not assert a close scope (the real VooiClient sink
+    // enforces vooi:close-arbitrage-order + both-legs reduceOnly — see
+    // packages/vooi-client/test/execution-guard.test.ts). With the MOCK
+    // client, closeArb records the call; the real guard behavior is proven
+    // at the client layer.
     delete process.env[EXECUTION_AUTH_ENV_VAR];
     const ex = new VooiExecutor({ vooi, alerter: noopAlerter, dryRun: false });
     const result = await ex.closeArb({
@@ -211,10 +217,10 @@ describe('VooiExecutor — safe default and fail-closed gate (EM-STRAT-012)', ()
     expect(calls).toEqual(['placeArbitrageOrder']);
   });
 
-  it('monitorAndClose (risk-reducing exit) does NOT require execution authorization', async () => {
+  it('Phase-0.5: monitorAndClose (risk-reducing exit) routes through the scoped client sink (mock client)', async () => {
     delete process.env[EXECUTION_AUTH_ENV_VAR];
     const ex = new VooiExecutor({ vooi, alerter: noopAlerter, dryRun: false });
-    // Past max hold → closeArb path → allowed without authorization.
+    // Past max hold → closeArb path → mock records the call (real guard at client layer).
     const r = await ex.monitorAndClose({
       asset: 'BTC', longVenue: 'hyperliquid', shortVenue: 'binance',
       openedAt: FIXED_NOW - 100 * 60 * 60 * 1000, size: 100, originalOrderId: 'order-1',

@@ -153,12 +153,31 @@ export interface EvmExecutorOptions {
 export class EvmExecutor {
   readonly chainId: ChainId;
   readonly chain: ViemChain;
-  readonly walletClient: WalletClient;
-  readonly account: PrivateKeyAccount;
   readonly agentVaultAddress: `0x${string}`;
   readonly useFlashbots: boolean;
   readonly balancerVaultAddress: `0x${string}` | null;
   readonly aaveV3PoolAddress: `0x${string}` | null;
+
+  // ─── HARD-PRIVATE signer material (Phase-0.5, work order A) ────────────
+  //
+  // These were previously `readonly walletClient` / `readonly account` —
+  // PUBLIC properties. Any caller holding an executor instance could call
+  // `executor.walletClient.sendTransaction({ to: any, data: any })`
+  // directly, bypassing the per-submission 'evm-executor:send-transaction'
+  // guard after satisfying the constructor guard only once. TypeScript
+  // `private` would NOT fix this: it is compile-time only, and the compiled
+  // JS keeps the property as a normal runtime own-property reachable via
+  // untyped callers or reflection.
+  //
+  // ECMAScript `#` private fields are genuinely private at runtime: they
+  // are not own properties of the instance (Object.getOwnPropertyNames /
+  // JSON / reflection cannot see them) and are lexically unreachable from
+  // outside this class body. The raw viem WalletClient and the
+  // key-derived PrivateKeyAccount are therefore no longer obtainable from
+  // any caller; the ONLY way to submit is through the guarded methods
+  // below, each of which re-checks its scope (and expiry) per call.
+  #walletClient: WalletClient;
+  #account: PrivateKeyAccount;
 
   constructor(opts: EvmExecutorOptions) {
     // EM-STRAT-012 Phase-0: fail-closed gate BEFORE any signer/key material
@@ -171,14 +190,14 @@ export class EvmExecutor {
     if (!chain) throw new Error(`EvmExecutor: unsupported chainId ${opts.chainId}`);
     this.chain = chain;
 
-    this.account = privateKeyToAccount(opts.agentPrivateKey);
+    this.#account = privateKeyToAccount(opts.agentPrivateKey);
     this.agentVaultAddress = opts.agentVaultAddress;
     this.useFlashbots = opts.useFlashbots ?? true;
     this.balancerVaultAddress = BALANCER_VAULT_ADDRESS[opts.chainId];
     this.aaveV3PoolAddress    = AAVE_V3_POOL_ADDRESS[opts.chainId];
 
-    this.walletClient = createWalletClient({
-      account: this.account,
+    this.#walletClient = createWalletClient({
+      account: this.#account,
       chain,
       transport: http(opts.rpcUrl),
     });
@@ -202,10 +221,10 @@ export class EvmExecutor {
     // Encode the call to AgentVault.execute(target, data)
     const callData = encodeFunctionCall('execute', [params.target, params.data]);
 
-    const txHash = await this.walletClient.sendTransaction({
+    const txHash = await this.#walletClient.sendTransaction({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.account,
+      account: this.#account,
       chain: this.chain,
       gas: params.gasLimit,
       maxFeePerGas: params.maxFeePerGas,
@@ -256,10 +275,10 @@ export class EvmExecutor {
       [params.flashloanAmount],
       userData,
     ]);
-    const txHash = await this.walletClient.sendTransaction({
+    const txHash = await this.#walletClient.sendTransaction({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.account,
+      account: this.#account,
       chain: this.chain,
       gas: params.gasLimit,
     });
@@ -300,10 +319,10 @@ export class EvmExecutor {
       params.flashloanAmount,
       userData,
     ]);
-    const txHash = await this.walletClient.sendTransaction({
+    const txHash = await this.#walletClient.sendTransaction({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.account,
+      account: this.#account,
       chain: this.chain,
       gas: params.gasLimit,
     });
@@ -339,7 +358,7 @@ export class EvmExecutor {
   }
 
   private makePublicClient(): PublicClient {
-    const rpcUrl = this.walletClient.chain?.rpcUrls.default.http[0] ?? '';
+    const rpcUrl = this.#walletClient.chain?.rpcUrls.default.http[0] ?? '';
     return createPublicClient({
       chain: this.chain,
       transport: http(rpcUrl),
@@ -370,11 +389,20 @@ function encodeAbi(_types: string[], _values: unknown[]): `0x${string}` {
  *
  * For bundle submission (atomic multi-tx), use the Flashbots bundle API
  * directly. This function is for single-tx Protect.
+ *
+ * EM-STRAT-012 Phase-0.5 (work order A/E): this IS a submission sink — it
+ * broadcasts a real signed transaction (`eth_sendRawTransaction`). It was
+ * previously ungated: although the caller must supply an already-signed tx,
+ * broadcasting is the capital-moving step. It now requires the same
+ * 'evm-executor:send-transaction' scope as every other EVM submission and
+ * is inventoried in the submission-sink census.
  */
 export async function submitViaFlashbotsProtect(
   signedTx: `0x${string}`,
   fetchImpl: typeof fetch = fetch
 ): Promise<{ txHash: `0x${string}` }> {
+  // Fail-closed BEFORE any network request.
+  assertExecutionAuthorized('evm-executor:send-transaction');
   const res = await fetchImpl('https://rpc.flashbots.net/fast', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

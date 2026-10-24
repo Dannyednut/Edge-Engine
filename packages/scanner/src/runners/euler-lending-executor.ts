@@ -119,8 +119,12 @@ export interface EulerLendingArbExecutorOptions {
 export class EulerLendingArbExecutor {
   private euler: EulerClient;
   private state: EulerLendingState;
-  private walletClient: WalletClient | null = null;
-  private publicClient: PublicClient | null = null;
+  // EM-STRAT-012 Phase-0.5 (work order A): signer-capable clients are
+  // HARD-PRIVATE (`#`) fields — TS `private` is runtime-visible and would
+  // let an untyped caller invoke walletClient.sendTransaction() directly,
+  // bypassing the per-call guard in sendTx(). See KhypeCarryExecutor.
+  #walletClient: WalletClient | null = null;
+  #publicClient: PublicClient | null = null;
 
   constructor(private opts: EulerLendingArbExecutorOptions) {
     this.euler = new EulerClient();
@@ -132,12 +136,12 @@ export class EulerLendingArbExecutor {
       // 'evm-executor:send-transaction' scopes via the shared guard).
       assertExecutionAuthorized(ENTRYPOINT_SCOPE);
       const account = privateKeyToAccount(process.env.AGENT_HYPE_PRIVKEY as `0x${string}`);
-      this.walletClient = createWalletClient({
+      this.#walletClient = createWalletClient({
         account,
         chain: hyperEvm,
         transport: http(HYPEREVM_RPC),
       });
-      this.publicClient = createPublicClient({
+      this.#publicClient = createPublicClient({
         chain: hyperEvm,
         transport: http(HYPEREVM_RPC),
       });
@@ -147,7 +151,7 @@ export class EulerLendingArbExecutor {
 
   /** Sign and submit a transaction, wait for confirmation. */
   private async sendTx(to: Address, data: `0x${string}`, value: bigint = 0n): Promise<Hash> {
-    if (!this.walletClient || !this.publicClient || !this.walletClient.account) {
+    if (!this.#walletClient || !this.#publicClient || !this.#walletClient.account) {
       throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
     }
     // EM-STRAT-012 Phase-0: raw EVM submission sink. Re-checked per call so an
@@ -155,12 +159,12 @@ export class EulerLendingArbExecutor {
     // 'evm-executor:send-transaction' scope names the capability (send an EVM
     // transaction) regardless of which runner performs it.
     assertExecutionAuthorized('evm-executor:send-transaction');
-    const txHash = await this.walletClient.sendTransaction({
-      account: this.walletClient.account,
+    const txHash = await this.#walletClient.sendTransaction({
+      account: this.#walletClient.account,
       chain: hyperEvm,
       to, data, value,
     });
-    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await this.#publicClient.waitForTransactionReceipt({ hash: txHash });
     if (receipt.status !== 'success') {
       throw new Error(`Transaction reverted: ${txHash}`);
     }
@@ -241,7 +245,7 @@ export class EulerLendingArbExecutor {
       return { success: false, txHashes: [], error: 'dry-run mode' };
     }
 
-    if (!this.walletClient) {
+    if (!this.#walletClient) {
       return { success: false, txHashes: [], error: 'AGENT_HYPE_PRIVKEY not set' };
     }
 
@@ -299,7 +303,7 @@ export class EulerLendingArbExecutor {
       return { success: false, txHashes: [], error: 'Position not found or already closed' };
     }
 
-    if (this.opts.dryRun || !this.walletClient) {
+    if (this.opts.dryRun || !this.#walletClient) {
       console.log(`[dry-run] Would close position #${positionIndex}: ${pos.assetSymbol}`);
       return { success: false, txHashes: [], error: 'dry-run mode' };
     }

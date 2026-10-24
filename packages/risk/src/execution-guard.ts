@@ -72,8 +72,15 @@ export const EXECUTION_SCOPES = [
   'entrypoint:vooi-create-bot',
   'entrypoint:go-live',
 
-  // VOOI client sinks (shared HTTP choke point — risk-increasing mutations)
+  // VOOI client sinks (shared HTTP choke point — risk-increasing mutations).
+  // Phase-0.5 (work order D): the ungated close-intent exemption was REMOVED —
+  // no authoritative VOOI documentation proves paired-leg reduce-only venue
+  // semantics. Closing an arb position now requires the narrow
+  // 'vooi:close-arbitrage-order' scope; that scope is validated against the
+  // request body (both legs reduceOnly:true) and does NOT authorize opening
+  // orders (enforced at both the wrapper and the transport layer).
   'vooi:place-arbitrage-order',
+  'vooi:close-arbitrage-order',
   'vooi:create-bot',
   'vooi:start-bot',
 
@@ -93,7 +100,7 @@ export const EXECUTION_SCOPES = [
   // own narrow scope (EM-STRAT-012 Phase-0 R1). claimCashback is deliberately
   // ungated (recovers owed cashback into the wallet; cannot open or increase
   // exposure) — see SAFETY-POSITIVE marker in packages/pumpapi-client/src/index.ts.
-  // atomicTwoLegArb does NOT delegate through actions(); it calls this.post()
+  // atomicTwoLegArb does NOT delegate through actions(); it calls #post()
   // directly so neither guard bypasses the other.
   'pumpapi-client:buy',
   'pumpapi-client:sell',
@@ -104,6 +111,13 @@ export const EXECUTION_SCOPES = [
   'pumpapi-client:wrap-sol',
   'pumpapi-client:transfer',
   'pumpapi-client:atomic-two-leg-arb',
+
+  // Phase-0.5 (work order C): generatePumpWallet transmits key material
+  // (a new wallet's secret, or an apiKey derived from an existing private
+  // key) to the PumpApi wallet endpoint. Transmitting credentials to a
+  // third party is a credential-exposure risk and is therefore fail-closed
+  // gated like a submission sink, even though it does not move capital.
+  'pumpapi-client:generate-wallet',
 ] as const;
 
 export type ExecutionScope = (typeof EXECUTION_SCOPES)[number];
@@ -186,6 +200,35 @@ export interface ExecutionAuthorization {
 export type ExecutionAuthParseResult =
   | { ok: true; auth: ExecutionAuthorization }
   | { ok: false; reason: string };
+
+/**
+ * Non-throwing authorization check (Phase-0.5).
+ *
+ * Returns true ONLY when the same conditions that make
+ * `assertExecutionAuthorized(scope)` pass hold right now: a valid, unexpired,
+ * within-max-lifetime descriptor whose scopes include `scope`. Returns false
+ * otherwise (and logs the denial, same as the throwing variant).
+ *
+ * Purpose: transport-layer action classification inside client classes needs
+ * to test "is scope A authorized? … else is scope B authorized (with extra
+ * body validation)?" without try/catch around a throwing API. It is NOT a
+ * softer variant of the guard — callers that only need "allow or throw" must
+ * keep using `assertExecutionAuthorized`, which fails closed in one call.
+ */
+export function isExecutionAuthorized(scope: ExecutionScope): boolean {
+  // An unknown scope is a PROGRAMMING ERROR, not a denial: re-check the
+  // taxonomy OUTSIDE the try/catch so a typo'd scope throws from this
+  // entry point too (silently returning false would hide the bug).
+  if (!KNOWN_SCOPES.has(scope)) {
+    throw new ExecutionNotAuthorizedError(scope, 'unknown scope (not in EXECUTION_SCOPES taxonomy)');
+  }
+  try {
+    assertExecutionAuthorized(scope);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Parse and validate a raw authorization descriptor.
@@ -283,6 +326,10 @@ export function assertExecutionAuthorized(scope: ExecutionScope): void {
     // Programming error — an unknown scope can never be authorized.
     throw new ExecutionNotAuthorizedError(scope, 'unknown scope (not in EXECUTION_SCOPES taxonomy)');
   }
+  // Implementation note (Phase-0.5): isExecutionAuthorized duplicates this
+  // known-scope check OUTSIDE its try/catch so that an unknown scope THROWS
+  // from both entry points rather than silently returning false (a typo'd
+  // scope is a programming error, not a denial).
 
   const nowMs = nowFn();
   const parsed = parseExecutionAuthorization(process.env[EXECUTION_AUTH_ENV_VAR], nowMs);

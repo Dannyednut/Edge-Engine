@@ -188,7 +188,12 @@ export interface PumpStreamEvent {
 
 // ─── Client ────────────────────────────────────────────────────────────
 
-import { assertExecutionAuthorized } from '@edge/risk';
+import {
+  assertExecutionAuthorized,
+  isExecutionAuthorized,
+  ExecutionNotAuthorizedError,
+  type ExecutionScope,
+} from '@edge/risk';
 
 export class PumpApiClient {
   private readonly privateKey?: string;
@@ -231,7 +236,102 @@ export class PumpApiClient {
     return body;
   }
 
-  private async post<T>(body: Record<string, unknown>): Promise<T> {
+  // ─── Transport-level action classification (Phase-0.5, work order C) ───
+  //
+  // The LOWEST submission boundary for this client is #post: every request
+  // flows through it, so #post classifies the request BODY SHAPE before any
+  // fetch happens. Public wrappers assert their specific scope earlier
+  // (better errors); this layer guarantees no code path can reach the
+  // network with an unclassified transaction-producing body.
+  //
+  // Body-shape classification (fail-closed — unknown shapes are DENIED):
+  //   { action: 'buy' }           → 'pumpapi-client:buy'
+  //   { action: 'sell' }          → 'pumpapi-client:sell'
+  //   { action: 'migrate' }       → 'pumpapi-client:migrate'
+  //   { action: 'burn' }          → 'pumpapi-client:burn'
+  //   { action: 'wrapSol' }       → 'pumpapi-client:wrap-sol'
+  //   { action: 'transfer' }      → 'pumpapi-client:transfer'
+  //   { action: 'claimCashback' } → SAFETY-POSITIVE (ungated — recovers
+  //                                 owed cashback; cannot increase exposure)
+  //   { action: 'getBalances' | 'getTokenInfo' } → read-only (ungated)
+  //   { actions: [...] }          → 'pumpapi-client:actions' OR
+  //                                 'pumpapi-client:atomic-two-leg-arb'
+  //                                 (the wire shape is shared by actions()
+  //                                 and atomicTwoLegArb(); the wrappers
+  //                                 demand the SPECIFIC scope, this layer
+  //                                 demands AN action-array authorization)
+  //   { transactions: [...] }     → 'pumpapi-client:jito-bundle'
+  //   anything else               → DENIED (unclassified submission body)
+  #assertTransportAuthorization(body: Record<string, unknown>): void {
+    const action = body['action'];
+
+    if (typeof action === 'string') {
+      const actionScopes: Record<string, ExecutionScope> = {
+        buy: 'pumpapi-client:buy',
+        sell: 'pumpapi-client:sell',
+        migrate: 'pumpapi-client:migrate',
+        burn: 'pumpapi-client:burn',
+        wrapSol: 'pumpapi-client:wrap-sol',
+        transfer: 'pumpapi-client:transfer',
+      };
+      const scope = actionScopes[action];
+      if (scope) {
+        assertExecutionAuthorized(scope);
+        return;
+      }
+      // SAFETY-POSITIVE: recovers owed cashback into the wallet.
+      if (action === 'claimCashback') return;
+      // Read-only actions (server returns data; no transaction broadcast).
+      if (action === 'getBalances' || action === 'getTokenInfo') return;
+      // Unknown action string — fail closed.
+      throw new ExecutionNotAuthorizedError(
+        'pumpapi-client:actions',
+        `transport-level classification: unknown PumpApi action "${action}" is denied by default`,
+      );
+    }
+
+    if (Array.isArray(body['actions'])) {
+      // Shared wire shape for actions() and atomicTwoLegArb(). The public
+      // wrappers each assert their SPECIFIC scope; this layer requires AN
+      // action-array authorization as a backstop.
+      const actionsOk = isExecutionAuthorized('pumpapi-client:actions');
+      const arbOk = actionsOk || isExecutionAuthorized('pumpapi-client:atomic-two-leg-arb');
+      if (!arbOk) {
+        throw new ExecutionNotAuthorizedError(
+          'pumpapi-client:actions',
+          'transport-level classification: action-array submission requires pumpapi-client:actions (or pumpapi-client:atomic-two-leg-arb)',
+        );
+      }
+      return;
+    }
+
+    if (Array.isArray(body['transactions'])) {
+      assertExecutionAuthorized('pumpapi-client:jito-bundle');
+      return;
+    }
+
+    // FAIL-CLOSED: a body with no action/actions/transactions is an
+    // unclassified submission.
+    throw new ExecutionNotAuthorizedError(
+      'pumpapi-client:actions',
+      'transport-level classification: unclassified PumpApi submission body (no action/actions/transactions field) is denied by default',
+    );
+  }
+
+  /**
+   * HARD-PRIVATE transport helper (ECMAScript `#` method).
+   *
+   * Phase-0.5 (work order C): replaces the TypeScript-private `post()`.
+   * A TS `private` method survives compilation as a normal runtime property
+   * that untyped callers could invoke with an arbitrary action body,
+   * bypassing every wrapper guard. An `#` method is NOT an own property of
+   * the instance — no cast, reflection API, or external caller can reach
+   * it, and the transport-level classifier above re-checks every body.
+   */
+  async #post<T>(body: Record<string, unknown>): Promise<T> {
+    // Transport-level classification FIRST — before fetch.
+    this.#assertTransportAuthorization(body);
+
     const res = await this.fetchImpl(PUMPAPI_BASE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -246,20 +346,20 @@ export class PumpApiClient {
 
   // ─── Trade API ───────────────────────────────────────────────────────
   //
-  // EM-STRAT-012 Phase-0 R1: every transaction-producing public method has
-  // its own narrow scope checked at the sink (the call to this.post()).
-  // `atomicTwoLegArb` does NOT delegate through `actions()` — it calls
-  // this.post() directly so neither guard bypasses the other. Read-only
-  // methods (getBalances, getTokenInfo) remain ungated. `claimCashback` is
-  // SAFETY-POSITIVE (recovers owed cashback into the wallet; cannot open or
-  // increase exposure) and is deliberately ungated with an explicit
-  // rationale marker below.
+  // EM-STRAT-012 Phase-0 R1 + Phase-0.5: every transaction-producing public
+  // method has its own narrow scope checked at the wrapper AND re-checked
+  // at the transport layer (#post classification). `atomicTwoLegArb` does
+  // NOT delegate through `actions()` — it calls #post() directly so neither
+  // guard bypasses the other. Read-only methods (getBalances, getTokenInfo)
+  // remain ungated. `claimCashback` is SAFETY-POSITIVE (recovers owed
+  // cashback into the wallet; cannot open or increase exposure) and is
+  // deliberately ungated with an explicit rationale marker below.
 
   /** Buy a token. Risk classification: RISK-INCREASING (opens a long). */
   async buy(req: PumpTradeRequest): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:buy');
     const { action: _omit, ...rest } = req;
-    return this.post<PumpTxResponse>({ action: 'buy' as const, ...rest });
+    return this.#post<PumpTxResponse>({ action: 'buy' as const, ...rest });
   }
 
   /** Sell a token. Risk classification: RISK-INCREASING (opens a short
@@ -268,7 +368,7 @@ export class PumpApiClient {
   async sell(req: PumpTradeRequest): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:sell');
     const { action: _omit, ...rest } = req;
-    return this.post<PumpTxResponse>({ action: 'sell' as const, ...rest });
+    return this.#post<PumpTxResponse>({ action: 'sell' as const, ...rest });
   }
 
   /**
@@ -279,14 +379,14 @@ export class PumpApiClient {
    */
   async actions(req: PumpActionsRequest): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:actions');
-    return this.post<PumpTxResponse>({ actions: req.actions, priorityFee: req.priorityFee, jitoTip: req.jitoTip });
+    return this.#post<PumpTxResponse>({ actions: req.actions, priorityFee: req.priorityFee, jitoTip: req.jitoTip });
   }
 
   /** Atomic 5-tx bundle via Jito (ordered, no front-run between legs).
    *  Risk classification: RISK-INCREASING — a bundle can contain any action. */
   async jitoBundle(req: PumpJitoBundleRequest): Promise<PumpBundleResponse> {
     assertExecutionAuthorized('pumpapi-client:jito-bundle');
-    return this.post<PumpBundleResponse>({ transactions: req.transactions, jitoTip: req.jitoTip });
+    return this.#post<PumpBundleResponse>({ transactions: req.transactions, jitoTip: req.jitoTip });
   }
 
   // ─── Non-trade actions ───────────────────────────────────────────────
@@ -301,14 +401,14 @@ export class PumpApiClient {
    *  is irreversible. */
   async migrate(mint: string): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:migrate');
-    return this.post<PumpTxResponse>({ action: 'migrate', mint });
+    return this.#post<PumpTxResponse>({ action: 'migrate', mint });
   }
 
   /** Burn LP tokens. Risk classification: RISK-INCREASING — irreversible
    *  destruction of an on-chain asset. */
   async burn(mint: string): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:burn');
-    return this.post<PumpTxResponse>({ action: 'burn', mint });
+    return this.#post<PumpTxResponse>({ action: 'burn', mint });
   }
 
   /**
@@ -330,7 +430,7 @@ export class PumpApiClient {
    *     authorization and is not addressed by this guard.
    */
   async claimCashback(): Promise<PumpTxResponse> {
-    return this.post<PumpTxResponse>({ action: 'claimCashback' });
+    return this.#post<PumpTxResponse>({ action: 'claimCashback' });
   }
 
   /** Wrap SOL into WSOL. Risk classification: RISK-INCREASING — materially
@@ -338,14 +438,14 @@ export class PumpApiClient {
    *  spent by any subsequent action. */
   async wrapSol(amount: number): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:wrap-sol');
-    return this.post<PumpTxResponse>({ action: 'wrapSol', amount });
+    return this.#post<PumpTxResponse>({ action: 'wrapSol', amount });
   }
 
   /** Transfer a token to another address. Risk classification:
    *  RISK-INCREASING — moves capital out of the wallet. */
   async transfer(mint: string, toAddress: string, amount: number | string): Promise<PumpTxResponse> {
     assertExecutionAuthorized('pumpapi-client:transfer');
-    return this.post<PumpTxResponse>({ action: 'transfer', mint, toAddress, amount });
+    return this.#post<PumpTxResponse>({ action: 'transfer', mint, toAddress, amount });
   }
 
   // ─── Read-only (no signing, can be called with publicKey only) ───────
@@ -354,11 +454,11 @@ export class PumpApiClient {
   // without broadcasting a transaction). They are deliberately ungated.
 
   async getBalances(): Promise<PumpBalancesResponse> {
-    return this.post<PumpBalancesResponse>({ action: 'getBalances' });
+    return this.#post<PumpBalancesResponse>({ action: 'getBalances' });
   }
 
   async getTokenInfo(mint: string): Promise<PumpTokenInfo> {
-    return this.post<PumpTokenInfo>({ action: 'getTokenInfo', mint });
+    return this.#post<PumpTokenInfo>({ action: 'getTokenInfo', mint });
   }
 
   // ─── 2-leg atomic arb helper ─────────────────────────────────────────
@@ -374,7 +474,7 @@ export class PumpApiClient {
    * guarded so it cannot be silently adopted.
    *
    * EM-STRAT-012 Phase-0 R1: this method does NOT delegate through the
-   * public `actions()` method. It calls `this.post()` directly so that the
+   * public `actions()` method. It calls `#post()` directly so that the
    * `pumpapi-client:atomic-two-leg-arb` guard is the ONLY guard on this
    * path — neither bypasses `actions()`'s guard nor is bypassed by it.
    *
@@ -399,10 +499,10 @@ export class PumpApiClient {
     if (!this.isLightning) {
       throw new Error('atomicTwoLegArb requires Lightning mode (privateKey or apiKey)');
     }
-    // Call this.post() directly — DO NOT route through this.actions() — so
+    // Call #post() directly — DO NOT route through this.actions() — so
     // the actions() guard is not bypassed and atomicTwoLegArb's own guard
     // is sufficient for this path.
-    return this.post<PumpTxResponse>({
+    return this.#post<PumpTxResponse>({
       actions: [
         {
           action: 'buy' as const,
@@ -555,11 +655,28 @@ export interface PumpWalletGenerateResponse {
   privateKey?: string;          // only returned for new wallet generation
 }
 
+/**
+ * Generate a new PumpApi wallet or derive an apiKey from an existing private
+ * key.
+ *
+ * EM-STRAT-012 Phase-0.5 (work order C): this function TRANSMITS KEY
+ * MATERIAL to the PumpApi wallet endpoint — either the secret of a freshly
+ * generated wallet, or an apiKey derived from `existingPrivateKey`. Sending
+ * credentials to a third-party endpoint is a credential-exposure risk, so
+ * this path is fail-closed gated behind the 'pumpapi-client:generate-wallet'
+ * scope even though it does not move capital. Without an explicit scoped
+ * authorization, calling this function throws BEFORE any network request.
+ *
+ * It remains a separate security-review item: the guard prevents accidental
+ * invocation but does not make transmitting key material advisable.
+ */
 export async function generatePumpWallet(opts: {
   generateApiKey?: boolean;
   existingPrivateKey?: string;  // if set, derive apiKey from existing key
   fetchImpl?: typeof fetch;
 } = {}): Promise<PumpWalletGenerateResponse> {
+  // Fail-closed credential-exposure gate — fires BEFORE any fetch.
+  assertExecutionAuthorized('pumpapi-client:generate-wallet');
   const fetchImpl = opts.fetchImpl ?? fetch;
   const body: Record<string, unknown> = {
     generateApiKey: opts.generateApiKey ?? false,

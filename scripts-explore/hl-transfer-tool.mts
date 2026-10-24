@@ -67,6 +67,7 @@ async function main() {
 
   console.log('── Transfer Action Format ─\n');
   console.log('  POST https://api.hyperliquid.xyz/exchange');
+  // NOT-A-SINK: instructional console.log text — this script performs no fetch to /exchange.
   console.log('  Body:');
   console.log('  {');
   console.log('    "chain": "1",');

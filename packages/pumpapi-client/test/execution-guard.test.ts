@@ -299,4 +299,63 @@ describe('PumpApiClient action-method guards — R1 full coverage (EM-STRAT-012)
     await client.claimCashback();
     expect(fetchImpl.calls.length).toBe(1);
   });
+
+  // ── Phase-0.5: hard-private transport helper (work order C) ───────────
+
+  it('Phase-0.5 hard privacy: the old post() runtime property DOES NOT EXIST on the instance', () => {
+    const client = makeClient() as any;
+    // TS `private` compiled to a regular own property would let untyped
+    // callers submit arbitrary action bodies. #post is not an own property.
+    expect(client.post).toBeUndefined();
+    const ownProps = Object.getOwnPropertyNames(client);
+    expect(ownProps).not.toContain('post');
+    expect(ownProps).not.toContain('#post');
+  });
+
+  it('Phase-0.5 hard privacy: an untyped caller cannot invoke the transport helper — zero HTTP calls', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient() as any;
+    expect(typeof client.post).toBe('undefined');
+    try {
+      await client.post?.({ action: 'buy', mint: 'Mint', amount: 1 });
+    } catch {
+      // TypeError or no-op — either way, no HTTP happened.
+    }
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('Phase-0.5 expiry: the same client instance is denied after authorization lapses (per-call re-check)', async () => {
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, authFor('pumpapi-client:buy'));
+    const client = makeClient();
+    await client.buy({ action: 'buy', mint: 'Mint', amount: 1 } as any);
+    expect(fetchImpl.calls.length).toBe(1);
+    setExecutionClockForTesting(() => FIXED_NOW + 61_000);
+    await expect(client.buy({ action: 'buy', mint: 'Mint', amount: 1 } as any))
+      .rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(1);
+  });
+
+  // ── Phase-0.5: generatePumpWallet credential-exposure gate ────────────
+
+  it('Phase-0.5: generatePumpWallet is BLOCKED without authorization — zero HTTP calls (no key material transmitted)', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const res = await import('../src/index.js');
+    await expect(res.generatePumpWallet({
+      existingPrivateKey: 'fake-test-key-not-real',
+      fetchImpl,
+    })).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('Phase-0.5: generatePumpWallet proceeds with the pumpapi-client:generate-wallet scope (mocked transport)', async () => {
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, authFor('pumpapi-client:generate-wallet'));
+    const res = await import('../src/index.js');
+    const out = await res.generatePumpWallet({
+      generateApiKey: true,
+      fetchImpl,
+    });
+    expect(out).toBeDefined();
+    expect(fetchImpl.calls.length).toBe(1);
+    expect(fetchImpl.calls[0].url).toContain('wallet.pumpapi.io');
+  });
 });
