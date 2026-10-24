@@ -177,6 +177,19 @@ const SINK_PATTERNS: SinkPattern[] = [
   // inventoried helpers are hard-private; a re-introduced TS-private or
   // public transport method in an unknown file is flagged).
   rawPattern('transportDef', /async (?:request|post)\b[<(]/g),
+  // CCXT submission sinks (EM-STRAT-014-B1): CexExecutor routes orders,
+  // withdrawals and cancellations through a hard-private CCXT Exchange
+  // instance. createOrder uses the bare form (catches the two guarded
+  // wrapper call sites); withdraw/cancelOrder are dot-only — bare
+  // 'withdraw(' would match ABI selector strings and Solidity template
+  // docs (known false-positive classes), while the actual CCXT sink is
+  // always reached as `exchange.withdraw(...)`. exposedExchangeProperty
+  // flags any re-exposed (non-#) `exchange: Exchange`-typed property —
+  // the direct bypass vector EM-STRAT-014-B1 removed.
+  p('createOrder'),
+  rawPattern('withdraw', /\.withdraw\(/g),
+  rawPattern('cancelOrder', /\.cancelOrder\(/g),
+  rawPattern('exposedExchangeProperty', /(?<!#)\bexchange\s*:\s*Exchange\b/g),
 ];
 
 function getSinkPattern(name: string): SinkPattern {
@@ -309,6 +322,18 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   { file: 'packages/executor/src/index.ts', sink: 'eth_sendRawTransaction', expectedCount: 1, guardScope: 'evm-executor:send-transaction', guardMode: 'direct', rationale: 'submitViaFlashbotsProtect — raw broadcast sink; assertExecutionAuthorized added Phase-0.5' },
   { file: 'packages/executor/src/index.ts', sink: 'createWalletClient', expectedCount: 1, guardScope: 'evm-executor:construct-signer', guardMode: 'direct', rationale: 'signer construction behind the construct-signer guard; the raw client lives in #walletClient (hard-private, Phase-0.5 work order A)' },
   { file: 'packages/executor/src/index.ts', sink: 'privateKeyToAccount', expectedCount: 1, guardScope: 'evm-executor:construct-signer', guardMode: 'direct', rationale: 'key-derived account lives in #account (hard-private, Phase-0.5 work order A)' },
+
+  // ── CexExecutor — CCXT order/withdrawal sinks (EM-STRAT-014-B1) ──────
+  // The raw CCXT Exchange lives in hard-private #exchange; marketOrder and
+  // limitOrder each assert 'cex-executor:place-order' immediately before
+  // their createOrder call; withdraw requires the SEPARATE withdraw scope
+  // (order authority never implies withdrawal authority); cancelOrder is
+  // safety-positive. The class has zero in-repo callers and is deliberately
+  // NOT re-exported from the package index — contained at the sinks because
+  // the direct-file import path remains open.
+  { file: 'packages/executor/src/cex-executor.ts', sink: 'createOrder', expectedCount: 2, guardScope: 'cex-executor:place-order', guardMode: 'direct', rationale: 'marketOrder + limitOrder — each asserts the place-order scope per call, immediately before the CCXT submission; the Exchange instance is hard-private #exchange (EM-STRAT-014-B1)' },
+  { file: 'packages/executor/src/cex-executor.ts', sink: 'withdraw', expectedCount: 1, guardScope: 'cex-executor:withdraw', guardMode: 'direct', rationale: 'withdrawal requires the SEPARATE cex-executor:withdraw scope — cex-executor:place-order never authorizes it and vice versa (per-call re-check, EM-STRAT-014-B1)' },
+  { file: 'packages/executor/src/cex-executor.ts', sink: 'cancelOrder', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE (EM-STRAT-014-B1): cancellation removes a resting order and cannot open or increase exposure; emergency unwind must remain available without execution authorization (same rationale as VooiClient.cancelArbitrageOrder). ACCEPTED TRADEOFF: cancelling one leg of a paired position can leave the other leg unhedged — the cancel itself only removes future fills on this leg; residual exposure must be flattened manually' },
 
   // ── EVM runner scripts — raw sendTransaction sinks, hard-private clients ─
   { file: 'packages/scanner/src/runners/khype-carry-executor.ts', sink: 'sendTransaction', expectedCount: 1, guardScope: 'evm-executor:send-transaction', guardMode: 'direct', rationale: 'single live call inside sendTx; guard re-checks per call; walletClient is #walletClient (hard-private, Phase-0.5)' },
@@ -468,15 +493,19 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () 
   // Phase-0.5 adds vooi:close-arbitrage-order (work order D) and
   // pumpapi-client:generate-wallet (work order C) → 26.
   // EM-STRAT-012-R2 adds entrypoint:contracts-deploy (work order A) → 27.
+  // EM-STRAT-014-B1 adds cex-executor:place-order + cex-executor:withdraw
+  // (CCXT order/withdrawal containment) → 29.
 
-  it('EXECUTION_SCOPES length matches the documented EM-STRAT-012-R2 count (27)', () => {
-    expect(EXECUTION_SCOPES.length).toBe(27);
+  it('EXECUTION_SCOPES length matches the documented EM-STRAT-014-B1 count (29)', () => {
+    expect(EXECUTION_SCOPES.length).toBe(29);
   });
 
-  it('EXECUTION_SCOPES contains the Phase-0.5 and R2 additions', () => {
+  it('EXECUTION_SCOPES contains the Phase-0.5, R2 and EM-STRAT-014-B1 additions', () => {
     expect(EXECUTION_SCOPES).toContain('vooi:close-arbitrage-order');
     expect(EXECUTION_SCOPES).toContain('pumpapi-client:generate-wallet');
     expect(EXECUTION_SCOPES).toContain('entrypoint:contracts-deploy');
+    expect(EXECUTION_SCOPES).toContain('cex-executor:place-order');
+    expect(EXECUTION_SCOPES).toContain('cex-executor:withdraw');
   });
 
   // ── contracts/scripts perimeter (EM-STRAT-012-R2 work order A6) ─────
@@ -660,6 +689,16 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () 
     expect(eulerSrc).toContain('#walletClient');
     const adapterSrc = readFileSync(resolve(REPO_ROOT, 'packages/data-sources/src/index.ts'), 'utf8');
     expect(adapterSrc).toContain('#walletClient');
+    // EM-STRAT-014-B1: the CCXT exchange instance is hard-private too, and
+    // both narrow CexExecutor scopes are asserted at their sinks.
+    const cexSrc = readFileSync(resolve(REPO_ROOT, 'packages/executor/src/cex-executor.ts'), 'utf8');
+    expect(cexSrc).toContain('#exchange');
+    // The dangerous form is a re-exposed DECLARATION (`readonly exchange: …`);
+    // prose mentions of the old design must not trip this assertion.
+    expect(cexSrc).not.toMatch(/readonly exchange\s*:/);
+    expect(cexSrc).toContain("assertExecutionAuthorized('cex-executor:place-order')");
+    expect(cexSrc).toContain("assertExecutionAuthorized('cex-executor:withdraw')");
+    expect(cexSrc).toContain('SAFETY-POSITIVE');
     // The transport helpers are hard-private (work order C).
     const vooiSrc = readFileSync(resolve(REPO_ROOT, 'packages/vooi-client/src/index.ts'), 'utf8');
     expect(vooiSrc).toContain('async #request');
@@ -793,6 +832,55 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () 
       expect(v.reason).toBe('uninventoried-file');
       expect(v.count).toBeGreaterThan(0);
     }
+  });
+
+  it('EM-STRAT-014-B1: unguarded CCXT order/withdraw/cancel sinks in a PREVIOUSLY UNKNOWN file are detected', () => {
+    // A new file that reaches a CCXT sink through a re-exposed exchange
+    // property must fail the census on BOTH the submission sinks and the
+    // exposed-property pattern (the direct bypass vector B1 removed).
+    const fileContents = new Map<string, string>();
+    fileContents.set('packages/synthetic/src/rogue-cex.ts', stripComments(
+      'export class RogueCex {\n' +
+      '  exchange: Exchange;\n' +
+      '  async go() {\n' +
+      '    await this.exchange.createOrder("BTC/USDT", "market", "buy", 1);\n' +
+      '    await this.exchange.withdraw("USDT", 1, "addr");\n' +
+      '    await this.exchange.cancelOrder("1", "BTC/USDT");\n' +
+      '  }\n' +
+      '}\n',
+    ));
+    const violations = scanForUninventoriedSinks(fileContents);
+    const byFile = new Set(
+      violations.filter(v => v.file === 'packages/synthetic/src/rogue-cex.ts').map(v => v.sinkName),
+    );
+    expect(byFile.has('createOrder')).toBe(true);
+    expect(byFile.has('withdraw')).toBe(true);
+    expect(byFile.has('cancelOrder')).toBe(true);
+    expect(byFile.has('exposedExchangeProperty')).toBe(true);
+  });
+
+  it('EM-STRAT-014-B1: the contained cex-executor.ts passes the census with zero violations (positive control)', () => {
+    // The REAL cex-executor.ts contents, run through the ACTUAL scan
+    // function, must produce NO violations: both createOrder call sites,
+    // the withdrawal sink and the cancellation sink are inventoried, and
+    // the #exchange declaration is invisible to exposedExchangeProperty.
+    const realCex = resolve(REPO_ROOT, 'packages', 'executor', 'src', 'cex-executor.ts');
+    const fileContents = new Map<string, string>();
+    fileContents.set('packages/executor/src/cex-executor.ts', stripComments(readFileSync(realCex, 'utf8')));
+    expect(scanForUninventoriedSinks(fileContents)).toEqual([]);
+  });
+
+  it('EM-STRAT-014-B1: a hard-private #exchange declaration is NOT flagged by exposedExchangeProperty (positive control)', () => {
+    const fileContents = new Map<string, string>();
+    fileContents.set('packages/synthetic/src/good-cex.ts', stripComments(
+      'export class GoodCex {\n' +
+      '  #exchange: Exchange;\n' +
+      '  constructor() { this.#exchange = make(); }\n' +
+      '}\n',
+    ));
+    const violations = scanForUninventoriedSinks(fileContents);
+    const flagged = violations.filter(v => v.sinkName === 'exposedExchangeProperty');
+    expect(flagged).toEqual([]);
   });
 
   it('R2 synthetic fixture: the guarded contracts/scripts/deploy.ts produces NO scan violations (positive control)', () => {
