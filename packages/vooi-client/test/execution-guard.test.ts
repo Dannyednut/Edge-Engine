@@ -35,6 +35,15 @@ const ORDER_REQ = {
   hedgeFailurePolicy: 'alertAndHold' as const,
 };
 
+// R1 close-intent test fixtures: both legs carry reduceOnly === true.
+// This is the ONLY validated shape that qualifies for the close exemption.
+const CLOSE_REQ_BOTH_REDUCE = {
+  primary: { asset: 'BTC', exchange: 'hyperliquid', side: 'sell' as const, size: 100, type: 'market' as const, reduceOnly: true },
+  hedge: { asset: 'BTC', exchange: 'binance', side: 'buy' as const, size: 100, type: 'market' as const, reduceOnly: true },
+  partialFillPolicy: 'fullFill' as const,
+  hedgeFailurePolicy: 'alertAndHold' as const,
+};
+
 describe('VooiClient submission sinks — execution guard (EM-STRAT-012)', () => {
   let fetchImpl: ReturnType<typeof makeRecordingFetch>;
 
@@ -70,11 +79,70 @@ describe('VooiClient submission sinks — execution guard (EM-STRAT-012)', () =>
     expect(fetchImpl.calls[0].url).toContain('/arbitrage-orders');
   });
 
-  it('placeArbitrageOrder with intent "close" is risk-reducing and does NOT require authorization', async () => {
-    // Documented semantics (VooiExecutor.closeArb): legs carry reduceOnly:true,
-    // so close-intent orders can only shrink/flatten exposure. Deliberately
-    // usable without execution authorization.
+  it('R1 close-intent: a VALID two-leg reduce-only close proceeds WITHOUT authorization', async () => {
+    // EM-STRAT-012 Phase-0 R1: caller-supplied intent:"close" is NOT trusted
+    // on its own. BOTH legs must carry reduceOnly === true. With both legs
+    // reduce-only, the venue can only shrink/flatten exposure — the close
+    // exemption applies and no execution authorization is required.
     delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient();
+    const order = await client.placeArbitrageOrder(CLOSE_REQ_BOTH_REDUCE, { intent: 'close' });
+    expect(order.id).toBe('test-order-1');
+    expect(fetchImpl.calls.length).toBe(1);
+  });
+
+  it('R1 close-intent: missing reduceOnly on the PRIMARY leg DENIES — zero HTTP calls', async () => {
+    // intent:"close" but primary.reduceOnly is undefined → not a validated
+    // close → falls through to the open-intent guard → denied without auth.
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient();
+    const req = {
+      ...CLOSE_REQ_BOTH_REDUCE,
+      primary: { ...CLOSE_REQ_BOTH_REDUCE.primary, reduceOnly: undefined },
+    };
+    await expect(client.placeArbitrageOrder(req, { intent: 'close' })).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('R1 close-intent: missing reduceOnly on the HEDGE leg DENIES — zero HTTP calls', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient();
+    const req = {
+      ...CLOSE_REQ_BOTH_REDUCE,
+      hedge: { ...CLOSE_REQ_BOTH_REDUCE.hedge, reduceOnly: undefined },
+    };
+    await expect(client.placeArbitrageOrder(req, { intent: 'close' })).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('R1 close-intent: reduceOnly:false on either leg DENIES — zero HTTP calls', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient();
+    const req = {
+      ...CLOSE_REQ_BOTH_REDUCE,
+      primary: { ...CLOSE_REQ_BOTH_REDUCE.primary, reduceOnly: false },
+    };
+    await expect(client.placeArbitrageOrder(req, { intent: 'close' })).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('R1 close-intent: an UNAUTHORIZED close-intent order with non-reduce-only legs is DENIED (intent label alone is not proof)', async () => {
+    // This is the R1 regression: previously, intent:"close" alone bypassed
+    // the guard. Now the guard validates both legs. A non-reduce-only close
+    // is treated as an opening order and requires authorization.
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeClient();
+    await expect(client.placeArbitrageOrder(ORDER_REQ, { intent: 'close' })).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('R1 close-intent: a non-reduce-only close-intent order WITH open-intent scope PROCEEDS', async () => {
+    // If the caller has the open-intent scope, the order proceeds regardless
+    // of intent label (the close exemption is an optimization, not a
+    // restriction). This proves the guard falls through correctly.
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({
+      authId: 'test', expiresAtMs: FIXED_NOW + 60_000, scopes: ['vooi:place-arbitrage-order'],
+    }));
     const client = makeClient();
     const order = await client.placeArbitrageOrder(ORDER_REQ, { intent: 'close' });
     expect(order.id).toBe('test-order-1');

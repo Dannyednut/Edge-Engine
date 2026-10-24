@@ -13,11 +13,16 @@
  * explicit Principal decision; this gate only prevents ACCIDENTAL execution.
  *
  * Configuration: the `EDGE_EXECUTION_AUTH` environment variable holds a
- * JSON-encoded authorization descriptor:
+ * JSON-encoded authorization descriptor. The descriptor must be supplied
+ * explicitly through the process environment (e.g. `EDGE_EXECUTION_AUTH='...'
+ * npx tsx ...`); it MUST NOT be persisted in `.env` or any other tracked
+ * configuration file. Every `.env` loader in this repository explicitly
+ * excludes `EDGE_EXECUTION_AUTH` (see packages/risk/src/dotenv-safety.ts).
  *
  *   {
  *     "authId":      "<opaque audit identifier, required, non-empty>",
- *     "expiresAtMs": <epoch ms, required, finite, must be in the future>,
+ *     "expiresAtMs": <epoch ms, required, finite, must be in the future AND
+ *                     no further than MAX_AUTH_LIFETIME_MS from now>,
  *     "scopes":      ["<scope>", ...]  // required, non-empty; every entry
  *                                      // must be a known ExecutionScope
  *   }
@@ -26,8 +31,10 @@
  *   - EDGE_EXECUTION_AUTH is unset or empty
  *   - the value is not valid JSON
  *   - authId is missing, empty, or not a string
- *   - expiresAtMs is missing, not a finite number, <= 0, or in the past
- *     (relative to the injectable clock)
+ *   - expiresAtMs is missing, not a finite number, <= 0, in the past,
+ *     OR further than MAX_AUTH_LIFETIME_MS in the future (relative to the
+ *     injectable clock) — i.e. excessively long-lived authorizations are
+ *     rejected, not just already-expired ones
  *   - scopes is missing, not an array, empty, or contains an unknown scope
  *   - the requested scope is not included in scopes
  *
@@ -81,6 +88,21 @@ export const EXECUTION_SCOPES = [
   // Dormant client sinks (no current callers; guarded so they cannot be
   // silently adopted without authorization)
   'backpack-client:place-order',
+
+  // PumpApi client sinks — every transaction-producing action method has its
+  // own narrow scope (EM-STRAT-012 Phase-0 R1). claimCashback is deliberately
+  // ungated (recovers owed cashback into the wallet; cannot open or increase
+  // exposure) — see SAFETY-POSITIVE marker in packages/pumpapi-client/src/index.ts.
+  // atomicTwoLegArb does NOT delegate through actions(); it calls this.post()
+  // directly so neither guard bypasses the other.
+  'pumpapi-client:buy',
+  'pumpapi-client:sell',
+  'pumpapi-client:actions',
+  'pumpapi-client:jito-bundle',
+  'pumpapi-client:migrate',
+  'pumpapi-client:burn',
+  'pumpapi-client:wrap-sol',
+  'pumpapi-client:transfer',
   'pumpapi-client:atomic-two-leg-arb',
 ] as const;
 
@@ -90,6 +112,23 @@ const KNOWN_SCOPES: ReadonlySet<string> = new Set<string>(EXECUTION_SCOPES);
 
 /** The environment variable that carries the authorization descriptor. */
 export const EXECUTION_AUTH_ENV_VAR = 'EDGE_EXECUTION_AUTH';
+
+/**
+ * Maximum lifetime of an authorization descriptor, measured from the moment
+ * the guard is checked. An authorization whose `expiresAtMs` is further than
+ * this many milliseconds in the future is rejected as excessively long-lived,
+ * even if it is otherwise well-formed. This caps the blast radius of any
+ * leaked or accidentally-set descriptor: even if a stale descriptor lingers
+ * in the process environment, it cannot authorize execution for more than
+ * one hour after it was issued.
+ *
+ * Rationale: Phase-0 containment is an accident-prevention control, not a
+ * cryptographic identity proof. A 1-hour window is long enough for an
+ * operator to perform a deliberate live-trading session, but short enough
+ * that a forgotten/leaked descriptor becomes inert quickly. The clock is
+ * injectable for deterministic tests.
+ */
+export const MAX_AUTH_LIFETIME_MS: number = 60 * 60 * 1000; // 1 hour
 
 // ─── Error type ─────────────────────────────────────────────────────────
 
@@ -151,6 +190,9 @@ export type ExecutionAuthParseResult =
 /**
  * Parse and validate a raw authorization descriptor.
  * Exported for the census/tests; the guard itself calls this internally.
+ *
+ * `nowMs` is the injectable-clock value used for both the expiry check and
+ * the maximum-lifetime check.
  */
 export function parseExecutionAuthorization(
   raw: string | undefined | null,
@@ -189,6 +231,16 @@ export function parseExecutionAuthorization(
   if (expiresAtMs <= nowMs) {
     return { ok: false, reason: `authorization expired at ${new Date(expiresAtMs).toISOString()}` };
   }
+  // Maximum-lifetime check (EM-STRAT-012 Phase-0 R1): reject excessively
+  // long-lived descriptors, not just already-expired ones. This prevents a
+  // stale descriptor from authorizing execution far into the future.
+  const lifetimeMs = expiresAtMs - nowMs;
+  if (lifetimeMs > MAX_AUTH_LIFETIME_MS) {
+    return {
+      ok: false,
+      reason: `authorization lifetime ${lifetimeMs}ms exceeds maximum ${MAX_AUTH_LIFETIME_MS}ms (expires ${new Date(expiresAtMs).toISOString()})`,
+    };
+  }
 
   const scopes = obj.scopes;
   if (!Array.isArray(scopes) || scopes.length === 0) {
@@ -218,7 +270,8 @@ export function parseExecutionAuthorization(
  * Throws ExecutionNotAuthorizedError (fail-closed) unless:
  *   - EDGE_EXECUTION_AUTH contains a valid descriptor,
  *   - the descriptor has not expired (per the injectable clock),
- *   - and the requested scope is listed in the descriptor's scopes.
+ *   - the descriptor's lifetime does not exceed MAX_AUTH_LIFETIME_MS, and
+ *   - the requested scope is listed in the descriptor's scopes.
  *
  * Check this immediately before every risk-increasing submission, signer
  * construction that can enable submission, or bot start. Re-checking at each

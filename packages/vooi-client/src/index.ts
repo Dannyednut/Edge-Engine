@@ -217,17 +217,38 @@ export class VooiClient {
    * `intent: 'close'` marks the call as a strictly risk-reducing exit
    * (used by VooiExecutor.closeArb whose legs carry reduceOnly: true —
    * the venue rejects reduce-only orders that would increase exposure).
-   * Close-intent calls are permitted without execution authorization so
-   * risk-reducing exits stay available; every other call requires the
-   * 'vooi:place-arbitrage-order' scope. Default when intent is omitted:
-   * 'open' (guarded — fail-closed).
+   *
+   * EM-STRAT-012 Phase-0 R1: caller-supplied `intent: 'close'` is NOT
+   * trusted as proof of risk-reduction on its own. The guard additionally
+   * requires BOTH legs to carry `reduceOnly === true`. If either leg is
+   * missing `reduceOnly` or has it set to `false`, the close exemption
+   * does NOT apply and the call is treated as an opening (risk-increasing)
+   * order requiring the 'vooi:place-arbitrage-order' scope.
+   *
+   * Venue semantics: VOOI honours `reduceOnly` on perp legs — a reduce-only
+   * order can only shrink or flatten an existing position in that direction,
+   * never open or increase one. A two-leg order where BOTH legs are
+   * reduce-only therefore cannot add exposure on either side. If the venue
+   * ever changes this semantics, the exemption must be removed.
+   *
+   * Close-intent calls that pass the reduce-only validation are permitted
+   * without execution authorization so risk-reducing exits stay available;
+   * every other call requires the 'vooi:place-arbitrage-order' scope.
+   * Default when intent is omitted: 'open' (guarded — fail-closed).
    */
   async placeArbitrageOrder(
     req: VooiArbitrageOrderRequest,
     opts?: { intent?: 'open' | 'close' },
   ): Promise<VooiArbitrageOrder> {
     if (!this.apiToken) throw new Error('VooiClient.placeArbitrageOrder: apiToken required');
-    if ((opts?.intent ?? 'open') !== 'close') {
+    const intent = opts?.intent ?? 'open';
+    // Validate close-intent: BOTH legs must carry reduceOnly === true.
+    // A caller-supplied intent label alone is not proof of risk-reduction.
+    const closeExemptionApplies =
+      intent === 'close' &&
+      req.primary.reduceOnly === true &&
+      req.hedge.reduceOnly === true;
+    if (!closeExemptionApplies) {
       assertExecutionAuthorized('vooi:place-arbitrage-order');
     }
     return this.request<VooiArbitrageOrder>('POST', '/arbitrage-orders', req);

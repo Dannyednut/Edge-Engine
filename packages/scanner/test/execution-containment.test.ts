@@ -105,6 +105,34 @@ describe('Import safety — importing entry modules has no side effects (EM-STRA
     // must be deny-by-default; no tracked config enables it).
     expect(process.env[EXECUTION_AUTH_ENV_VAR]).toBeUndefined();
   });
+
+  it('R1: all four entrypoint loaders use the shared loadDotEnvIntoProcessEnv helper (not inline .env parsing)', () => {
+    // Static source check: each entrypoint must import and call the shared
+    // helper from @edge/risk, which excludes EDGE_EXECUTION_AUTH. This
+    // prevents a future regression where a contributor copies the old inline
+    // .env loader back into one of these files.
+    const files = [
+      'src/runners/funding-combined-runner.ts',
+      'src/runners/go-live.ts',
+      'src/runners/vooi-create-bot.ts',
+      'src/runners/vooi-price-spread-executor.ts',
+    ];
+    for (const path of files) {
+      const src = readFileSync(resolve(__dirname, '..', path), 'utf8');
+      // The import statement must reference loadDotEnvIntoProcessEnv.
+      expect(src).toContain('loadDotEnvIntoProcessEnv');
+      // The call site must invoke it with the .env path (no inline parsing).
+      expect(src).toMatch(/loadDotEnvIntoProcessEnv\(resolve\(REPO_ROOT, '\.env'\)\)/);
+      // The old inline .env loader pattern (readFileSync + regex match) must
+      // NOT appear at module scope — the helper replaced it.
+      expect(src).not.toMatch(/function loadDotEnvIntoProcessEnv/);
+      // EDGE_EXECUTION_AUTH must NOT be referenced as a literal key being
+      // loaded (the helper handles exclusion centrally).
+      expect(src).not.toMatch(/process\.env\[k\]\s*=\s*v\.replace/);
+      // Sanity: the entrypoint scope is still asserted.
+      expect(src).toContain('assertExecutionAuthorized(ENTRYPOINT_SCOPE)');
+    }
+  });
 });
 
 // ─── 2. VooiExecutor safe default + guard ──────────────────────────────
@@ -258,8 +286,10 @@ describe('Entrypoint scopes — all seven scripts export the expected scope', ()
     expect(FCR_SOURCE).toContain("export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:funding-combined-runner'");
     expect(FCR_SOURCE).toContain('assertExecutionAuthorized(ENTRYPOINT_SCOPE)');
     expect(FCR_SOURCE).toContain('if (AUTO_EXECUTE || !DRY_RUN)');
-    // Import-time hygiene: .env loading must be inside a function, not at module scope.
-    expect(FCR_SOURCE).toMatch(/function loadDotEnvIntoProcessEnv/);
+    // Import-time hygiene: .env loading must be inside main(), not at module scope.
+    // EM-STRAT-012 Phase-0 R1: the loader is the shared helper from @edge/risk
+    // which excludes EDGE_EXECUTION_AUTH.
+    expect(FCR_SOURCE).toMatch(/loadDotEnvIntoProcessEnv\(resolve\(REPO_ROOT, '\.env'\)\)/);
     expect(FCR_SOURCE).toMatch(/import\.meta\.url === `file:\/\/\$\{process\.argv\[1\]\}`/);
   });
 

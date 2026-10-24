@@ -245,50 +245,113 @@ export class PumpApiClient {
   }
 
   // ─── Trade API ───────────────────────────────────────────────────────
+  //
+  // EM-STRAT-012 Phase-0 R1: every transaction-producing public method has
+  // its own narrow scope checked at the sink (the call to this.post()).
+  // `atomicTwoLegArb` does NOT delegate through `actions()` — it calls
+  // this.post() directly so neither guard bypasses the other. Read-only
+  // methods (getBalances, getTokenInfo) remain ungated. `claimCashback` is
+  // SAFETY-POSITIVE (recovers owed cashback into the wallet; cannot open or
+  // increase exposure) and is deliberately ungated with an explicit
+  // rationale marker below.
 
+  /** Buy a token. Risk classification: RISK-INCREASING (opens a long). */
   async buy(req: PumpTradeRequest): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:buy');
     const { action: _omit, ...rest } = req;
     return this.post<PumpTxResponse>({ action: 'buy' as const, ...rest });
   }
 
+  /** Sell a token. Risk classification: RISK-INCREASING (opens a short
+   *  unless the caller can prove reduce-only, which PumpApi's trade request
+   *  does not support — so the whole method is gated). */
   async sell(req: PumpTradeRequest): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:sell');
     const { action: _omit, ...rest } = req;
     return this.post<PumpTxResponse>({ action: 'sell' as const, ...rest });
   }
 
-  /** Atomic multi-leg: pack buy+sell+transfer in one Solana tx (≤4-5 swaps). */
+  /**
+   * Atomic multi-leg: pack buy+sell+transfer+create in one Solana tx (≤4-5
+   * swaps). Risk classification: RISK-INCREASING — the actions array is
+   * arbitrary and can contain any mix of risk-increasing operations, so the
+   * whole method is gated. There is no reduce-only variant.
+   */
   async actions(req: PumpActionsRequest): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:actions');
     return this.post<PumpTxResponse>({ actions: req.actions, priorityFee: req.priorityFee, jitoTip: req.jitoTip });
   }
 
-  /** Atomic 5-tx bundle via Jito (ordered, no front-run between legs). */
+  /** Atomic 5-tx bundle via Jito (ordered, no front-run between legs).
+   *  Risk classification: RISK-INCREASING — a bundle can contain any action. */
   async jitoBundle(req: PumpJitoBundleRequest): Promise<PumpBundleResponse> {
+    assertExecutionAuthorized('pumpapi-client:jito-bundle');
     return this.post<PumpBundleResponse>({ transactions: req.transactions, jitoTip: req.jitoTip });
   }
 
   // ─── Non-trade actions ───────────────────────────────────────────────
+  //
+  // Each method below submits a real Solana transaction that materially
+  // changes on-chain state and is therefore risk-increasing. Each is gated
+  // with its own narrow scope so an authorization for one action does not
+  // enable any other.
 
+  /** Initiate Pump.fun → PumpSwap migration. Risk classification:
+   *  RISK-INCREASING — materially changes the token's market structure and
+   *  is irreversible. */
   async migrate(mint: string): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:migrate');
     return this.post<PumpTxResponse>({ action: 'migrate', mint });
   }
 
+  /** Burn LP tokens. Risk classification: RISK-INCREASING — irreversible
+   *  destruction of an on-chain asset. */
   async burn(mint: string): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:burn');
     return this.post<PumpTxResponse>({ action: 'burn', mint });
   }
 
+  /**
+   * Claim owed cashback (platform fee share) into the wallet.
+   *
+   * SAFETY-POSITIVE (risk-reducing / risk-neutral, deliberately UNGATED):
+   *   - Cashback is the wallet owner's share of PumpApi platform fees,
+   *     already owed to this wallet. Claiming it transfers SOL INTO the
+   *     wallet — it does not move capital out, open a position, or change
+   *     exposure on any asset.
+   *   - The action cannot increase risk: there is no order placement, no
+   *     position opening, no transfer of the wallet's existing funds to a
+   *     third party.
+   *   - Keeping this ungated means an operator can recover owed cashback
+   *     without holding execution authorization, which is appropriate for
+   *     a strictly positive-recovery action.
+   *   - The action still submits a real Solana transaction (consuming gas),
+   *     but gas-cost abuse is a different threat model from execution
+   *     authorization and is not addressed by this guard.
+   */
   async claimCashback(): Promise<PumpTxResponse> {
     return this.post<PumpTxResponse>({ action: 'claimCashback' });
   }
 
+  /** Wrap SOL into WSOL. Risk classification: RISK-INCREASING — materially
+   *  changes the position form (SOL → WSOL) and the wrapped SOL can be
+   *  spent by any subsequent action. */
   async wrapSol(amount: number): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:wrap-sol');
     return this.post<PumpTxResponse>({ action: 'wrapSol', amount });
   }
 
+  /** Transfer a token to another address. Risk classification:
+   *  RISK-INCREASING — moves capital out of the wallet. */
   async transfer(mint: string, toAddress: string, amount: number | string): Promise<PumpTxResponse> {
+    assertExecutionAuthorized('pumpapi-client:transfer');
     return this.post<PumpTxResponse>({ action: 'transfer', mint, toAddress, amount });
   }
 
   // ─── Read-only (no signing, can be called with publicKey only) ───────
+  //
+  // These submit a POST but the action is read-only (server returns data
+  // without broadcasting a transaction). They are deliberately ungated.
 
   async getBalances(): Promise<PumpBalancesResponse> {
     return this.post<PumpBalancesResponse>({ action: 'getBalances' });
@@ -303,6 +366,17 @@ export class PumpApiClient {
   /**
    * Atomic 2-leg arbitrage: buy on one AMM, sell on another, in a single
    * Solana transaction. All-or-nothing.
+   *
+   * Risk classification: RISK-INCREASING — submits real buy+sell Solana
+   * transactions that open and close a transient position; there is no
+   * reduce-only/close variant, so the whole method is guarded with no
+   * risk-reducing exemption. Dormant sink — no callers on current main;
+   * guarded so it cannot be silently adopted.
+   *
+   * EM-STRAT-012 Phase-0 R1: this method does NOT delegate through the
+   * public `actions()` method. It calls `this.post()` directly so that the
+   * `pumpapi-client:atomic-two-leg-arb` guard is the ONLY guard on this
+   * path — neither bypasses `actions()`'s guard nor is bypassed by it.
    *
    * @param mint          Token mint
    * @param buyPool       Pool to buy from (e.g. { amm: 'pump.fun', poolId: '...' })
@@ -321,16 +395,14 @@ export class PumpApiClient {
     priorityFee?: number;
     jitoTip?: number;
   }): Promise<PumpTxResponse> {
-    // EM-STRAT-012 Phase-0 sink guard. Risk classification: RISK-INCREASING —
-    // submits real buy+sell Solana transactions that open and close a
-    // transient position; there is no reduce-only/close variant, so the
-    // whole method is guarded with no risk-reducing exemption. Dormant sink
-    // — no callers on current main; guarded so it cannot be silently adopted.
     assertExecutionAuthorized('pumpapi-client:atomic-two-leg-arb');
     if (!this.isLightning) {
       throw new Error('atomicTwoLegArb requires Lightning mode (privateKey or apiKey)');
     }
-    return this.actions({
+    // Call this.post() directly — DO NOT route through this.actions() — so
+    // the actions() guard is not bypassed and atomicTwoLegArb's own guard
+    // is sufficient for this path.
+    return this.post<PumpTxResponse>({
       actions: [
         {
           action: 'buy' as const,

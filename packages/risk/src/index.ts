@@ -165,6 +165,7 @@ export class RiskGuard {
 export {
   EXECUTION_SCOPES,
   EXECUTION_AUTH_ENV_VAR,
+  MAX_AUTH_LIFETIME_MS,
   type ExecutionScope,
   type ExecutionAuthorization,
   ExecutionNotAuthorizedError,
@@ -175,3 +176,13 @@ export {
   setExecutionAuditLoggerForTesting,
   resetExecutionAuditLoggerForTesting,
 } from './execution-guard.js';
+
+// ─── .env loader safety (EM-STRAT-012 Phase-0 R1) ──────────────────────
+// Helpers that ensure `.env` files cannot arm the execution guard.
+// `EDGE_EXECUTION_AUTH` must be supplied through the parent-process
+// environment, not persisted in `.env`. See ./dotenv-safety.ts.
+export {
+  DOTENV_EXCLUDED_KEYS,
+  parseDotEnvContents,
+  loadDotEnvIntoProcessEnv,
+} from './dotenv-safety.js';

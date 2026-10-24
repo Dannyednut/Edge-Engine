@@ -243,8 +243,11 @@ export class VooiExecutor {
    * would increase exposure — this path can only shrink or flatten a
    * position. It is deliberately NOT gated by the execution guard so that
    * risk-reducing exits remain available without opening execution
-   * authorization; the client sink call passes `intent: 'close'` to bypass
-   * the open-order guard on that documented basis.
+   * authorization; the client sink call passes `intent: 'close'` AND both
+   * legs carry `reduceOnly: true`, which the VooiClient sink validates
+   * before granting the close exemption (EM-STRAT-012 Phase-0 R1: the
+   * caller-supplied intent label alone is not trusted as proof of
+   * risk-reduction).
    */
   async closeArb(params: {
     orderId: string;

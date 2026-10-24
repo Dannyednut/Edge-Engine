@@ -13,11 +13,15 @@
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
 import { loadConfig } from '@edge/config';
 import { TelegramAlerter } from '@edge/alerts';
 import { PnlDb } from '@edge/pnl';
-import { RiskGuard, assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+import {
+  RiskGuard,
+  assertExecutionAuthorized,
+  loadDotEnvIntoProcessEnv,
+  type ExecutionScope,
+} from '@edge/risk';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient } from '@edge/vooi-client';
 import { PerpFundingStrategy, type PerpFundingAlert } from '../strategies/perp-funding.js';
@@ -31,25 +35,16 @@ const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
 /** Entrypoint scope for this script (defense-in-depth layer). */
 export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:funding-combined-runner';
 
-// EM-STRAT-012 Phase-0: .env loading moved out of module-import scope into
+// EM-STRAT-012 Phase-0 R1: .env loading moved out of module-import scope into
 // an explicitly-invoked function so importing this module does not mutate
-// process.env. Called from main() only.
-function loadDotEnvIntoProcessEnv(): void {
-  try {
-    const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-    for (const line of env.split('\n')) {
-      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-      if (!m) continue;
-      const [, k, v] = m;
-      if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-    }
-  } catch { /* .env not present */ }
-}
-
+// process.env. The shared helper (loadDotEnvIntoProcessEnv from @edge/risk)
+// additionally EXCLUDES EDGE_EXECUTION_AUTH — the execution-authorization
+// descriptor must be supplied through the parent-process environment, never
+// persisted in .env. Called from main() only.
 async function main() {
   // EM-STRAT-012 Phase-0: .env loading is explicitly invoked here (entrypoint
   // code), not at module import time.
-  loadDotEnvIntoProcessEnv();
+  loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
   // Env-derived run configuration is read inside main() (not at module scope)
   // so importing this module has no env-dependent side effects.

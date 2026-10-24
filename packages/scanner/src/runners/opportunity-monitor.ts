@@ -34,6 +34,7 @@ try {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!m) continue;
     const [, k, v] = m;
+    if (k === 'EDGE_EXECUTION_AUTH') continue;
     if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
   }
 } catch {}
