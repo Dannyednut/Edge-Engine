@@ -72,6 +72,15 @@ export const EXECUTION_SCOPES = [
   'entrypoint:vooi-create-bot',
   'entrypoint:go-live',
 
+  // EM-STRAT-012-R2 (work order A): contracts deployment utility.
+  // contracts/scripts/deploy.ts constructs a key-derived signer and calls
+  // walletClient.deployContract() — a real signed broadcast. The guard is
+  // asserted as the FIRST action of main(), before .env loading, bytecode
+  // read, signer/client construction, or any network request. The script's
+  // .env loader is the shared dotenv-safety helper (a descriptor supplied
+  // only via .env can never authorize deployment).
+  'entrypoint:contracts-deploy',
+
   // VOOI client sinks (shared HTTP choke point — risk-increasing mutations).
   // Phase-0.5 (work order D): the ungated close-intent exemption was REMOVED —
   // no authoritative VOOI documentation proves paired-leg reduce-only venue

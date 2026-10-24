@@ -359,3 +359,109 @@ describe('PumpApiClient action-method guards — R1 full coverage (EM-STRAT-012)
     expect(fetchImpl.calls[0].url).toContain('wallet.pumpapi.io');
   });
 });
+
+// ─── EM-STRAT-012-R2 (work order B): hard-private credentials ───────────
+
+describe('PumpApiClient hard-private credential fields (EM-STRAT-012-R2 work order B)', () => {
+  let fetchImpl: ReturnType<typeof makeRecordingFetch>;
+
+  beforeEach(() => {
+    setExecutionClockForTesting(() => FIXED_NOW);
+    fetchImpl = makeRecordingFetch();
+    vi.unstubAllEnvs();
+  });
+  afterEach(() => {
+    resetExecutionClockForTesting();
+    vi.unstubAllEnvs();
+  });
+
+  const FAKE_PK = 'fake-test-private-key-not-real-never-a-secret';
+  const FAKE_KEY = 'fake-test-api-key-not-real';
+  const FAKE_PUB = 'fake-test-public-key-not-real';
+
+  function makeCredentialedClient(): PumpApiClient {
+    return new PumpApiClient({
+      privateKey: FAKE_PK,
+      apiKey: FAKE_KEY,
+      publicKey: FAKE_PUB,
+      fetchImpl,
+    });
+  }
+
+  it('credentials are NOT runtime-readable via property access (R2 B1)', () => {
+    const client = makeCredentialedClient() as any;
+    // The TS-private form survived compilation as own properties; the #
+    // form must not.
+    expect(client.privateKey).toBeUndefined();
+    expect(client.apiKey).toBeUndefined();
+    expect(client['#privateKey']).toBeUndefined();
+    expect(client['#apiKey']).toBeUndefined();
+    // Hard-private helper too.
+    expect(client.authBody).toBeUndefined();
+    expect(client['#authBody']).toBeUndefined();
+  });
+
+  it('credentials are NOT recoverable via own-property enumeration or serialization (R2 B1)', () => {
+    const client = makeCredentialedClient() as any;
+    const ownProps = Object.getOwnPropertyNames(client);
+    expect(ownProps).not.toContain('privateKey');
+    expect(ownProps).not.toContain('apiKey');
+    expect(ownProps).not.toContain('authBody');
+    expect(ownProps).not.toContain('#privateKey');
+    expect(ownProps).not.toContain('#apiKey');
+    // `in` (own + prototype chain) cannot reach the fields either.
+    expect('privateKey' in client).toBe(false);
+    expect('apiKey' in client).toBe(false);
+    // JSON.stringify of the instance leaks nothing.
+    const serialized = JSON.stringify(client);
+    expect(serialized).not.toContain(FAKE_PK);
+    expect(serialized).not.toContain(FAKE_KEY);
+  });
+
+  it('the intended request payload REMAINS correct under mock transport — credentials still present by protocol design (R2 B2/B3)', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeCredentialedClient();
+    // Read-only action (ungated) — proves the body shape is unchanged.
+    await client.getBalances();
+    expect(fetchImpl.calls.length).toBe(1);
+    const body = JSON.parse(fetchImpl.calls[0].init.body);
+    expect(body.action).toBe('getBalances');
+    // Protocol requirement: Lightning credentials ARE in the request body.
+    expect(body.privateKey).toBe(FAKE_PK);
+    expect(body.apiKey).toBe(FAKE_KEY);
+    expect(body.publicKey).toBe(FAKE_PUB);
+    // Hard-private fields don't break mode detection either.
+    expect(client.isLightning).toBe(true);
+  });
+
+  it('safety-positive claimCashback body still carries the Lightning credential (protocol design, documented — not a regression)', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeCredentialedClient();
+    await client.claimCashback();
+    const body = JSON.parse(fetchImpl.calls[0].init.body);
+    expect(body.action).toBe('claimCashback');
+    expect(body.privateKey).toBe(FAKE_PK);
+  });
+
+  it('a denied transaction-producing action fails BEFORE any credential transmission (zero fetch)', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeCredentialedClient();
+    await expect(client.buy({ action: 'buy', mint: 'Mint', amount: 1 } as any))
+      .rejects.toThrow(ExecutionNotAuthorizedError);
+    // No fetch → the credential never left the process.
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+
+  it('an untyped caller cannot harvest credentials and submit — the fields simply do not exist on the instance', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const client = makeCredentialedClient() as any;
+    // Whatever extraction attempt is made, nothing comes back.
+    const harvested = [client.privateKey, client.apiKey, Object.values(client)].flat();
+    expect(harvested).not.toContain(FAKE_PK);
+    expect(harvested).not.toContain(FAKE_KEY);
+    // And the transport helper is unreachable for a hand-rolled body.
+    expect(typeof client.post).toBe('undefined');
+    expect(typeof client.authBody).toBe('undefined');
+    expect(fetchImpl.calls.length).toBe(0);
+  });
+});

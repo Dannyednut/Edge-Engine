@@ -196,8 +196,17 @@ import {
 } from '@edge/risk';
 
 export class PumpApiClient {
-  private readonly privateKey?: string;
-  private readonly apiKey?: string;
+  // EM-STRAT-012-R2 (work order B): the Lightning credentials are
+  // ECMAScript HARD-PRIVATE fields. A TS `private` field survives
+  // compilation as a normal own property — `(client as any).privateKey`
+  // could recover it. `#` fields are not own properties: no cast, no
+  // Object.getOwnPropertyNames, no JSON.stringify can extract them from a
+  // constructed instance. They are still INTENTIONALLY included in protocol
+  // request bodies (see the credential-transmission rationale above
+  // #authBody) — hard privacy prevents casual runtime extraction, not the
+  // protocol's own credential transmission.
+  #privateKey?: string;
+  #apiKey?: string;
   private readonly publicKey?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly partnerAddress?: string;
@@ -205,28 +214,53 @@ export class PumpApiClient {
   private readonly partnerFeeFixed?: number;
 
   constructor(opts: PumpApiClientOptions = {}) {
-    this.privateKey = opts.privateKey;
-    this.apiKey     = opts.apiKey;
+    this.#privateKey = opts.privateKey;
+    this.#apiKey     = opts.apiKey;
     this.publicKey  = opts.publicKey;
     this.fetchImpl  = opts.fetchImpl ?? fetch;
     this.partnerAddress   = opts.partnerAddress;
     this.partnerFeeRatio  = opts.partnerFeeRatio;
     this.partnerFeeFixed  = opts.partnerFeeFixed;
 
-    if (!this.privateKey && !this.apiKey && !this.publicKey) {
+    if (!this.#privateKey && !this.#apiKey && !this.publicKey) {
       throw new Error('PumpApiClient: at least one of privateKey / apiKey / publicKey required');
     }
   }
 
   /** Returns true if Lightning mode (server signs) is available. */
   get isLightning(): boolean {
-    return !!(this.privateKey || this.apiKey);
+    return !!(this.#privateKey || this.#apiKey);
   }
 
-  private authBody(): Record<string, unknown> {
+  // ─── Credential transmission (EM-STRAT-012-R2, work order B) ─────────
+  //
+  // PROTOCOL FACT: in Lightning mode the PumpApi protocol requires the
+  // wallet's credential (raw privateKey, or the AES-256-encrypted apiKey
+  // form) in EVERY request body — including the read-only calls
+  // (getBalances, getTokenInfo) and the safety-positive claimCashback. The
+  // client cannot avoid this transmission and still use Lightning mode;
+  // generatePumpWallet additionally transmits key material by design and
+  // is separately gated behind 'pumpapi-client:generate-wallet'.
+  //
+  // What hard-private (#) fields change: they prevent CASUAL runtime
+  // extraction of the credential from a constructed client instance
+  // (`(client as any).privateKey`, own-property enumeration,
+  // JSON.stringify of the client). They do NOT — and cannot — prevent the
+  // intentional inclusion of those credentials in protocol request bodies.
+  // Sending credentials to the third-party PumpApi service remains an
+  // accepted protocol-level risk: use a dedicated, limited-funds trading
+  // wallet only.
+  //
+  // Why the ungated read-only/cashback actions are NOT capital-increasing:
+  //   - getBalances / getTokenInfo: the server returns data; no transaction
+  //     is broadcast, no position is opened or changed, no exposure moves.
+  //   - claimCashback: recovers ALREADY-OWED fee share INTO the wallet; no
+  //     order, no position, no transfer to a third party. (Gas-cost abuse
+  //     is a different threat model, not addressed by this guard.)
+  #authBody(): Record<string, unknown> {
     const body: Record<string, unknown> = {};
-    if (this.privateKey) body.privateKey = this.privateKey;
-    if (this.apiKey)     body.apiKey     = this.apiKey;
+    if (this.#privateKey) body.privateKey = this.#privateKey;
+    if (this.#apiKey)     body.apiKey     = this.#apiKey;
     if (this.publicKey)  body.publicKey  = this.publicKey;
     if (this.partnerAddress) {
       body.partnerAddress    = this.partnerAddress;
@@ -335,7 +369,7 @@ export class PumpApiClient {
     const res = await this.fetchImpl(PUMPAPI_BASE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...this.authBody(), ...body }),
+      body: JSON.stringify({ ...this.#authBody(), ...body }),
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => '');

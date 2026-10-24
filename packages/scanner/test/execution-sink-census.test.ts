@@ -35,12 +35,34 @@ import { EXECUTION_SCOPES } from '@edge/risk';
 //     walletClient.sendTransaction, and direct low-level request/post
 //     attempts.
 //
-// Deliberate exclusions (documented per work order E):
-//   - contracts/ — Solidity sources; different language, compiled by
-//     foundry.yml, contain no TypeScript submission surface. The Solidity
-//     SOURCE STRINGS embedded in scripts-explore design docs are inventoried
-//     as not-a-sink entries below (ICoreWriter.placeOrder /
-//     IERC20.transfer inside template literals).
+// EM-STRAT-012-R2 (work order A) expansions:
+//   - Scan boundary now ALSO covers contracts/scripts/** (the executable
+//     TypeScript of the contracts workspace). contracts/scripts/deploy.ts —
+//     a live deployment path found by the EI adversarial review — is now a
+//     guarded, inventoried entrypoint ('entrypoint:contracts-deploy').
+//   - New sink pattern: deployContract (bare form catches both
+//     client.deployContract(...) call sites and bare definitions), so a new
+//     or unguarded deployment sink — including one in a previously unknown
+//     file — fails CI (synthetic fixture below).
+//   - VOOI venue reduce-only semantics remain UNPROVEN (EI finding
+//     preserved per work order E4): no live probe or venue experiment is
+//     authorized. The Phase-0.5 scoped-close design does not depend on
+//     venue semantics: closing requires an explicit scope AND a
+//     body-validated both-legs reduceOnly request, and the Backpack
+//     reduce-only exemption was removed entirely (work order C).
+//
+// Deliberate exclusions (documented per EM-STRAT-012-R2 work order E):
+//   - contracts/src/** and contracts/lib/** — Solidity sources and vendored
+//     libraries; different language, no TypeScript submission surface, and
+//     compiled artifacts rather than executable JS/TS. The EXECUTABLE
+//     TypeScript deployment surface of the contracts workspace
+//     (contracts/scripts/**) IS scanned as of EM-STRAT-012-R2 (work order
+//     A): deploy.ts is a guarded, census-inventoried entrypoint, and a new
+//     unguarded deployment sink anywhere under contracts/scripts/** fails
+//     CI. The Solidity SOURCE STRINGS embedded in scripts-explore design
+//     docs are inventoried as not-a-sink entries below
+//     (ICoreWriter.placeOrder / IERC20.transfer inside template literals).
+//   - contracts/build/** — compiled bytecode artifacts (JSON), not source.
 //   - evidence/ — Python funding-carry harness; different language, own
 //     offline-guard test suite (test_offline_guard.py).
 //   - *.quarantined — mechanically archived source (cannot execute by
@@ -55,14 +77,29 @@ import { EXECUTION_SCOPES } from '@edge/risk';
 //
 // Method: narrowly scoped static scan. Comments (// lines and JSDoc
 // continuation lines) are stripped before counting so documentation mentions
-// of sink names do not produce false positives. Limitations (documented): a
-// regex scan cannot see through dynamic dispatch or re-exported aliases;
-// string literals that merely MENTION sink names are inventoried explicitly
-// as not-a-sink entries rather than broadly allow-listed.
+// of sink names do not produce false positives.
+//
+// KNOWN LIMITATIONS — accident-prevention scope only (EM-STRAT-012-R2 work
+// order E2). This census is a regex-based tripwire that makes ACCIDENTAL
+// unguarded sinks fail CI; it is NOT a proof that all possible runtime paths
+// are mathematically covered. A regex scan cannot see through:
+//   - dynamic dispatch (sink names resolved at runtime, e.g. obj[name]()),
+//   - aliased/re-exported imports (sink reached under a different name),
+//   - multiline construction (call arguments split so the name and paren
+//     are on different lines — patterns match name+paren on one line),
+//   - destructured signer extraction (const { deployContract } = wallet
+//     then bare deployContract(...) — the bare form is patterned only for
+//     deployContract, not for every SDK method).
+// Deliberate human action can route around this scan; that is out of scope
+// for an accident-prevention control (see the execution-guard design note:
+// this is not proof of identity or authority). String literals that merely
+// MENTION sink names are inventoried explicitly as not-a-sink entries
+// rather than broadly allow-listed.
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
 const PACKAGES_DIR = resolve(REPO_ROOT, 'packages');
 const SCRIPTS_EXPLORE_DIR = resolve(REPO_ROOT, 'scripts-explore');
+const CONTRACTS_SCRIPTS_DIR = resolve(REPO_ROOT, 'contracts', 'scripts');
 
 // ─── Sink patterns ──────────────────────────────────────────────────────
 
@@ -128,6 +165,11 @@ const SINK_PATTERNS: SinkPattern[] = [
   rawPattern('newExchangeClient', /new ExchangeClient\(/g),
   p('createWalletClient'),
   p('privateKeyToAccount'),
+  // EVM contract deployment broadcast (EM-STRAT-012-R2 work order A7):
+  // walletClient.deployContract(...) — and any bare deployContract(
+  // definition — is a real signed broadcast. Bare form so a deployment sink
+  // in a previously unknown file fails the census.
+  p('deployContract'),
   rawPattern('walletClientProperty', /(?<!#)\bwalletClient\b\s*[:=]/g),
   // Low-level transport-helper definitions (Phase-0.5, work order C):
   // flags `async request<...>(` / `async post<...>(` method definitions.
@@ -172,7 +214,7 @@ function isExecutableSource(filename: string): boolean {
   return EXECUTABLE_EXTENSIONS.some(ext => filename.endsWith(ext)) && !filename.endsWith('.d.ts');
 }
 
-/** All executable source files under packages/**\/src/ and scripts-explore/. */
+/** All executable source files under packages/**\/src/, scripts-explore/, and contracts/scripts/. */
 function walkExecutableSources(): string[] {
   const acc: string[] = [];
   // packages/**/src/**
@@ -186,6 +228,14 @@ function walkExecutableSources(): string[] {
   // scripts-explore/** (flat + archive/ subdirectory)
   if (existsSync(SCRIPTS_EXPLORE_DIR)) {
     walkDir(SCRIPTS_EXPLORE_DIR, acc);
+  }
+  // contracts/scripts/** (EM-STRAT-012-R2 work order A6) — the executable
+  // TypeScript of the contracts workspace. NOT a blanket allowance for all
+  // of contracts/: Solidity source (contracts/src/**, contracts/lib/**) and
+  // compiled artifacts (contracts/build/**) remain excluded with the
+  // language-specific rationale documented in the header.
+  if (existsSync(CONTRACTS_SCRIPTS_DIR)) {
+    walkDir(CONTRACTS_SCRIPTS_DIR, acc);
   }
   return acc;
 }
@@ -243,7 +293,7 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   { file: 'packages/vooi-client/src/index.ts', sink: 'createBot', expectedCount: 1, guardScope: 'vooi:create-bot', guardMode: 'direct' },
   { file: 'packages/vooi-client/src/index.ts', sink: 'startBot', expectedCount: 1, guardScope: 'vooi:start-bot', guardMode: 'direct' },
   { file: 'packages/vooi-client/src/index.ts', sink: 'stopBot', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: emergency stop must remain available without execution authorization' },
-  { file: 'packages/vooi-client/src/index.ts', sink: 'cancelArbitrageOrder', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: cancellation reduces exposure' },
+  { file: 'packages/vooi-client/src/index.ts', sink: 'cancelArbitrageOrder', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE (EM-STRAT-012-R2 work order E3): cancellation reduces exposure and emergency unwind must remain available without execution authorization. ACCEPTED TRADEOFF: cancelling a partially-filled order can leave RESIDUAL DIRECTIONAL EXPOSURE (the filled portion stays open) — the operator must still flatten manually; the tradeoff is deliberately accepted so exits are never blocked by the execution guard' },
   { file: 'packages/vooi-client/src/index.ts', sink: 'deleteBot', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: cleanup of a stopped bot cannot open/increase exposure' },
 
   // ── VooiExecutor (strategy class) — executor-layer defense-in-depth ─────
@@ -279,7 +329,14 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   { file: 'packages/scanner/src/runners/vooi-arb-executor.ts', sink: 'stopBot', expectedCount: 2, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: stopBot wrapper definition + client call — the ungated client stopBot keeps emergency stop available' },
 
   // ── BackpackClient (dormant sink; guarded at the definition) ────────────
-  { file: 'packages/backpack-client/src/index.ts', sink: 'placeOrder', expectedCount: 1, guardScope: 'backpack-client:place-order', guardMode: 'direct', rationale: 'reduceOnly:true orders classified risk-reducing and usable without authorization (validated at the sink); all other orders require the scope' },
+  // EM-STRAT-012-R2 (work order C): the previous reduceOnly:true exemption
+  // relied on venue reduce-only semantics with NO authoritative evidence in
+  // this repository. It is REMOVED: EVERY order — including reduceOnly ones
+  // — now requires 'backpack-client:place-order' (conservative VOOI
+  // standard). The exemption must not be described as safety-positive
+  // without evidence; a Principal-approved, evidenced exemption may be
+  // reintroduced later.
+  { file: 'packages/backpack-client/src/index.ts', sink: 'placeOrder', expectedCount: 1, guardScope: 'backpack-client:place-order', guardMode: 'direct', rationale: 'R2 work order C: EVERY order requires the scope — the unevidenced reduceOnly:true exemption was removed (venue reduce-only semantics unproven, aligned with the conservative VOOI standard); guard fires before any transport attempt' },
 
   // ── PumpApiClient — every transaction-producing action method ───────────
   // Phase-0.5: #post is hard-private with body-shape classification;
@@ -292,16 +349,29 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   { file: 'packages/pumpapi-client/src/index.ts', sink: 'burn', expectedCount: 1, guardScope: 'pumpapi-client:burn', guardMode: 'direct' },
   { file: 'packages/pumpapi-client/src/index.ts', sink: 'wrapSol', expectedCount: 1, guardScope: 'pumpapi-client:wrap-sol', guardMode: 'direct' },
   { file: 'packages/pumpapi-client/src/index.ts', sink: 'transfer', expectedCount: 1, guardScope: 'pumpapi-client:transfer', guardMode: 'direct' },
-  { file: 'packages/pumpapi-client/src/index.ts', sink: 'claimCashback', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: recovers owed cashback into the wallet; cannot open or increase exposure (see JSDoc rationale)' },
+  { file: 'packages/pumpapi-client/src/index.ts', sink: 'claimCashback', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE: recovers owed cashback into the wallet; cannot open or increase exposure (see JSDoc rationale). R2 work order B: the request body still carries Lightning credentials BY PROTOCOL DESIGN — see the credential-transmission rationale in packages/pumpapi-client/src/index.ts. Read-only (getBalances, getTokenInfo) and cashback actions are classified not capital-increasing: the server broadcasts no position-changing transaction for them' },
   { file: 'packages/pumpapi-client/src/index.ts', sink: 'atomicTwoLegArb', expectedCount: 1, guardScope: 'pumpapi-client:atomic-two-leg-arb', guardMode: 'direct', rationale: 'calls #post() directly (NOT actions()) so the actions() guard is not bypassed and atomicTwoLegArb\'s own guard is sufficient' },
 
   // ── False-positive regex matches (NOT-A-SINK) ───────────────────────
   { file: 'packages/pnl/src/index.ts', sink: 'migrate', expectedCount: 2, guardScope: null, guardMode: 'not-a-sink', rationale: 'NOT-A-SINK: PnlDb.migrate() is a SQLite schema migration (CREATE TABLE / CREATE INDEX DDL), not a trading action. Count=2: the constructor call site (this.migrate()) + the private method definition.' },
+  { file: 'packages/orchestrator/src/agents/operations-agent.ts', sink: 'deployContract', expectedCount: 2, guardScope: null, guardMode: 'not-a-sink', rationale: 'NOT-A-SINK: OperationsAgent.deployContract is an offline stub (console.log + returns "deployed (stub)"); no signer construction, no broadcast, no network. Count=2: the task-dispatch call site + the private method definition. If ever wired to the real deployment utility, that path is guarded by entrypoint:contracts-deploy inside contracts/scripts/deploy.ts (R2 work order A)' },
 
   // ── data-sources — vestigial signer construction (hard-private) ─────────
   { file: 'packages/data-sources/src/index.ts', sink: 'createWalletClient', expectedCount: 1, guardScope: null, guardMode: 'dormant-signer', rationale: 'dormant-signer: EvmAdapter constructs a wallet client only when a caller passes signerPrivateKey (no in-repo caller does); the raw client lives in #walletClient (hard-private, Phase-0.5 work order A) and the class exposes only read-only RPC helpers' },
   { file: 'packages/data-sources/src/index.ts', sink: 'privateKeyToAccount', expectedCount: 1, guardScope: null, guardMode: 'dormant-signer', rationale: 'dormant-signer: key-derived account stored in hard-private #walletClient closure; signerAddress (plain address) is the only public derivative' },
   { file: 'packages/data-sources/src/gen-agent-wallets.ts', sink: 'privateKeyToAccount', expectedCount: 1, guardScope: null, guardMode: 'not-a-sink', rationale: 'NOT-A-SINK: local key-GENERATION utility (creates new agent wallets and appends them to .env); performs no network submission. Inventoried for key-material provenance; must never be run against funded environments without Principal approval' },
+
+  // ── contracts/scripts/deploy.ts — guarded deployment entrypoint (R2 work order A) ──
+  // The EI adversarial review (EM-STRAT-012-R2) found this live deployment
+  // path outside the census. It is now contained: main() asserts
+  // 'entrypoint:contracts-deploy' as its FIRST action (before .env load,
+  // bytecode read, signer construction, or any network request), .env
+  // loading uses the shared helper that excludes EDGE_EXECUTION_AUTH, and
+  // importing the module performs no side effects (import.meta.url
+  // direct-entrypoint check).
+  { file: 'contracts/scripts/deploy.ts', sink: 'deployContract', expectedCount: 1, guardScope: 'entrypoint:contracts-deploy', guardMode: 'direct', rationale: 'the deployContract call is a real signed broadcast; the entrypoint guard fires as the FIRST action of main() — before .env load, bytecode read, signer construction, or any network request (R2 work order A3)' },
+  { file: 'contracts/scripts/deploy.ts', sink: 'createWalletClient', expectedCount: 1, guardScope: 'entrypoint:contracts-deploy', guardMode: 'direct', rationale: 'signer construction behind the same first-action entrypoint guard (R2 work order A)' },
+  { file: 'contracts/scripts/deploy.ts', sink: 'privateKeyToAccount', expectedCount: 1, guardScope: 'entrypoint:contracts-deploy', guardMode: 'direct', rationale: 'key-derived account construction behind the same first-action entrypoint guard (R2 work order A)' },
 
   // ── sharpe-client — read-only transport definition ──────────────────────
   { file: 'packages/sharpe-client/src/index.ts', sink: 'transportDef', expectedCount: 1, guardScope: null, guardMode: 'not-a-sink', rationale: 'NOT-A-SINK: private async request<T>() is the transport of a read-only market-data client (GET endpoints only); no order/transfer paths exist in this client' },
@@ -391,20 +461,35 @@ export function scanForUninventoriedSinks(
 
 // ─── Tests ──────────────────────────────────────────────────────────────
 
-describe('EM-STRAT-012 submission-sink census — Phase-0.5 perimeter', () => {
+describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () => {
 
   // ── Scope-count reconciliation ──────────────────────────────────────────
   // Pre-R1 taxonomy: 16 scopes. R1 added 8 PumpApi action scopes (24).
   // Phase-0.5 adds vooi:close-arbitrage-order (work order D) and
   // pumpapi-client:generate-wallet (work order C) → 26.
+  // EM-STRAT-012-R2 adds entrypoint:contracts-deploy (work order A) → 27.
 
-  it('EXECUTION_SCOPES length matches the documented Phase-0.5 count (26)', () => {
-    expect(EXECUTION_SCOPES.length).toBe(26);
+  it('EXECUTION_SCOPES length matches the documented EM-STRAT-012-R2 count (27)', () => {
+    expect(EXECUTION_SCOPES.length).toBe(27);
   });
 
-  it('EXECUTION_SCOPES contains the Phase-0.5 additions', () => {
+  it('EXECUTION_SCOPES contains the Phase-0.5 and R2 additions', () => {
     expect(EXECUTION_SCOPES).toContain('vooi:close-arbitrage-order');
     expect(EXECUTION_SCOPES).toContain('pumpapi-client:generate-wallet');
+    expect(EXECUTION_SCOPES).toContain('entrypoint:contracts-deploy');
+  });
+
+  // ── contracts/scripts perimeter (EM-STRAT-012-R2 work order A6) ─────
+
+  it('R2: the executable-source walk includes contracts/scripts/** and still excludes Solidity/artifacts', () => {
+    const files = walkExecutableSources().map(toRepoRel);
+    expect(files).toContain('contracts/scripts/deploy.ts');
+    expect(files).toContain('contracts/scripts/compile.ts');
+    expect(files).toContain('contracts/scripts/preflight.ts');
+    // NOT a blanket allowance for all of contracts/:
+    expect(files.some(f => f.startsWith('contracts/src/'))).toBe(false);
+    expect(files.some(f => f.startsWith('contracts/lib/'))).toBe(false);
+    expect(files.some(f => f.startsWith('contracts/build/'))).toBe(false);
   });
 
   // ── Quarantine manifest enforcement (work order B) ──────────────────────
@@ -682,6 +767,43 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 perimeter', () => {
     expect(byFile.get('packages/synthetic/src/exposed-signer.ts')?.has('walletClientProperty')).toBe(true);
     // 4. TS-private transport definition must be caught.
     expect(byFile.get('packages/synthetic/src/rogue-transport.ts')?.has('transportDef')).toBe(true);
+  });
+
+  it('R2 synthetic fixture: an unguarded deployContract sink in a PREVIOUSLY UNKNOWN executable file is detected', () => {
+    // EM-STRAT-012-R2 work order A7/verification: the census must detect a
+    // deployment sink in a file that has never been inventoried — e.g. a
+    // new script dropped into contracts/scripts/ that constructs a signer
+    // and broadcasts bytecode. Exercises the SAME scan function CI runs.
+    const fileContents = new Map<string, string>();
+    fileContents.set('contracts/scripts/synthetic-unknown-deploy.ts', stripComments(
+      'import { createWalletClient, http } from "viem";\n' +
+      'import { privateKeyToAccount } from "viem/accounts";\n' +
+      'export async function deploySomething(pk: `0x${string}`) {\n' +
+      '  const account = privateKeyToAccount(pk);\n' +
+      '  const client = createWalletClient({ account, transport: http(rpcUrl) });\n' +
+      '  return client.deployContract({ abi, bytecode });\n' +
+      '}\n',
+    ));
+    const violations = scanForUninventoriedSinks(fileContents);
+    const byFile = new Map(violations.filter(v => v.file === 'contracts/scripts/synthetic-unknown-deploy.ts').map(v => [v.sinkName, v]));
+    expect(byFile.has('deployContract')).toBe(true);
+    expect(byFile.has('createWalletClient')).toBe(true);
+    expect(byFile.has('privateKeyToAccount')).toBe(true);
+    for (const v of byFile.values()) {
+      expect(v.reason).toBe('uninventoried-file');
+      expect(v.count).toBeGreaterThan(0);
+    }
+  });
+
+  it('R2 synthetic fixture: the guarded contracts/scripts/deploy.ts produces NO scan violations (positive control)', () => {
+    // The REAL deploy.ts contents, run through the ACTUAL scan function,
+    // must produce NO violations: all three deployment sinks are
+    // inventoried under entrypoint:contracts-deploy.
+    const realDeploy = resolve(REPO_ROOT, 'contracts', 'scripts', 'deploy.ts');
+    const fileContents = new Map<string, string>();
+    fileContents.set('contracts/scripts/deploy.ts', stripComments(readFileSync(realDeploy, 'utf8')));
+    const violations = scanForUninventoriedSinks(fileContents);
+    expect(violations).toEqual([]);
   });
 
   it('synthetic fixture: a hard-private #walletClient is NOT flagged by the property pattern (positive control)', () => {

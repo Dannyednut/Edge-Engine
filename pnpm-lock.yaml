@@ -194,6 +194,9 @@ importers:
       '@edge/config':
         specifier: workspace:*
         version: link:../packages/config
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../packages/risk
       '@edge/types':
         specifier: workspace:*
         version: link:../packages/types
