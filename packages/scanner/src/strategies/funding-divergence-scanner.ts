@@ -10,6 +10,17 @@
  *
  * MIGRATED FROM scripts-explore:
  *   - funding-divergence-realtime.mts
+ *
+ * ─── EM-STRAT-014-E11 item 1 — timestamp integrity ─────────────────────
+ * The alert carries TWO timestamps:
+ *   - scanTs: when the scan ran (Date.now() at scan start). This is the
+ *     ONLY fabricated timestamp and is explicitly labeled as scan time.
+ *   - venueTs: the venue observation time, if the API provides one. null
+ *     when the API does not provide a verified observation timestamp.
+ *     NEVER fabricated with Date.now(). The previous implementation used a
+ *     single `ts: Date.now()` that conflated scan time with venue
+ *     observation time — downstream freshness checks could mistake a stale
+ *     venue reading for a fresh one.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
@@ -37,14 +48,36 @@ export interface FundingDivergenceAlert {
   type: 'DIVERGENCE' | 'EXTREME_FUNDING';
   direction: 'SHORT_HARVEST' | 'LONG_HARVEST' | 'DIVERGENCE';
   oi: number;
+  /**
+   * EM-STRAT-014-E11 item 1: when the scan ran (epoch ms). This is the
+   * scan-process clock, NOT the venue observation time.
+   */
+  scanTs: number;
+  /**
+   * EM-STRAT-014-E11 item 1: venue observation time (epoch ms), if the API
+   * provides one. null when the API does not provide a verified observation
+   * timestamp — NEVER fabricated with Date.now(). Downstream freshness
+   * checks must treat null as "unverified" rather than "fresh".
+   */
+  venueTs: number | null;
+  /**
+   * @deprecated Use scanTs / venueTs. Kept for presenter compatibility;
+   * equals scanTs.
+   */
   ts: number;
+}
+
+/** Injectable dependencies for deterministic offline testing. */
+export interface FundingDivergenceDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => number;
 }
 
 export class FundingDivergenceScanner implements Strategy {
   readonly id = 'funding_divergence';
   readonly landscape = 'F_perps_funding' as const;
 
-  constructor(private params: FundingDivergenceParams) {}
+  constructor(private params: FundingDivergenceParams, private deps: FundingDivergenceDeps = {}) {}
 
   subscribesTo(): string[] { return []; }
   evaluate(_data: DataPoint): TradeOrder[] | null { return null; }
@@ -61,10 +94,13 @@ export class FundingDivergenceScanner implements Strategy {
 
   async scan(): Promise<FundingDivergenceAlert[]> {
     const alerts: FundingDivergenceAlert[] = [];
+    const fetchFn = this.deps.fetchImpl ?? fetch;
+    const now = (this.deps.now ?? Date.now)();
+    const scanTs = now;
 
     try {
       // Fetch HL funding rates
-      const hlRes = await fetch(HL_API, {
+      const hlRes = await fetchFn(HL_API, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
@@ -72,7 +108,7 @@ export class FundingDivergenceScanner implements Strategy {
       const hlData = await hlRes.json() as any;
 
       // Fetch VOOI data
-      const vooiRes = await fetch(`${VOI_API}/arbitrage-scanner?limit=100&orderBy=priceSpread&orderDirection=desc`);
+      const vooiRes = await fetchFn(`${VOI_API}/arbitrage-scanner?limit=100&orderBy=priceSpread&orderDirection=desc`);
       const vooiData = vooiRes.ok ? await vooiRes.json() as any : { items: [] };
 
       // Build funding map: asset → [{ venue, fundingAnnual, oi }]
@@ -133,7 +169,9 @@ export class FundingDivergenceScanner implements Strategy {
             type: 'DIVERGENCE',
             direction: 'DIVERGENCE',
             oi: highest.oi,
-            ts: Date.now(),
+            scanTs,
+            venueTs: null, // EM-STRAT-014-E11 item 1: APIs provide no verified venue observation timestamp
+            ts: scanTs,
           });
         }
       }
@@ -153,7 +191,9 @@ export class FundingDivergenceScanner implements Strategy {
               type: 'EXTREME_FUNDING',
               direction: v.fundingAnnual > 0 ? 'SHORT_HARVEST' : 'LONG_HARVEST',
               oi: v.oi,
-              ts: Date.now(),
+              scanTs,
+              venueTs: null, // EM-STRAT-014-E11 item 1
+              ts: scanTs,
             });
           }
         }
