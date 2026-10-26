@@ -96,6 +96,28 @@ describe('EM-STRAT-004 §4 — strategy-level flag enforcement', () => {
       expect(a.estimatedProfitUsd).toBeNull();
     }
   });
+
+  // EM-STRAT-014-B2: PtKhypeYieldArbScanner is research-only / fail-closed.
+  // The scanner source must stamp `researchOnly: true` on every emitted
+  // alert. Since the production scan() returns [] (no validated price source),
+  // this is enforced as a static-source guard on the alerts.push literal.
+  it('PtKhypeYieldArbScanner source stamps researchOnly: true on every alert push', () => {
+    const src = readFileSync(
+      resolve(SCANNER_RUNNERS_DIR, '..', 'strategies', 'pt-khype-yield-arb.ts'),
+      'utf8',
+    );
+    // Every alerts.push({...}) site must include `researchOnly: true`.
+    const pushMatches = src.match(/alerts\.push\(\{[\s\S]*?\}\)/g);
+    expect(pushMatches, 'expected at least one alerts.push site').not.toBeNull();
+    expect(pushMatches!.length).toBeGreaterThanOrEqual(1);
+    for (const push of pushMatches!) {
+      expect(push).toMatch(/researchOnly:\s*true/);
+    }
+    // The fabricated 0.98 price constant must be gone.
+    expect(src).not.toMatch(/ptPriceEstimate\s*=\s*0\.98/);
+    // The Math.max(1, ...) days-to-maturity clamp must be gone.
+    expect(src).not.toMatch(/Math\.max\(\s*1\s*,/);
+  });
 });
 
 // ─── Category B: Presenter source contract ─────────────────────────────
@@ -165,6 +187,29 @@ describe('EM-STRAT-004 §3 + §4 — presenter source contracts', () => {
       expect(priceArbBlock).toContain('UNAVAILABLE');
       // Must explicitly label the alert as monitoring-only.
       expect(priceArbBlock).toMatch(/monitoring[- ]only/i);
+    });
+
+    it('PT-kHYPE alerts use severity "info" with [PTKH-RESEARCH] prefix and researchOnly guard (EM-STRAT-014-B2)', () => {
+      // EM-STRAT-014-B2: pt_khype alerts are research-only. The presenter
+      // must NEVER dispatch them with severity 'opportunity'. Defense-in-
+      // depth: the loop must guard on `a.researchOnly !== true` so a future
+      // edit that flips researchOnly off without re-validating the price
+      // source cannot leak an actionable alert.
+      const ptKhypeBlockMatch = src.match(/EM-STRAT-014-B2: PT-kHYPE alerts are RESEARCH-ONLY[\s\S]*?(?=\n\s*\/\/ Process PT yield)/);
+      expect(ptKhypeBlockMatch, 'PT-kHYPE alert block not found').not.toBeNull();
+      const ptKhypeBlock = ptKhypeBlockMatch![0];
+      // Must use 'info' severity.
+      expect(ptKhypeBlock).toMatch(/severity:\s*['"]info['"]/);
+      // Must NOT use 'opportunity' severity.
+      expect(ptKhypeBlock).not.toMatch(/severity:\s*['"]opportunity['"]/);
+      // Must guard on researchOnly === true before dispatching.
+      expect(ptKhypeBlock).toMatch(/a\.researchOnly\s*!==\s*true/);
+      // Must use the [PTKH-RESEARCH] title prefix (not the old [PTKH]).
+      expect(ptKhypeBlock).toMatch(/\[PTKH-RESEARCH\]/);
+      // Must NOT use the old unqualified [PTKH] prefix (avoid matching [PTKH-RESEARCH]).
+      expect(ptKhypeBlock).not.toMatch(/\[PTKH\](?!\-RESEARCH)/);
+      // Must label the alert as research-only / non-actionable in the body.
+      expect(ptKhypeBlock).toMatch(/RESEARCH-ONLY/i);
     });
 
     it('HL LST alerts preserve null withdrawal delay as UNAVAILABLE (not ?? 0)', () => {
@@ -286,6 +331,16 @@ describe('EM-STRAT-004 §3 + §4 — presenter source contracts', () => {
 
     it('has a Monitoring Only section in the report', () => {
       expect(src).toMatch(/Monitoring Only \(not actionable\)/);
+    });
+
+    it('PT-kHYPE is NOT marked ✅ Live (EM-STRAT-014-B2 research-only quarantine)', () => {
+      // EM-STRAT-014-B2: pt_khype_yield_arb is fail-closed / research-only.
+      // The daily-report status table must not imply operational readiness.
+      const ptKhypeRowMatch = src.match(/\|\s*15\s*\|\s*PT-kHYPE Yield Arb\s*\|\s*pt_khype_yield_arb\s*\|\s*([^\n|]+)\s*\|/);
+      expect(ptKhypeRowMatch, 'PT-kHYPE status row not found').not.toBeNull();
+      const status = ptKhypeRowMatch![1];
+      expect(status).not.toMatch(/✅\s*Live/);
+      expect(status).toMatch(/research-only|fail-closed|quarantine/i);
     });
   });
 

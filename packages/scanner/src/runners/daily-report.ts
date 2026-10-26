@@ -109,7 +109,7 @@ async function main() {
   lines.push('| 12 | Gold Arb (PAXG/XAUT) | gold_arb | ✅ Live |');
   lines.push('| 13 | Equity Perp Cross-Venue | equity_perp_cross_venue | ✅ Live |');
   lines.push('| 14 | LST Yield Comparison | lst_yield_comparison | ✅ Live |');
-  lines.push('| 15 | PT-kHYPE Yield Arb | pt_khype_yield_arb | ✅ Live |');
+  lines.push('| 15 | PT-kHYPE Yield Arb | pt_khype_yield_arb | 🔬 Research-only (fail-closed, EM-STRAT-014-B2) |');
   lines.push('| 16 | PT Yield Arb (cross-LST) | pt_yield_arb | ✅ Live |');
   lines.push('| 17 | Euler HL Lending Arb | euler_lending_arb | ✅ Live |');
   lines.push('| 18 | HL Spot Basis | hl_spot_basis | ✅ Live |');

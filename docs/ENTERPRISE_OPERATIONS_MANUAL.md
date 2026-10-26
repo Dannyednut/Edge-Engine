@@ -48,7 +48,7 @@ The enterprise runs on a monorepo with 15 packages:
 12. GoldArbScanner — PAXG/XAUT gold arb
 13. EquityPerpCrossVenueScanner — HL ↔ Backpack equity perps
 14. LstYieldComparisonScanner — 32 Pendle LST markets
-15. PtKhypeYieldArbScanner — PT-kHYPE fixed vs floating
+15. PtKhypeYieldArbScanner — PT-kHYPE fixed vs floating (research-only / fail-closed, EM-STRAT-014-B2: no validated PT price source wired, all discovered instruments expired)
 16. PtYieldArbScanner — cross-LST PT yield arb
 17. EulerLendingArbScanner — Euler HL cross-vault rate spreads
 18. HlSpotBasisScanner — 329 HL spot pairs vs perp basis
