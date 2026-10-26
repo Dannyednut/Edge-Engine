@@ -56,6 +56,7 @@
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
+import { canonAsset, canonVenue, fundingJoinKey } from '../lib/venue-asset-aliases.js';
 
 export interface CexHlFundingArbParams {
   /** Min net APR (fraction; 0.05 = 5%) for the actionable threshold. */
@@ -176,10 +177,11 @@ export class CexHlFundingArbStrategy implements Strategy {
     asset: string,
     venue: string,
   ): Promise<number | null> {
-    const a = asset.toUpperCase();
-    const v = venue.toLowerCase();
+    // EM-STRAT-014-E11 item 4: canonicalize both sides before joining.
+    const a = canonAsset(asset);
+    const v = canonVenue(venue);
     const row = fundingRows.find(
-      r => (r.coin?.toUpperCase() === a) && (r.exchange?.toLowerCase() === v),
+      r => canonAsset(r.coin) === a && canonVenue(r.exchange) === v,
     );
     if (!row) return null;
     if (!isFinite(row.annualized)) return null;
@@ -230,12 +232,12 @@ export class CexHlFundingArbStrategy implements Strategy {
       console.warn('VOOI scan failed (continuing with Sharpe only):', err);
     }
 
-    // Build VOOI lookup by (asset, venue1, venue2)
+    // Build VOOI lookup by canonical (asset, venue1, venue2) — EM-STRAT-014-E11 item 4
     const vooiMap = new Map<string, VooiArbitragePair & { asset: string }>();
     for (const p of vooiPairs) {
-      const key1 = `${p.asset}|${p.long.exchange.toLowerCase()}|${p.short.exchange.toLowerCase()}`;
+      const key1 = fundingJoinKey(p.asset, p.long.exchange) + '|' + fundingJoinKey(p.asset, p.short.exchange);
       vooiMap.set(key1, p);
-      const key2 = `${p.asset}|${p.short.exchange.toLowerCase()}|${p.long.exchange.toLowerCase()}`;
+      const key2 = fundingJoinKey(p.asset, p.short.exchange) + '|' + fundingJoinKey(p.asset, p.long.exchange);
       vooiMap.set(key2, { ...p, long: p.short, short: p.long });
     }
 
@@ -244,19 +246,23 @@ export class CexHlFundingArbStrategy implements Strategy {
     //    from /funding/rates for both legs.
     const alerts: CexHlFundingAlert[] = [];
     for (const row of sharpeResp.data) {
-      const asset = (row.coin || row.asset || row.symbol || '').toUpperCase();
+      // EM-STRAT-014-E11 item 4: canonicalize asset + venue identity.
+      const asset = canonAsset(row.coin || row.asset || row.symbol || '');
       if (!asset) continue;
 
-      const longVenue = (row.longExchange || '').toLowerCase();
-      const shortVenue = (row.shortExchange || '').toLowerCase();
+      const longVenue = canonVenue(row.longExchange || '');
+      const shortVenue = canonVenue(row.shortExchange || '');
       if (!longVenue || !shortVenue) continue;
 
-      const hlOnLong  = longVenue  === this.params.hlVenueName.toLowerCase();
-      const hlOnShort = shortVenue === this.params.hlVenueName.toLowerCase();
+      const hlVenueCanon = canonVenue(this.params.hlVenueName);
+      const hlOnLong  = longVenue  === hlVenueCanon;
+      const hlOnShort = shortVenue === hlVenueCanon;
       if (!hlOnLong && !hlOnShort) continue;
 
       const cexVenue = hlOnLong ? shortVenue : longVenue;
-      if (!this.params.cexVenues.includes(cexVenue)) continue;
+      // EM-STRAT-014-E11 item 4: compare canonical venue against canonicalized cexVenues list.
+      const cexVenuesCanon = this.params.cexVenues.map(canonVenue);
+      if (!cexVenuesCanon.includes(cexVenue)) continue;
 
       // EM-STRAT-005 §2: BOTH legs are perpetuals. We want HL on the SHORT
       // side (shorts collect positive funding) and CEX on the LONG side
@@ -324,8 +330,8 @@ export class CexHlFundingArbStrategy implements Strategy {
       // actionable is ALWAYS false. This is the EM-STRAT-005 §2 non-actionable
       // fallback until venue-native corroboration is wired.
 
-      // ── Cross-validate with VOOI (price spread, not funding) ────────
-      const vooiKey = `${asset}|${longVenue}|${shortVenue}`;
+      // EM-STRAT-014-E11 item 4: cross-validate with VOOI using canonical join key.
+      const vooiKey = fundingJoinKey(asset, longVenue) + '|' + fundingJoinKey(asset, shortVenue);
       const vooiPair = vooiMap.get(vooiKey);
       let priceSpreadPct = 0;
       let confidence = 0.6;
