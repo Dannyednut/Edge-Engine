@@ -15,7 +15,6 @@
  *   - Pure profit for us, zero cost for developer
  */
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -23,15 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..');
 
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 const BUILDER_ADDRESS = process.env.AGENT_EVM_ADDRESS || '0x7cE80c805d0d1Ed80fEBf779385389b00a81381A';
 const BUILDER_FEE_BPS = 10; // 0.1% (max allowed)
@@ -71,6 +62,7 @@ function generateSdkCode(): string {
 // No extra cost to developer — HL pays us the rebate
 
 import { getBuilderField } from '@edge/builder-sdk';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 // When placing HL orders, include the builder field:
 const order = {
