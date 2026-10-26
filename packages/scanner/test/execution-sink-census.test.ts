@@ -323,17 +323,20 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   { file: 'packages/executor/src/index.ts', sink: 'createWalletClient', expectedCount: 1, guardScope: 'evm-executor:construct-signer', guardMode: 'direct', rationale: 'signer construction behind the construct-signer guard; the raw client lives in #walletClient (hard-private, Phase-0.5 work order A)' },
   { file: 'packages/executor/src/index.ts', sink: 'privateKeyToAccount', expectedCount: 1, guardScope: 'evm-executor:construct-signer', guardMode: 'direct', rationale: 'key-derived account lives in #account (hard-private, Phase-0.5 work order A)' },
 
-  // ── CexExecutor — CCXT order/withdrawal sinks (EM-STRAT-014-B1) ──────
+  // ── CexExecutor — CCXT order/cancel/withdrawal sinks (EM-STRAT-014-B1 + R1) ──
   // The raw CCXT Exchange lives in hard-private #exchange; marketOrder and
   // limitOrder each assert 'cex-executor:place-order' immediately before
-  // their createOrder call; withdraw requires the SEPARATE withdraw scope
-  // (order authority never implies withdrawal authority); cancelOrder is
-  // safety-positive. The class has zero in-repo callers and is deliberately
-  // NOT re-exported from the package index — contained at the sinks because
-  // the direct-file import path remains open.
+  // their createOrder call; cancelOrder asserts the SEPARATE
+  // 'cex-executor:cancel-order' scope (EM-STRAT-014-B1-R1 — a generic cancel
+  // is NOT universally safety-positive: it can cancel a protective stop,
+  // reduce-only exit, or hedge leg); withdraw requires the SEPARATE withdraw
+  // scope. The three CEX scopes are INDEPENDENT — no one authorizes another.
+  // The class has zero in-repo callers and is deliberately NOT re-exported
+  // from the package index — contained at the sinks because the direct-file
+  // import path remains open.
   { file: 'packages/executor/src/cex-executor.ts', sink: 'createOrder', expectedCount: 2, guardScope: 'cex-executor:place-order', guardMode: 'direct', rationale: 'marketOrder + limitOrder — each asserts the place-order scope per call, immediately before the CCXT submission; the Exchange instance is hard-private #exchange (EM-STRAT-014-B1)' },
+  { file: 'packages/executor/src/cex-executor.ts', sink: 'cancelOrder', expectedCount: 1, guardScope: 'cex-executor:cancel-order', guardMode: 'direct', rationale: 'EM-STRAT-014-B1-R1: generic cancel is NOT universally safety-positive — it can cancel a protective stop, reduce-only exit, hedge leg, or other risk-reducing order. Without inspecting the order role, cancellation is gated like any submission sink. The cex-executor:cancel-order scope is INDEPENDENT from place-order and withdraw; per-call re-check.' },
   { file: 'packages/executor/src/cex-executor.ts', sink: 'withdraw', expectedCount: 1, guardScope: 'cex-executor:withdraw', guardMode: 'direct', rationale: 'withdrawal requires the SEPARATE cex-executor:withdraw scope — cex-executor:place-order never authorizes it and vice versa (per-call re-check, EM-STRAT-014-B1)' },
-  { file: 'packages/executor/src/cex-executor.ts', sink: 'cancelOrder', expectedCount: 1, guardScope: null, guardMode: 'safety-positive', rationale: 'SAFETY-POSITIVE (EM-STRAT-014-B1): cancellation removes a resting order and cannot open or increase exposure; emergency unwind must remain available without execution authorization (same rationale as VooiClient.cancelArbitrageOrder). ACCEPTED TRADEOFF: cancelling one leg of a paired position can leave the other leg unhedged — the cancel itself only removes future fills on this leg; residual exposure must be flattened manually' },
 
   // ── EVM runner scripts — raw sendTransaction sinks, hard-private clients ─
   { file: 'packages/scanner/src/runners/khype-carry-executor.ts', sink: 'sendTransaction', expectedCount: 1, guardScope: 'evm-executor:send-transaction', guardMode: 'direct', rationale: 'single live call inside sendTx; guard re-checks per call; walletClient is #walletClient (hard-private, Phase-0.5)' },
@@ -495,16 +498,20 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () 
   // EM-STRAT-012-R2 adds entrypoint:contracts-deploy (work order A) → 27.
   // EM-STRAT-014-B1 adds cex-executor:place-order + cex-executor:withdraw
   // (CCXT order/withdrawal containment) → 29.
+  // EM-STRAT-014-B1-R1 adds cex-executor:cancel-order (generic cancel is
+  // NOT universally safety-positive — can cancel a protective stop / hedge
+  // leg / reduce-only exit; gated like any submission sink) → 30.
 
-  it('EXECUTION_SCOPES length matches the documented EM-STRAT-014-B1 count (29)', () => {
-    expect(EXECUTION_SCOPES.length).toBe(29);
+  it('EXECUTION_SCOPES length matches the documented EM-STRAT-014-B1-R1 count (30)', () => {
+    expect(EXECUTION_SCOPES.length).toBe(30);
   });
 
-  it('EXECUTION_SCOPES contains the Phase-0.5, R2 and EM-STRAT-014-B1 additions', () => {
+  it('EXECUTION_SCOPES contains the Phase-0.5, R2, EM-STRAT-014-B1 and R1 additions', () => {
     expect(EXECUTION_SCOPES).toContain('vooi:close-arbitrage-order');
     expect(EXECUTION_SCOPES).toContain('pumpapi-client:generate-wallet');
     expect(EXECUTION_SCOPES).toContain('entrypoint:contracts-deploy');
     expect(EXECUTION_SCOPES).toContain('cex-executor:place-order');
+    expect(EXECUTION_SCOPES).toContain('cex-executor:cancel-order');
     expect(EXECUTION_SCOPES).toContain('cex-executor:withdraw');
   });
 
@@ -689,16 +696,21 @@ describe('EM-STRAT-012 submission-sink census — Phase-0.5 + R2 perimeter', () 
     expect(eulerSrc).toContain('#walletClient');
     const adapterSrc = readFileSync(resolve(REPO_ROOT, 'packages/data-sources/src/index.ts'), 'utf8');
     expect(adapterSrc).toContain('#walletClient');
-    // EM-STRAT-014-B1: the CCXT exchange instance is hard-private too, and
-    // both narrow CexExecutor scopes are asserted at their sinks.
+    // EM-STRAT-014-B1 + R1: the CCXT exchange instance is hard-private, and
+    // all three narrow CexExecutor scopes (place-order, cancel-order,
+    // withdraw) are asserted at their sinks. cancelOrder is NO LONGER
+    // safety-positive (R1: a generic cancel can cancel a protective stop /
+    // hedge leg / reduce-only exit), so the file must NOT carry a
+    // SAFETY-POSITIVE marker.
     const cexSrc = readFileSync(resolve(REPO_ROOT, 'packages/executor/src/cex-executor.ts'), 'utf8');
     expect(cexSrc).toContain('#exchange');
     // The dangerous form is a re-exposed DECLARATION (`readonly exchange: …`);
     // prose mentions of the old design must not trip this assertion.
     expect(cexSrc).not.toMatch(/readonly exchange\s*:/);
     expect(cexSrc).toContain("assertExecutionAuthorized('cex-executor:place-order')");
+    expect(cexSrc).toContain("assertExecutionAuthorized('cex-executor:cancel-order')");
     expect(cexSrc).toContain("assertExecutionAuthorized('cex-executor:withdraw')");
-    expect(cexSrc).toContain('SAFETY-POSITIVE');
+    expect(cexSrc).not.toContain('SAFETY-POSITIVE');
     // The transport helpers are hard-private (work order C).
     const vooiSrc = readFileSync(resolve(REPO_ROOT, 'packages/vooi-client/src/index.ts'), 'utf8');
     expect(vooiSrc).toContain('async #request');

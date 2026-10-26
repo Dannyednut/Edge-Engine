@@ -343,17 +343,150 @@ describe('CexExecutor — execution containment (EM-STRAT-014-B1)', () => {
     expect(calls.cancelOrder).toBe(0);
   });
 
-  it('A7b: cancelOrder is SAFETY-POSITIVE — it stays available without authorization, reaches its sink, and can NEVER place orders or move funds', async () => {
+  it('A7b: cancelOrder is NO LONGER safety-positive (EM-STRAT-014-B1-R1) — without authorization it fails closed and records no mock submission', async () => {
+    // R1 reversal: cancelOrder now requires 'cex-executor:cancel-order'.
+    // Without authorization, the guard denies BEFORE the CCXT sink.
     delete process.env[EXECUTION_AUTH_ENV_VAR];
     const ex = new CexExecutor(OPTS);
-    const r = await ex.cancelOrder('order-123', 'BTC/USDT');
-    expect(r).toBeDefined();
-    expect(calls.cancelOrder).toBe(1);
-    expect(calls.lastCancelArgs?.[0]).toBe('order-123');
-    expect(calls.lastCancelArgs?.[1]).toBe('BTC/USDT');
-    // Cancellation cannot create exposure: no order, no withdrawal.
+    const err = await ex.cancelOrder('order-123', 'BTC/USDT').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecutionNotAuthorizedError);
+    expect((err as ExecutionNotAuthorizedError).scope).toBe('cex-executor:cancel-order');
+    // No mock submission call recorded on denial.
+    expect(calls.cancelOrder).toBe(0);
+    expect(calls.lastCancelArgs).toBeNull();
+    // And no other sink was reached.
     expect(calls.createOrder).toBe(0);
     expect(calls.withdraw).toBe(0);
+  });
+
+  // ── Acceptance 7c: EM-STRAT-014-B1-R1 cancel-order scope isolation ────
+  //
+  // The three CEX scopes (place-order, cancel-order, withdraw) are
+  // INDEPENDENT. No one scope authorizes another action. The seven cases
+  // below mirror the R1 work-order acceptance criteria (a)–(g):
+  //   (a) no authorization denies cancellation;
+  //   (b) cancel scope permits cancellation only;
+  //   (c) place-order scope cannot cancel;
+  //   (d) cancel scope cannot place market/limit orders;
+  //   (e) cancel scope cannot withdraw;
+  //   (f) withdrawal scope cannot cancel;
+  //   (g) every denied path records no mock submission call.
+
+  it('A7c-a (R1): no authorization denies cancellation and records no mock cancel call', async () => {
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const ex = new CexExecutor(OPTS);
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.cancelOrder).toBe(0);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.withdraw).toBe(0);
+  });
+
+  it('A7c-b (R1): cancel scope permits cancellation only — cancel reaches its sink, place and withdraw do not', async () => {
+    grant(['cex-executor:cancel-order']);
+    const ex = new CexExecutor(OPTS);
+    const r = await ex.cancelOrder('order-456', 'ETH/USDT');
+    expect(r).toBeDefined();
+    expect(calls.cancelOrder).toBe(1);
+    expect(calls.lastCancelArgs?.[0]).toBe('order-456');
+    expect(calls.lastCancelArgs?.[1]).toBe('ETH/USDT');
+    // Cancel scope does NOT authorize placement or withdrawal.
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.limitOrder(LIMIT_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.withdraw).toBe(0);
+    // Cancel sink called exactly once (the single authorized cancel).
+    expect(calls.cancelOrder).toBe(1);
+  });
+
+  it('A7c-c (R1): place-order scope cannot cancel — cancel fails closed, no mock cancel call', async () => {
+    grant(['cex-executor:place-order']);
+    const ex = new CexExecutor(OPTS);
+    // place-order DOES authorize placement (positive control — proves the
+    // descriptor is valid and only the scope mismatch denies cancel).
+    const placed = await ex.marketOrder(MARKET_ORDER);
+    expect(placed).toBeDefined();
+    expect(calls.createOrder).toBe(1);
+    // …but place-order does NOT authorize cancel.
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.cancelOrder).toBe(0);
+    // Withdraw also denied (independent scope).
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.withdraw).toBe(0);
+  });
+
+  it('A7c-d (R1): cancel scope cannot place market or limit orders — both fail closed, no mock createOrder call', async () => {
+    grant(['cex-executor:cancel-order']);
+    const ex = new CexExecutor(OPTS);
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.limitOrder(LIMIT_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.lastCreateOrderArgs).toBeNull();
+    // Cancel itself remains authorized (positive control).
+    await ex.cancelOrder('order-1', 'BTC/USDT');
+    expect(calls.cancelOrder).toBe(1);
+  });
+
+  it('A7c-e (R1): cancel scope cannot withdraw — withdraw fails closed, no mock withdraw call', async () => {
+    grant(['cex-executor:cancel-order']);
+    const ex = new CexExecutor(OPTS);
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.withdraw).toBe(0);
+    expect(calls.lastWithdrawArgs).toBeNull();
+    // Cancel itself remains authorized (positive control).
+    await ex.cancelOrder('order-1', 'BTC/USDT');
+    expect(calls.cancelOrder).toBe(1);
+  });
+
+  it('A7c-f (R1): withdrawal scope cannot cancel — cancel fails closed, no mock cancel call', async () => {
+    grant(['cex-executor:withdraw']);
+    const ex = new CexExecutor(OPTS);
+    // Withdraw DOES authorize withdrawal (positive control — descriptor valid).
+    const w = await ex.withdraw('USDT', 1, '0xaddr');
+    expect(w).toBeDefined();
+    expect(calls.withdraw).toBe(1);
+    // …but withdraw does NOT authorize cancel.
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.cancelOrder).toBe(0);
+    // Place also denied (independent scope).
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+  });
+
+  it('A7c-g (R1): every denied path records no mock submission call — aggregate denial hygiene', async () => {
+    // No authorization at all: every sink denies, every counter stays 0.
+    delete process.env[EXECUTION_AUTH_ENV_VAR];
+    const ex = new CexExecutor(OPTS);
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.limitOrder(LIMIT_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.cancelOrder).toBe(0);
+    expect(calls.withdraw).toBe(0);
+    expect(calls.lastCreateOrderArgs).toBeNull();
+    expect(calls.lastCancelArgs).toBeNull();
+    expect(calls.lastWithdrawArgs).toBeNull();
+
+    // Wrong-scope descriptor: each sink denies for the RIGHT reason (scope
+    // not in authorized set), and still no mock submission is recorded.
+    grant(['cex-executor:place-order']);
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.cancelOrder).toBe(0);
+    expect(calls.withdraw).toBe(0);
+
+    grant(['cex-executor:cancel-order']);
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.withdraw('USDT', 1, '0xaddr')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.withdraw).toBe(0);
+
+    grant(['cex-executor:withdraw']);
+    await expect(ex.marketOrder(MARKET_ORDER)).rejects.toThrow(ExecutionNotAuthorizedError);
+    await expect(ex.cancelOrder('order-1', 'BTC/USDT')).rejects.toThrow(ExecutionNotAuthorizedError);
+    expect(calls.createOrder).toBe(0);
+    expect(calls.cancelOrder).toBe(0);
   });
 
   // ── Acceptance 8: census/regression controls ──────────────────────────

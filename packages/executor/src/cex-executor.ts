@@ -39,8 +39,15 @@
  *   3. withdraw asserts the SEPARATE 'cex-executor:withdraw' scope, re-checked
  *      per call. Order authority NEVER implies withdrawal authority and vice
  *      versa; there is deliberately no broad shared scope for both.
- *   4. cancelOrder is deliberately UNGATED — SAFETY-POSITIVE (see its JSDoc
- *      for the documented rationale and accepted tradeoff).
+ *   4. cancelOrder asserts the SEPARATE 'cex-executor:cancel-order' scope
+ *      (EM-STRAT-014-B1-R1), re-checked per call. A generic cancel is NOT
+ *      universally safety-positive: it can cancel an opening order, but it
+ *      can also cancel a protective stop, a reduce-only exit, a hedge leg,
+ *      or another risk-reducing order. Without inspecting and proving the
+ *      order's role, cancellation is not universally risk-reducing, so it
+ *      is gated like any other submission sink. The three CEX scopes
+ *      (place-order, cancel-order, withdraw) are INDEPENDENT — no one scope
+ *      authorizes another action.
  *   5. getTicker/getOrderBook/getBalance/getPositions/getDepositAddress/
  *      healthCheck are read-only (fetch-style market and account data) and
  *      remain available WITHOUT execution authorization — the legitimate
@@ -195,17 +202,24 @@ export class CexExecutor {
   /**
    * Cancel an order.
    *
-   * SAFETY-POSITIVE (EM-STRAT-014-B1) — deliberately ungated. Cancelling a
-   * resting order cannot open, increase, or move exposure; it only prevents
-   * further fills. Emergency unwind must remain available without execution
-   * authorization (same rationale as VooiClient.cancelArbitrageOrder in the
-   * sink census). ACCEPTED TRADEOFF: cancelling one leg of a paired
-   * position can leave the other leg unhedged — the cancel itself only
-   * removes future fill risk on this leg; residual exposure must be
-   * flattened manually by the operator. Tests prove cancellation can never
-   * place orders or move funds.
+   * Fail-closed (EM-STRAT-014-B1-R1): requires the SEPARATE
+   * 'cex-executor:cancel-order' scope on every call, asserted immediately
+   * before the CCXT cancelOrder submission.
+   *
+   * A generic cancel is NOT universally safety-positive. It can cancel an
+   * opening order (risk-reducing), but it can also cancel a protective stop,
+   * a reduce-only exit, a hedge leg, or another order intended to reduce
+   * risk (risk-INCREASING). Without inspecting and proving the order's role
+   * at the call site, cancellation is not universally risk-reducing, so it
+   * is gated like any other submission sink rather than left ungated.
+   *
+   * Scope independence: 'cex-executor:cancel-order' does NOT authorize
+   * placement ('cex-executor:place-order') or withdrawal
+   * ('cex-executor:withdraw'), and neither of those authorizes cancellation.
+   * All three CEX scopes are independently required and per-call re-checked.
    */
   async cancelOrder(orderId: string, symbol: string): Promise<unknown> {
+    assertExecutionAuthorized('cex-executor:cancel-order');
     return this.#exchange.cancelOrder(orderId, symbol);
   }
 
