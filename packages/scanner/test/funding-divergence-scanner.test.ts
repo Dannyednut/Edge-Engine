@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { FundingDivergenceScanner } from '../src/strategies/funding-divergence-scanner.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { FundingDivergenceScanner, formatFundingDegradation } from '../src/strategies/funding-divergence-scanner.js';
 import './_setup/offline-mocks.js';
 
 const PARAMS = {
@@ -200,5 +202,106 @@ describe('FundingDivergenceScanner — EM-STRAT-014-E11 items 4 + 5', () => {
     await scanner.scanWithDegradation();
     expect(capturedUrl).toContain('orderBy=fundingSpread1h');
     expect(capturedUrl).not.toContain('orderBy=priceSpread');
+  });
+});
+
+// ─── EM-STRAT-014-E11-Cluster2-R1 — VOOI OI from openInterest × price ───
+
+describe('Cluster2-R1: VOOI OI parsed from actual response fields (openInterest × price)', () => {
+  function makeVooiResponse(legOverrides: Record<string, unknown>): any {
+    const leg = {
+      exchange: 'hyperliquid',
+      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      ...legOverrides,
+    };
+    return {
+      items: [
+        {
+          asset: 'BTC',
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+        },
+      ],
+    };
+  }
+
+  it('openInterest=100, price=50000 → OI $5,000,000 → EXTREME_FUNDING reachable', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ openInterest: '100', price: '50000' }) }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.oi).toBe(5_000_000);
+    // +175.2%/yr funding → SHORT_HARVEST: the high-funding venue is the short leg.
+    expect(extreme!.direction).toBe('SHORT_HARVEST');
+    expect(extreme!.shortVenue).toBe('hyperliquid');
+  });
+
+  it('numeric openInterest/price fields also parse (schema-strict, not string-only)', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ openInterest: 200, price: 25000 }) }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.oi).toBe(5_000_000);
+  });
+
+  it('missing openInterest → oi null → NO extreme alert (row still usable for DIVERGENCE, per item-5 design)', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ price: '50000' }) }), now: () => FIXED_NOW });
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    expect(alerts.find(a => a.type === 'EXTREME_FUNDING')).toBeUndefined();
+    // Not a skip: the row still carries a valid funding rate for divergence
+    // detection — only EXTREME_FUNDING excludes null-OI rows.
+    expect(degradation.vooiSkipped).toBe(0);
+  });
+
+  it('NaN openInterest / zero price / negative fields → oi null → NO extreme alert', async () => {
+    for (const bad of [{ openInterest: 'not-a-number', price: '50000' }, { openInterest: '100', price: '0' }, { openInterest: '-5', price: '50000' }, { openInterest: NaN, price: '50000' }]) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse(bad) }), now: () => FIXED_NOW });
+      const { alerts } = await scanner.scanWithDegradation();
+      expect(alerts.find(a => a.type === 'EXTREME_FUNDING'), `case ${JSON.stringify(bad)}`).toBeUndefined();
+    }
+  });
+
+  it('precomputed oiUsd field alone does NOT satisfy OI (not part of provider schema)', async () => {
+    // A payload carrying only a dead `oiUsd` field (no openInterest/price)
+    // must NOT produce a non-null OI.
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ oiUsd: 9_999_999 }) }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    expect(alerts.find(a => a.type === 'EXTREME_FUNDING')).toBeUndefined();
+  });
+});
+
+// ─── EM-STRAT-014-E11-Cluster2-R1 — production-visible degradation ──────
+
+describe('Cluster2-R1: degradation reaches production observability', () => {
+  it('formatFundingDegradation: ok form lists counts without failure flags', () => {
+    const s = formatFundingDegradation({ hlFailed: false, vooiFailed: false, hlSkipped: 2, vooiSkipped: 3 });
+    expect(s).toContain('[funding_divergence] ok');
+    expect(s).toContain('hlSkipped=2');
+    expect(s).toContain('vooiSkipped=3');
+    expect(s).not.toContain('DEGRADED');
+  });
+
+  it('formatFundingDegradation: failed APIs → explicit DEGRADED flags', () => {
+    const s = formatFundingDegradation({ hlFailed: true, vooiFailed: true, hlSkipped: 0, vooiSkipped: 0 });
+    expect(s).toContain('DEGRADED');
+    expect(s).toContain('HL_FETCH_FAILED');
+    expect(s).toContain('VOOI_FETCH_FAILED');
+  });
+
+  it('empty VOOI ({items:[]}) → vooiFailed flag → formatter renders DEGRADED (never confusable with "no opportunities")', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: { items: [] } }), now: () => FIXED_NOW });
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    expect(alerts).toEqual([]);
+    expect(degradation.vooiFailed).toBe(true);
+    expect(formatFundingDegradation(degradation)).toContain('VOOI_FETCH_FAILED');
+  });
+
+  it('all-runner.ts wiring (static source): calls scanWithDegradation and logs formatFundingDegradation on every scan', () => {
+    // Static-source assertion mirroring the execution-containment pattern:
+    // the production runner must consume the degradation API (not scan(),
+    // which discards it) and must log the formatted marker.
+    const src = readFileSync(resolve(__dirname, '..', 'src', 'runners', 'all-runner.ts'), 'utf8');
+    expect(src).toMatch(/fundingDivergence\.scanWithDegradation\(\)/);
+    expect(src).not.toMatch(/fundingDivergence\.scan\(\)/);
+    expect(src).toContain('formatFundingDegradation(fundingDivDegradation)');
   });
 });

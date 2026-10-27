@@ -43,7 +43,7 @@ import { RwaTreasuryScanner, type RwaYieldAlert } from '../strategies/rwa-treasu
 import { StablecoinDepegScanner, type DepegAlert } from '../strategies/stablecoin-depeg-scanner.js';
 import { LiquidationBackrunScanner, type LiquidationAlert } from '../strategies/liquidation-backrun-scanner.js';
 import { OrderbookImbalanceScanner, type OrderbookAlert } from '../strategies/orderbook-imbalance-scanner.js';
-import { FundingDivergenceScanner, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
+import { FundingDivergenceScanner, formatFundingDegradation, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
 import { AirdropFarmingScanner, type AirdropAlert } from '../strategies/airdrop-farming-scanner.js';
 import { LeverageLoopScanner, type LeverageLoopAlert } from '../strategies/leverage-loop-scanner.js';
 import { WhaleSignalScanner, type WhaleSignalAlert } from '../strategies/whale-signal-scanner.js';
@@ -191,6 +191,10 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
+      // EM-STRAT-014-E11-Cluster2-R1: funding-divergence degradation captured
+      // from scanWithDegradation() and logged below on every scan.
+      let fundingDivDegradation: import('../strategies/funding-divergence-scanner.js').FundingDegradation | null = null;
+
       const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts, defiLlamaAlerts, rwaAlerts, depegAlerts, liquidationAlerts, orderbookAlerts, fundingDivAlerts, airdropAlerts, leverageAlerts, whaleAlerts, bridgeAlerts, crossDexAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
@@ -215,7 +219,14 @@ async function main() {
         stablecoinDepeg.scan().catch(e => { console.warn(`depeg failed: ${e.message}`); return [] as DepegAlert[]; }),
         liquidationBackrun.scan().catch(e => { console.warn(`liq failed: ${e.message}`); return [] as LiquidationAlert[]; }),
         orderbookImbalance.scan().catch(e => { console.warn(`orderbook failed: ${e.message}`); return [] as OrderbookAlert[]; }),
-        fundingDivergence.scan().catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
+        // EM-STRAT-014-E11-Cluster2-R1: the runner uses scanWithDegradation()
+        // (not the Strategy-interface scan(), which discards degradation) and
+        // logs the summary below on EVERY scan — including empty results — so
+        // partial API failure / skipped rows are production-visible and never
+        // confusable with "no opportunities".
+        fundingDivergence.scanWithDegradation()
+          .then(r => { fundingDivDegradation = r.degradation; return r.alerts; })
+          .catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
         airdropFarming.scan().catch(e => { console.warn(`airdrop failed: ${e.message}`); return [] as AirdropAlert[]; }),
         leverageLoop.scan().catch(e => { console.warn(`lev_loop failed: ${e.message}`); return [] as LeverageLoopAlert[]; }),
         whaleSignal.scan().catch(e => { console.warn(`whale failed: ${e.message}`); return [] as WhaleSignalAlert[]; }),
@@ -225,6 +236,12 @@ async function main() {
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
       console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} dfly=${defiLlamaAlerts.length} rwa=${rwaAlerts.length} depeg=${depegAlerts.length} liq=${liquidationAlerts.length} ob=${orderbookAlerts.length} fundiv=${fundingDivAlerts.length} airdrop=${airdropAlerts.length} levloop=${leverageAlerts.length} whale=${whaleAlerts.length} bridge=${bridgeAlerts.length} crossdex=${crossDexAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      // EM-STRAT-014-E11-Cluster2-R1: production-visible degradation marker —
+      // logged on EVERY scan (even when alerts are empty) so partial API
+      // failure / skipped rows are never confusable with "no opportunities".
+      if (fundingDivDegradation) {
+        console.log(formatFundingDegradation(fundingDivDegradation));
+      }
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {

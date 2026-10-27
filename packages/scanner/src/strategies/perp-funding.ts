@@ -14,6 +14,7 @@
 import type { Strategy, DataPoint, TradeOrder, RiskParams } from '@edge/types';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
+import { canonAsset, canonVenue } from '../lib/venue-asset-aliases.js';
 
 export interface PerpFundingParams {
   minSpreadApr: number;          // 0.08 = 8% APR
@@ -125,14 +126,20 @@ export class PerpFundingStrategy implements Strategy {
       console.warn('VOOI scan failed (continuing with Sharpe only):', err);
     }
 
-    // 3. Build VOOI lookup by (asset, longExchange, shortExchange)
+    // 3. Build VOOI lookup by (asset, longExchange, shortExchange).
+    // EM-STRAT-014-E11-Cluster2-R1: BOTH sides of the perp_funding join are
+    // normalized through the reviewed table-driven canonicalizer
+    // (lib/venue-asset-aliases.ts) — same canonical form on insertion and
+    // lookup. Case differences and approved aliases now match; UNMAPPED
+    // aliases still never match by guesswork (canon* passes unknown
+    // identities through unchanged; no substring matching anywhere).
+    const vooiJoinKey = (asset: string, longVenue: string, shortVenue: string): string =>
+      `${canonAsset(asset)}|${canonVenue(longVenue)}|${canonVenue(shortVenue)}`;
     const vooiMap = new Map<string, VooiArbitragePair>();
     for (const p of vooiPairs) {
-      const key = `${p.asset}|${p.long.exchange}|${p.short.exchange}`;
-      vooiMap.set(key, p);
+      vooiMap.set(vooiJoinKey(p.asset, p.long.exchange, p.short.exchange), p);
       // Also store reverse direction
-      const revKey = `${p.asset}|${p.short.exchange}|${p.long.exchange}`;
-      vooiMap.set(revKey, { ...p, long: p.short, short: p.long });
+      vooiMap.set(vooiJoinKey(p.asset, p.short.exchange, p.long.exchange), { ...p, long: p.short, short: p.long });
     }
 
     // 4. For each Sharpe row, try to find a matching VOOI pair
@@ -153,9 +160,8 @@ export class PerpFundingStrategy implements Strategy {
       const vooiShortOk = this.params.vooiVenueSet.includes(shortVenue.toLowerCase());
       const vooiExecutable = vooiLongOk && vooiShortOk;
 
-      // Cross-validate with VOOI
-      const vooiKey = `${asset}|${longVenue}|${shortVenue}`;
-      const vooiPair = vooiMap.get(vooiKey);
+      // Cross-validate with VOOI (canonical join — see vooiJoinKey above)
+      const vooiPair = vooiMap.get(vooiJoinKey(asset, longVenue, shortVenue));
 
       let confidence = 0.5;
       let priceSpreadPct = 0;
@@ -204,9 +210,11 @@ export class PerpFundingStrategy implements Strategy {
 
     // Also surface VOOI-only opportunities (not in Sharpe top results)
     if (vooiPairs.length > 0) {
-      const sharpeAssets = new Set(sharpeResp.data.map(r => (r.coin || r.asset || r.symbol || '').toUpperCase()));
+      // Canonical asset identity for the Sharpe↔VOOI membership check too
+      // (same table-driven normalization; unlisted aliases still never match).
+      const sharpeAssets = new Set(sharpeResp.data.map(r => canonAsset(r.coin || r.asset || r.symbol || '')));
       for (const p of vooiPairs) {
-        if (!sharpeAssets.has(p.asset.toUpperCase())) {
+        if (!sharpeAssets.has(canonAsset(p.asset))) {
           // VOOI fundingSpread1h is decimal; annualise: 24 × 365 = 8760
           const fundingSpread1h = p.fundingSpread1h;
           const spreadApr = fundingSpread1h * 24 * 365 * 100;

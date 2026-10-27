@@ -73,6 +73,30 @@ export interface FundingDivergenceScanResult {
   degradation: FundingDegradation;
 }
 
+/**
+ * EM-STRAT-014-E11-Cluster2-R1: production-visible degradation summary.
+ *
+ * The runner MUST log this on every scan — including when alerts are empty —
+ * so that "APIs failed / rows were skipped" is never confusable with
+ * "no opportunities". Pure function, exported for offline deterministic
+ * testing of exactly what production logs.
+ */
+export function formatFundingDegradation(d: FundingDegradation): string {
+  const flags: string[] = [];
+  if (d.hlFailed) flags.push('HL_FETCH_FAILED');
+  if (d.vooiFailed) flags.push('VOOI_FETCH_FAILED');
+  const parts = [
+    `hlFailed=${d.hlFailed}`,
+    `vooiFailed=${d.vooiFailed}`,
+    `hlSkipped=${d.hlSkipped}`,
+    `vooiSkipped=${d.vooiSkipped}`,
+  ];
+  if (flags.length > 0) {
+    return `[funding_divergence] DEGRADED ${flags.join(',')} | ${parts.join(' ')}`;
+  }
+  return `[funding_divergence] ok | ${parts.join(' ')}`;
+}
+
 export interface FundingDivergenceDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -182,6 +206,22 @@ export class FundingDivergenceScanner implements Strategy {
     }
 
     if (vooiData?.items) {
+      // EM-STRAT-014-E11-Cluster2-R1: OI is derived from the ACTUAL VOOI
+      // response fields — `openInterest × price` (both provider fields per
+      // the VooiArbitragePair schema) — with strict finite-positive
+      // validation on each input and the product. Absent/invalid fields →
+      // null (excluded from EXTREME_FUNDING downstream). A precomputed
+      // `oiUsd` field is NOT part of the provider schema and is not
+      // consulted.
+      const parseVooiOiUsd = (leg: { openInterest?: unknown; price?: unknown }): number | null => {
+        const toNum = (v: unknown): number =>
+          typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? parseFloat(v) : NaN;
+        const oi = toNum(leg.openInterest);
+        const px = toNum(leg.price);
+        if (!Number.isFinite(oi) || !Number.isFinite(px) || oi <= 0 || px <= 0) return null;
+        const product = oi * px;
+        return Number.isFinite(product) && product > 0 ? product : null;
+      };
       for (const item of vooiData.items) {
         // Item 4: canonicalize asset identity
         const canonA = canonAsset(item.asset || '');
@@ -194,9 +234,8 @@ export class FundingDivergenceScanner implements Strategy {
             const longFunding = fr * 24 * 365 * 100;
             if (Math.abs(longFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
-              // Item 5: VOOI payload may carry OI fields; use them or null
-              const vooiOi = (typeof p.long.oiUsd === 'number' && isFinite(p.long.oiUsd) && p.long.oiUsd > 0)
-                ? p.long.oiUsd : null;
+              // Cluster2-R1: OI = openInterest × price (strict); null if invalid.
+              const vooiOi = parseVooiOiUsd(p.long);
               fundingMap[canonA].push({ venue: canonVenue(p.long.exchange), fundingAnnual: longFunding, oi: vooiOi });
             }
           }
@@ -206,8 +245,8 @@ export class FundingDivergenceScanner implements Strategy {
             const shortFunding = fr * 24 * 365 * 100;
             if (Math.abs(shortFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
-              const vooiOi = (typeof p.short.oiUsd === 'number' && isFinite(p.short.oiUsd) && p.short.oiUsd > 0)
-                ? p.short.oiUsd : null;
+              // Cluster2-R1: OI = openInterest × price (strict); null if invalid.
+              const vooiOi = parseVooiOiUsd(p.short);
               fundingMap[canonA].push({ venue: canonVenue(p.short.exchange), fundingAnnual: shortFunding, oi: vooiOi });
             }
           }
