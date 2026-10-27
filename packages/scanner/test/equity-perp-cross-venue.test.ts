@@ -11,7 +11,9 @@
  * Offline: injected fetchImpl + mock BackpackClient. $0.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { EquityPerpCrossVenueScanner } from '../src/strategies/equity-perp-cross-venue.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { EquityPerpCrossVenueScanner, formatEquityPerpDegradation } from '../src/strategies/equity-perp-cross-venue.js';
 import './_setup/offline-mocks.js';
 
 const PARAMS = {
@@ -90,17 +92,22 @@ describe('EquityPerpCrossVenueScanner — EM-STRAT-014-E11 item 6', () => {
     expect(calls[1].body.dex).toBe(multiDexParams.dexScopes[1]);
   });
 
-  it('T6c: empty dexScopes → unscoped query (legacy, no dex field)', async () => {
+  it('T6c (Cluster3-R1 REWRITTEN): empty dexScopes → FAIL CLOSED — zero HL queries, degradation reason hip3_scope_roster_unverified', async () => {
     const noDexParams = { minSpreadPct: 0.5, maxSizeUsd: 2000 };
     const ff = fakeFetch({ hl: makeHlResponse([]) });
     const scanner = new EquityPerpCrossVenueScanner(noDexParams, {
       fetchImpl: ff,
       backpackClient: mockBackpackClient({}),
     });
-    await scanner.scan();
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    // No HL query may be issued at all — the legacy unscoped fallback is gone.
     const calls = (ff as any).__calls as { body: any }[];
-    expect(calls.length).toBe(1);
-    expect(calls[0].body.dex).toBeUndefined();
+    expect(calls.length).toBe(0);
+    expect(alerts).toEqual([]);
+    expect(degradation.reason).toBe('hip3_scope_roster_unverified');
+    expect(degradation.issuedQueries).toBe(0);
+    // The Strategy-interface scan() still works (discards degradation).
+    expect(await scanner.scan()).toEqual([]);
   });
 
   // ── Item 6: exact symbol match (not substring) ──────────────────────
@@ -170,5 +177,129 @@ describe('EquityPerpCrossVenueScanner — EM-STRAT-014-E11 item 6', () => {
     });
     const alerts = await scanner.scan();
     expect(alerts).toEqual([]);
+  });
+});
+
+// ─── EM-STRAT-014-E11-Cluster3-R1 — fail-closed HIP-3 scoping ───────────
+
+describe('EquityPerpCrossVenueScanner — Cluster3-R1 fail-closed scoping', () => {
+  const SCOPES = ['0x' + 'a1'.repeat(20), '0x' + 'b2'.repeat(20)];
+
+  it('configured scopes are sent verbatim — one scoped query per deployer, dex field present', async () => {
+    const ff = fakeFetch({ hl: makeHlResponse([{ name: 'AAPL', markPx: '150.00' }]) });
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: SCOPES },
+      { fetchImpl: ff, backpackClient: mockBackpackClient({}) },
+    );
+    await scanner.scanWithDegradation();
+    const calls = (ff as any).__calls as { body: any }[];
+    expect(calls.length).toBe(2);
+    expect(calls[0].body).toEqual({ type: 'metaAndAssetCtxs', dex: SCOPES[0] });
+    expect(calls[1].body).toEqual({ type: 'metaAndAssetCtxs', dex: SCOPES[1] });
+  });
+
+  it('missing dexScopes field (undefined) → fail-closed, no query, roster-unverified reason', async () => {
+    const ff = fakeFetch({ hl: makeHlResponse([]) });
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000 } as any,
+      { fetchImpl: ff, backpackClient: mockBackpackClient({}) },
+    );
+    const { degradation } = await scanner.scanWithDegradation();
+    expect(((ff as any).__calls as unknown[]).length).toBe(0);
+    expect(degradation.reason).toBe('hip3_scope_roster_unverified');
+  });
+
+  it('format-invalid scopes are rejected fail-closed (never sent), counted, reason hip3_scope_invalid_format', async () => {
+    const ff = fakeFetch({ hl: makeHlResponse([]) });
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: ['not-an-address', '0x1234'] },
+      { fetchImpl: ff, backpackClient: mockBackpackClient({}) },
+    );
+    const { degradation } = await scanner.scanWithDegradation();
+    expect(((ff as any).__calls as unknown[]).length).toBe(0);
+    expect(degradation.reason).toBe('hip3_scope_invalid_format');
+    expect(degradation.failedScopes).toBe(2);
+    expect(degradation.issuedQueries).toBe(0);
+  });
+
+  it('exact-symbol matching excludes XNVDA2 / NVDAx variants inside scoped universes', async () => {
+    const ff = fakeFetch({ hl: makeHlResponse([
+      { name: 'NVDA', markPx: '500.00' },
+      { name: 'XNVDA2', markPx: '999.00' },
+      { name: 'NVDAx', markPx: '888.00' },
+      { name: 'MyNVDA', markPx: '777.00' },
+    ]) });
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: [SCOPES[0]] },
+      { fetchImpl: ff, backpackClient: mockBackpackClient({}) },
+    );
+    const { alerts } = await scanner.scanWithDegradation();
+    // Only exact 'NVDA' enters the price map; the variants cannot produce
+    // alerts (no Backpack prices configured here anyway) — prove via the
+    // scan result plus direct behavior: no crash, no variant-based alert.
+    expect(alerts).toEqual([]);
+    // Rerun with a Backpack NVDA price: the ONLY HL price available must be
+    // the exact 'NVDA' 500.00, so the spread is computed against 500.00.
+    const ff2 = fakeFetch({ hl: makeHlResponse([
+      { name: 'NVDA', markPx: '500.00' },
+      { name: 'NVDAx', markPx: '888.00' },
+    ]) });
+    const scanner2 = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: [SCOPES[0]] },
+      { fetchImpl: ff2, backpackClient: mockBackpackClient({ NVDA: '504.00' }) },
+    );
+    const r2 = await scanner2.scanWithDegradation();
+    expect(r2.alerts.length).toBe(1);
+    expect(r2.alerts[0].hlPrice).toBe(500.00); // exact match only
+    expect(r2.alerts[0].priceBasisMismatch).toBe(true);
+  });
+
+  it('missing scoped responses (non-ok) → visible degradation hip3_scoped_queries_failed', async () => {
+    const ff = fakeFetch({ hl: makeHlResponse([]), hlOk: false });
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: [SCOPES[0]] },
+      { fetchImpl: ff, backpackClient: mockBackpackClient({}) },
+    );
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    expect(alerts).toEqual([]);
+    expect(degradation.reason).toBe('hip3_scoped_queries_failed');
+    expect(degradation.failedScopes).toBe(1);
+    expect(degradation.issuedQueries).toBe(1);
+    expect(formatEquityPerpDegradation(degradation)).toContain('DEGRADED');
+  });
+
+  it('partial scoped failures → hip3_scoped_queries_partial; formatter ok-form has no DEGRADED', async () => {
+    let call = 0;
+    const fn = (async (_u: string | URL | Request, _i?: RequestInit) => {
+      call++;
+      const ok = call === 1; // first scope ok, second fails
+      return { ok, status: ok ? 200 : 500, json: async () => (ok ? makeHlResponse([]) : {}) } as any;
+    }) as unknown as typeof fetch;
+    const scanner = new EquityPerpCrossVenueScanner(
+      { minSpreadPct: 0.5, maxSizeUsd: 2000, dexScopes: SCOPES },
+      { fetchImpl: fn, backpackClient: mockBackpackClient({}) },
+    );
+    const { degradation } = await scanner.scanWithDegradation();
+    expect(degradation.reason).toBe('hip3_scoped_queries_partial');
+    expect(degradation.failedScopes).toBe(1);
+    expect(degradation.issuedQueries).toBe(2);
+
+    const okDeg = { reason: null, failedScopes: 0, issuedQueries: 2 };
+    expect(formatEquityPerpDegradation(okDeg)).not.toContain('DEGRADED');
+  });
+
+  it('all-runner.ts wiring (static source): scanWithDegradation + formatEquityPerpDegradation + info/monitoring presenter', () => {
+    const src = readFileSync(resolve(__dirname, '..', 'src', 'runners', 'all-runner.ts'), 'utf8');
+    expect(src).toMatch(/equityPerpCrossVenue\.scanWithDegradation\(\)/);
+    expect(src).not.toMatch(/equityPerpCrossVenue\.scan\(\)/);
+    expect(src).toContain('formatEquityPerpDegradation(equityPerpDegradation)');
+    // Monitoring-only presenter: severity 'info', explicit monitor title.
+    expect(src).toContain("severity: 'info',\n          strategyId: 'equity_perp_cross_venue'");
+    expect(src).toContain('[EQXV-MONITOR]');
+  });
+
+  it('strategy-configs.ts wiring (static source): dex_scopes config key exists with fail-closed default []', () => {
+    const src = readFileSync(resolve(__dirname, '..', 'src', 'runners', 'strategy-configs.ts'), 'utf8');
+    expect(src).toMatch(/dexScopes: strArr\(s, 'dex_scopes', \[\]\)/);
   });
 });

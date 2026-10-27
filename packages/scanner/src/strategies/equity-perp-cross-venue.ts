@@ -13,6 +13,25 @@
  *     The spread is mark-vs-last, not mark-vs-mark — this basis mismatch
  *     must be visible to the consumer.
  *
+ * EM-STRAT-014-E11-Cluster3-R1 — FAIL CLOSED on unverified scope roster:
+ *   - The unscoped fallback is REMOVED. When no HIP-3 deployer scope is
+ *     configured, the scanner issues NO HL query at all and reports an
+ *     explicit degradation reason. An empty scope list can never silently
+ *     execute the unscoped discovery this strategy was meant to correct.
+ *   - Roster policy: the repository's `docs/hip3-alias-markets.md` census
+ *     documents the VOOI-scanner alias discovery (298 alias: assets) but
+ *     contains NO deployer addresses and no deployer→symbol mapping. No
+ *     verified, source-backed deployer roster exists in this repository,
+ *     and inventing or hardcoding an unverified address is prohibited.
+ *     Independent on-chain roster verification belongs to EI and requires
+ *     separate Principal authorization for chain reads. Until a verified
+ *     roster is configured, this strategy produces NO candidates.
+ *   - Any alerts that DO become possible (verified roster configured) are
+ *     monitoring-only: the presenter must keep them 'info' with the
+ *     basis-mismatch label until a separate economic-validity review
+ *     approves stronger alert semantics (the mark-vs-last spread is not a
+ *     proven net-profit signal).
+ *
  * DISCOVERY (Task 31 research):
  *   trade.xyz lists equity perps on Hyperliquid (AAPL, MSFT, NVDA, TSLA).
  *   Backpack lists equity perps (AAPL, MSFT, NVDA, TSLA, SPCX, SNDK, AMD, HOOD, INTC).
@@ -28,14 +47,18 @@ export interface EquityPerpArbParams {
   /** Max position size (default $2000 — equity perps are illiquid) */
   maxSizeUsd: number;
   /**
-   * EM-STRAT-014-E11 item 6: HIP-3 deployer addresses to scope the HL
-   * `metaAndAssetCtxs` query. When non-empty, the query includes
-   * `dex: <address>` for each deployer. When empty, the query is unscoped
-   * (legacy behavior — NOT recommended; relies on exact-match filtering).
+   * EM-STRAT-014-E11 item 6 / Cluster3-R1: HIP-3 deployer addresses to
+   * scope the HL `metaAndAssetCtxs` query. One scoped query per deployer.
    *
-   * The documented trade.xyz deployer census should be injected here.
-   * The address is not hardcoded in this file because it must be verified
-   * against the on-chain HIP-3 deployer registry before production use.
+   * FAIL-CLOSED (Cluster3-R1): when absent/empty, NO HL query is issued and
+   * the scan degrades visibly with reason 'hip3_scope_roster_unverified'.
+   * The legacy unscoped fallback was REMOVED — an empty scope list can
+   * never silently execute unscoped discovery.
+   *
+   * Roster policy: no verified, source-backed deployer roster exists in
+   * this repository (docs/hip3-alias-markets.md documents asset discovery
+   * but contains no deployer addresses). Addresses must come exclusively
+   * from EI's independently verified on-chain census — never invented.
    */
   dexScopes?: string[];
 }
@@ -70,6 +93,53 @@ export interface EquityPerpDeps {
   backpackClient?: BackpackClient;
 }
 
+/**
+ * EM-STRAT-014-E11-Cluster3-R1: degradation markers for the equity-perp
+ * scan. Surfaced via scanWithDegradation() so the production runner can
+ * log WHY no candidates were produced (verified-roster missing vs scoped
+ * query failures) — an empty result must never be confusable with
+ * "no opportunities".
+ */
+export interface EquityPerpDegradation {
+  /**
+   * Machine-readable reason HL candidate prices are missing/partial.
+   * null when the scoped HL query path completed without issue.
+   *   - 'hip3_scope_roster_unverified': no dexScopes configured (fail-closed;
+   *     no HL query issued at all).
+   *   - 'hip3_scope_invalid_format': one or more configured scopes are not
+   *     plausible 0x addresses (fail-closed; those scopes are NOT sent).
+   *   - 'hip3_scoped_queries_failed': all configured scoped queries failed
+   *     (non-ok / network error).
+   *   - 'hip3_scoped_queries_partial': some scoped queries failed.
+   */
+  reason: string | null;
+  /** Count of configured scopes that were rejected or whose query failed. */
+  failedScopes: number;
+  /** Count of scoped queries actually issued (0 when fail-closed). */
+  issuedQueries: number;
+}
+
+export interface EquityPerpScanResult {
+  alerts: EquityPerpArbAlert[];
+  degradation: EquityPerpDegradation;
+}
+
+/**
+ * EM-STRAT-014-E11-Cluster3-R1: production-visible degradation summary
+ * (pure, exported for offline deterministic testing of exactly what the
+ * runner logs).
+ */
+export function formatEquityPerpDegradation(d: EquityPerpDegradation): string {
+  const parts = `reason=${d.reason ?? 'none'} failedScopes=${d.failedScopes} issuedQueries=${d.issuedQueries}`;
+  if (d.reason !== null) {
+    return `[equity_perp] DEGRADED ${d.reason} | ${parts}`;
+  }
+  return `[equity_perp] ok | ${parts}`;
+}
+
+/** Plausible EVM address shape for a HIP-3 deployer scope. */
+const SCOPE_FORMAT_RE = /^0x[0-9a-fA-F]{40}$/;
+
 export class EquityPerpCrossVenueScanner implements Strategy {
   readonly id = 'equity_perp_cross_venue';
   readonly landscape = 'B_cex_cex' as const;
@@ -90,10 +160,22 @@ export class EquityPerpCrossVenueScanner implements Strategy {
   }
 
   async scan(): Promise<EquityPerpArbAlert[]> {
+    return (await this.scanWithDegradation()).alerts;
+  }
+
+  /**
+   * EM-STRAT-014-E11-Cluster3-R1: scan with explicit degradation. The
+   * production runner MUST use this variant and log the marker on every
+   * scan — especially when the result is empty because the HIP-3 scope
+   * roster is unverified (fail-closed), so that "no candidates because the
+   * market universe is unverified" is visible and not confusable with
+   * "no spread right now".
+   */
+  async scanWithDegradation(): Promise<EquityPerpScanResult> {
     const alerts: EquityPerpArbAlert[] = [];
 
-    // Get HL perp prices for equity assets
-    const hlPrices = await this.getHlEquityPrices();
+    // Get HL perp prices for equity assets (fail-closed, scoped only)
+    const hl = await this.getHlEquityPrices();
 
     // Get Backpack perp prices for equity assets
     const backpack = this.deps.backpackClient ?? new BackpackClient();
@@ -101,7 +183,7 @@ export class EquityPerpCrossVenueScanner implements Strategy {
 
     // Compare
     for (const asset of EQUITY_SYMBOLS) {
-      const hlPrice = hlPrices.get(asset);
+      const hlPrice = hl.prices.get(asset);
       const bpPrice = bpPrices.get(asset);
 
       if (!hlPrice || !bpPrice || hlPrice <= 0 || bpPrice <= 0) continue;
@@ -131,41 +213,68 @@ export class EquityPerpCrossVenueScanner implements Strategy {
     }
 
     alerts.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
-    return alerts;
+    return { alerts, degradation: hl.degradation };
   }
 
   /**
    * Get HL perp prices for equity assets (AAPL, MSFT, etc.)
    *
-   * EM-STRAT-014-E11 item 6:
-   *   - Query scoped by `dex` (HIP-3 deployer) when `params.dexScopes` is
-   *     non-empty. One query per deployer address; results merged.
-   *   - Exact symbol match (===) replaces substring `includes()`.
-   *   - `res.ok` checked.
+   * EM-STRAT-014-E11 item 6 + Cluster3-R1:
+   *   - FAIL-CLOSED: no configured scopes → NO query issued, empty prices,
+   *     degradation reason 'hip3_scope_roster_unverified'. The legacy
+   *     unscoped `metaAndAssetCtxs` fallback is REMOVED — an empty scope
+   *     list can never silently execute unscoped discovery.
+   *   - Format-invalid scopes are rejected fail-closed (not sent, counted).
+   *   - One scoped query per deployer (`dex: <address>`); results merged.
+   *   - Exact symbol match (===) — 'AAPLx'/'MyAAPL' never match 'AAPL'.
+   *   - `res.ok` checked; failures counted in degradation.
    *   - Price labeled as mark price (`ctx.markPx`).
    */
-  private async getHlEquityPrices(): Promise<Map<string, number>> {
+  private async getHlEquityPrices(): Promise<{ prices: Map<string, number>; degradation: EquityPerpDegradation }> {
     const prices = new Map<string, number>();
     const fetchFn = this.deps.fetchImpl ?? fetch;
-    const dexScopes = this.params.dexScopes ?? [];
+    const rawScopes = this.params.dexScopes ?? [];
 
-    // Build the list of query bodies. When dexScopes is non-empty, issue
-    // one scoped query per deployer. When empty, issue one unscoped query
-    // (legacy behavior — relies on exact-match filtering to avoid false
-    // positives among non-equity perps).
-    const queryBodies: any[] = dexScopes.length > 0
-      ? dexScopes.map(dex => ({ type: 'metaAndAssetCtxs', dex }))
-      : [{ type: 'metaAndAssetCtxs' }];
+    // Fail-closed: no verified roster configured → no HL query at all.
+    if (rawScopes.length === 0) {
+      return {
+        prices,
+        degradation: {
+          reason: 'hip3_scope_roster_unverified',
+          failedScopes: 0,
+          issuedQueries: 0,
+        },
+      };
+    }
 
-    for (const body of queryBodies) {
+    // Fail-closed on malformed scopes: a typo'd or non-address scope must
+    // not be sent as a query body. Rejected scopes are counted.
+    const validScopes = rawScopes.filter(s => typeof s === 'string' && SCOPE_FORMAT_RE.test(s.trim()));
+    const invalidCount = rawScopes.length - validScopes.length;
+    if (validScopes.length === 0) {
+      return {
+        prices,
+        degradation: {
+          reason: 'hip3_scope_invalid_format',
+          failedScopes: invalidCount,
+          issuedQueries: 0,
+        },
+      };
+    }
+
+    let failedScopes = invalidCount;
+    let issuedQueries = 0;
+    for (const dex of validScopes) {
+      issuedQueries++;
       try {
         const res = await fetchFn(HL_API, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ type: 'metaAndAssetCtxs', dex }),
         });
         if (!res.ok) {
-          console.warn(`[equity_perp] HL API non-ok: ${res.status}`);
+          failedScopes++;
+          console.warn(`[equity_perp] HL scoped API non-ok (dex=${dex.slice(0, 10)}…): ${res.status}`);
           continue;
         }
         const data = await res.json() as any[];
@@ -185,10 +294,18 @@ export class EquityPerpCrossVenueScanner implements Strategy {
           }
         }
       } catch (err) {
+        failedScopes++;
         console.warn('[equity_perp] failed to get HL prices:', err);
       }
     }
-    return prices;
+
+    let reason: EquityPerpDegradation['reason'] = null;
+    if (failedScopes > 0 && issuedQueries > 0 && failedScopes >= issuedQueries) {
+      reason = 'hip3_scoped_queries_failed';
+    } else if (failedScopes > 0) {
+      reason = 'hip3_scoped_queries_partial';
+    }
+    return { prices, degradation: { reason, failedScopes, issuedQueries } };
   }
 
   /** Get Backpack perp prices for equity assets */
