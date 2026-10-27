@@ -48,15 +48,20 @@ function main(): void {
   const anchorFile = files.find(f => f === 'anchor.jsonl');
   if (anchorFile === undefined) fail(['cli:anchor_jsonl_missing_in_raw_dir']);
 
+  const usdFile = files.find(f => f === 'usd-price.jsonl');
+  if (usdFile === undefined) fail(['cli:usd_price_jsonl_missing_in_raw_dir']);
+
   const poolJsonls: Record<string, string> = {};
   for (const f of files) {
-    if (f === 'anchor.jsonl') continue;
+    // anchor + usd-price are series files, not pool-address files.
+    if (f === 'anchor.jsonl' || f === 'usd-price.jsonl') continue;
     const address = f.slice(0, -'.jsonl'.length);
     poolJsonls[address] = readFileSync(join(rawDir as string, f), 'utf8');
   }
 
   const anchorJsonl = readFileSync(join(rawDir as string, 'anchor.jsonl'), 'utf8');
-  const result = runReplay(manifestRaw, { anchorJsonl, poolJsonls });
+  const usdPriceJsonl = readFileSync(join(rawDir as string, 'usd-price.jsonl'), 'utf8');
+  const result = runReplay(manifestRaw, { anchorJsonl, usdPriceJsonl, poolJsonls });
   if (!result.ok) {
     fail(result.errors);
   }

@@ -34,10 +34,17 @@
  *                        (900s > 60s) -> anchor_unusable exclusions.
  *
  * LIQUIDITY TUNING: pools a1/a2/a3 share liquidity L computed EXACTLY so
- * that a 10,000 WHYPE (= $10k under the declared assumption) swap from the
- * dip price P = 1.006 yields impact(D) = 0.05% (i.e. the average realized
- * price is 1.0055 = sqrt(Ps * Pend) with Pend = (Ps - 0.0005)^2 / Ps).
- * This makes the E1-T1 arithmetic exact: net = 0.6 - 0.01 - 0.04 - 0.05.
+ * that a 500 WHYPE swap from the dip price P = 1.006 yields impact(D) =
+ * 0.05% (i.e. the average realized price is 1.0055 = sqrt(Ps * Pend) with
+ * Pend = (Ps - 0.0005)^2 / Ps). This makes the E1-T1 arithmetic exact:
+ * net = 0.6 - 0.01 - 0.04 - 0.05.
+ *
+ * USD DEPTH (EM-STRAT-014-E1-R1): the declared $10,000 depth is converted
+ * PER SAMPLE via the committed usd-price.jsonl series at the synthetic
+ * reference $20 per WHYPE (source 'synthetic-usd-reference'):
+ * depthWei = ceil(10000 * 10^18 / 20*10^18) = 500 * 10^18 wei EXACTLY.
+ * `1 WHYPE = $1` is NOT assumed anywhere; the conversion is explicit,
+ * provenance-bearing, and block-aligned.
  */
 
 import { floorDiv, isqrt } from '../math/bigint-math.js';
@@ -50,6 +57,13 @@ export const POOL_INDEPENDENCE = '0x00000000000000000000000000000000000000a2';
 export const POOL_HIGHFEE = '0x00000000000000000000000000000000000000a3';
 export const POOL_ZEROLIQ = '0x00000000000000000000000000000000000000a4';
 
+/**
+ * EM-STRAT-014-E1-R1: synthetic token addresses (clearly synthetic; the
+ * orientation is validated against these on every pool record).
+ */
+export const WHYPE_ADDRESS = '0x' + '11'.repeat(20);
+export const KHYPE_ADDRESS = '0x' + '22'.repeat(20);
+
 export const START_BLOCK = 5_000_000;
 export const BLOCK_STEP = 50;
 export const SAMPLE_COUNT = 289;
@@ -58,6 +72,10 @@ export const GRID_STEP_SEC = 600;
 
 const ANCHOR_RAW = 1_000_000_000_000_000_000n; // kHYPEToHYPE = 1.0 (synthetic)
 const ANCHOR_RAW_HEX = '0x' + ANCHOR_RAW.toString(16);
+
+/** EM-STRAT-014-E1-R1: synthetic USD reference — $20 per WHYPE, 1e18 scale. */
+export const USD_PRICE_RAW = 20n * 1_000_000_000_000_000_000n;
+export const USD_PRICE_SOURCE = 'synthetic-usd-reference';
 
 /** Grid index -> block height. */
 export function blockAt(gridIndex: number): number {
@@ -99,10 +117,15 @@ export function tunedLiquidity(psNum: bigint, psDen: bigint, impactNumOver10000:
 const DIP_NUM = 1006n;
 const DIP_DEN = 1000n;
 const IMPACT_NUM = 5n; // 5/10000 = 0.0005
-const DELTA_X_WEI = 10_000n * 1_000_000_000_000_000_000n; // $10k in WHYPE wei
+/**
+ * $10,000 at the synthetic $20/WHYPE reference = 500 WHYPE = 500*10^18 wei
+ * (EXACT — no remainder, no ceil slack). EM-STRAT-014-E1-R1: this is a
+ * CONVERTED amount, not an assumed 1 WHYPE = $1 identity.
+ */
+export const DEPTH_WHYPE_WEI = 500n * 1_000_000_000_000_000_000n;
 
 /** Shared tuned liquidity for pools a1/a2/a3. */
-export const TUNED_L: bigint = tunedLiquidity(DIP_NUM, DIP_DEN, IMPACT_NUM, DELTA_X_WEI);
+export const TUNED_L: bigint = tunedLiquidity(DIP_NUM, DIP_DEN, IMPACT_NUM, DEPTH_WHYPE_WEI);
 
 const RANGE_LOW = -6000;
 const RANGE_HIGH = 6000;
@@ -146,6 +169,7 @@ function priceForPool(pool: 'primary' | 'independence' | 'highfee' | 'zeroliq', 
 export interface SyntheticFixtures {
   'SYNTHETIC-manifest.json': string;
   'raw/anchor.jsonl': string;
+  'raw/usd-price.jsonl': string;
   [poolFile: `raw/${string}.jsonl`]: string;
 }
 
@@ -186,29 +210,29 @@ export function buildSyntheticManifest(): Record<string, unknown> {
       {
         address: POOL_PRIMARY,
         venue: 'synthetic-hyperswap-v3',
-        token0: { symbol: 'WHYPE', decimals: 18 },
-        token1: { symbol: 'kHYPE', decimals: 18 },
+        token0: { symbol: 'WHYPE', decimals: 18, address: WHYPE_ADDRESS },
+        token1: { symbol: 'KHYPE', decimals: 18, address: KHYPE_ADDRESS },
         expectedFeeTier: 100,
       },
       {
         address: POOL_INDEPENDENCE,
         venue: 'synthetic-hyperswap-v3',
-        token0: { symbol: 'WHYPE', decimals: 18 },
-        token1: { symbol: 'kHYPE', decimals: 18 },
+        token0: { symbol: 'WHYPE', decimals: 18, address: WHYPE_ADDRESS },
+        token1: { symbol: 'KHYPE', decimals: 18, address: KHYPE_ADDRESS },
         expectedFeeTier: 100,
       },
       {
         address: POOL_HIGHFEE,
         venue: 'synthetic-hyperswap-v3',
-        token0: { symbol: 'WHYPE', decimals: 18 },
-        token1: { symbol: 'kHYPE', decimals: 18 },
+        token0: { symbol: 'WHYPE', decimals: 18, address: WHYPE_ADDRESS },
+        token1: { symbol: 'KHYPE', decimals: 18, address: KHYPE_ADDRESS },
         expectedFeeTier: 10000,
       },
       {
         address: POOL_ZEROLIQ,
         venue: 'synthetic-hyperswap-v3',
-        token0: { symbol: 'WHYPE', decimals: 18 },
-        token1: { symbol: 'kHYPE', decimals: 18 },
+        token0: { symbol: 'WHYPE', decimals: 18, address: WHYPE_ADDRESS },
+        token1: { symbol: 'KHYPE', decimals: 18, address: KHYPE_ADDRESS },
         expectedFeeTier: 100,
       },
     ],
@@ -256,11 +280,34 @@ function buildPoolJsonl(pool: 'primary' | 'independence' | 'highfee' | 'zeroliq'
         poolAddress: address,
         blockHeight: blockAt(i),
         blockTimestampSec: tsAt(i),
+        token0Address: WHYPE_ADDRESS,
+        token1Address: KHYPE_ADDRESS,
         sqrtPriceX96Hex: '0x' + S.toString(16),
         tick,
         liquidityHex: '0x' + L.toString(16),
         feeTierMillionths: feeTier,
         tickData: tickDataFor(L),
+      }),
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * EM-STRAT-014-E1-R1: per-block USD reference series ($20/WHYPE at every
+ * grid block, provenance-bearing). Missing/malformed USD scenarios are
+ * constructed by tests, not committed fixtures.
+ */
+function buildUsdPriceJsonl(): string {
+  const lines: string[] = [];
+  for (let i = 0; i < SAMPLE_COUNT; i++) {
+    lines.push(
+      JSON.stringify({
+        chainId: 999,
+        blockHeight: blockAt(i),
+        blockTimestampSec: tsAt(i),
+        priceRawHex: '0x' + USD_PRICE_RAW.toString(16),
+        source: USD_PRICE_SOURCE,
       }),
     );
   }
@@ -276,6 +323,7 @@ export function buildSyntheticFixtures(): SyntheticFixtures {
   return {
     'SYNTHETIC-manifest.json': manifest,
     'raw/anchor.jsonl': buildAnchorJsonl(),
+    'raw/usd-price.jsonl': buildUsdPriceJsonl(),
     [a1]: buildPoolJsonl('primary', POOL_PRIMARY, 100, TUNED_L),
     [a2]: buildPoolJsonl('independence', POOL_INDEPENDENCE, 100, TUNED_L),
     [a3]: buildPoolJsonl('highfee', POOL_HIGHFEE, 10000, TUNED_L),

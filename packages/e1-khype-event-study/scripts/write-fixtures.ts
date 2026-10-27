@@ -1,26 +1,21 @@
 /**
- * EM-STRAT-014-E1 — writes the deterministic synthetic fixtures to disk.
- *
- * Run: pnpm --filter @edge/e1-khype-event-study write-fixtures
- * (from the package dir: tsx scripts/write-fixtures.ts)
- *
- * Output is byte-for-byte reproducible; the committed files are provenance-
- * verified against this generator by test/e1-fixtures-provenance.test.ts.
+ * EM-STRAT-014-E1-R1 — regenerate the committed synthetic fixtures from
+ * buildSyntheticFixtures() (provenance: fixtures are byte-for-byte the
+ * generator output; the provenance test re-derives and compares bytes).
+ * Offline, deterministic; writes ONLY under fixtures/synthetic-48h/.
  */
-
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSyntheticFixtures } from '../src/fixtures/synthetic-generator.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const pkgRoot = join(here, '..');
-const fixturesDir = join(pkgRoot, 'fixtures', 'synthetic-48h');
+const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'synthetic-48h');
+const fx = buildSyntheticFixtures();
 
-const files = buildSyntheticFixtures();
-for (const [relPath, content] of Object.entries(files)) {
-  const target = join(fixturesDir, relPath);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, content, 'utf8');
-  process.stdout.write(`wrote ${target} (${Buffer.byteLength(content, 'utf8')} bytes)\n`);
+mkdirSync(join(OUT, 'raw'), { recursive: true });
+for (const [name, content] of Object.entries(fx)) {
+  const p = join(OUT, name);
+  writeFileSync(p, content);
+  console.log(`wrote ${name} (${content.length} bytes)`);
 }
+console.log('fixture regeneration complete');

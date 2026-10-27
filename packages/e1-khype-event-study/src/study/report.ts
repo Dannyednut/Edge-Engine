@@ -71,7 +71,10 @@ export interface ReportObject {
     nEventsPerWeek: string;
     nEventsPerWeekExact: string;
     depthUsd: string;
-    depthNotionalWei: string;
+    /** EM-STRAT-014-E1-R1: the per-sample USD->WHYPE conversion rule. */
+    depthWhypeWeiRule: string;
+    /** EM-STRAT-014-E1-R1: provenance of the per-sample USD reference prices. */
+    usdPriceSources: string[];
     grossEventThresholdPct: string;
     independenceBandPct: string;
   };
@@ -87,6 +90,8 @@ export interface ReportObject {
     eventsPerWeekStr: string;
     eventsPerWeekExact: string;
     exclusionsTotal: number;
+    /** EM-STRAT-014-E1-R1: counted identical-duplicate records (conflicts fail the replay). */
+    duplicateRecords: Record<string, number>;
     exclusionsByReason: Record<string, number>;
   };
   verdict: {
@@ -172,6 +177,12 @@ export function buildReport(
     depthExclusions: DepthExclusion[];
     venue: string;
   }>,
+  /** EM-STRAT-014-E1-R1: replay-level integrity metadata. */
+  replayMeta: {
+    duplicateCounts: Record<string, number>;
+    usdPriceSources: string[];
+    depthConversion: string;
+  },
 ): ReportObject {
   const m: StudyManifest = manifestParsed.manifest;
   const w = m.window;
@@ -240,6 +251,8 @@ export function buildReport(
     'A8: impact(D) is measured with a fee=0 walk (size impact only); the per-pool AMM fee tier — read from recorded pool state, never assumed — is accounted once in the fees term. This prevents double-counting size impact and fee.',
     'A9: Events are detected PER POOL and summed across the census for frequency; cross-pool correlation is not deduplicated (declared).',
     'A10: The block grid is synthetic (declared blockStep/gridStepSec); timestamps are synthetic block timestamps, not wall-clock. The pipeline contains NO clock, no randomness, and no floating point.',
+    'A11: USD depth conversion (EM-STRAT-014-E1-R1): D USD is converted PER SAMPLE to WHYPE wei via the block-aligned, provenance-bearing usd-price.jsonl reference (depthWei = ceil(D_usd*10^36/usdPriceRaw); ceil is conservative). `1 WHYPE = $1` is NOT assumed anywhere. Samples lacking a valid, aligned USD reference are excluded from depth evaluation with counted reasons (usd_price_unavailable / usd_price_malformed).',
+    'A12: Pool orientation (EM-STRAT-014-E1-R1): the census and every pool record must declare token0=WHYPE / token1=kHYPE by address; the kHYPE-per-WHYPE price interpretation is validated against actual token identity. A pool with the opposite order requires a separately reviewed inverted-walk change and fails closed here.',
   ];
 
   const limitations: string[] = [
@@ -269,7 +282,8 @@ export function buildReport(
       nEventsPerWeek: m.parameters.nEventsPerWeek,
       nEventsPerWeekExact: ratToExactFractionString(nThreshold),
       depthUsd: m.parameters.depthUsd,
-      depthNotionalWei: manifestParsed.depthNotionalWei.toString(),
+      depthWhypeWeiRule: replayMeta.depthConversion,
+      usdPriceSources: replayMeta.usdPriceSources,
       grossEventThresholdPct: m.parameters.grossEventThresholdPct,
       independenceBandPct: m.parameters.independenceBandPct,
     },
@@ -286,6 +300,10 @@ export function buildReport(
       eventsPerWeekExact: ratToExactFractionString(eventsPerWeek),
       exclusionsTotal,
       exclusionsByReason,
+      // EM-STRAT-014-E1-R1: duplicate decoded records (identical content)
+      // are counted, never silently discarded; conflicting duplicates fail
+      // the replay, so anything surfacing here was provably identical.
+      duplicateRecords: replayMeta.duplicateCounts,
     },
     verdict: {
       rule: PASS_RULE_TEXT,

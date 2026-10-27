@@ -12,7 +12,7 @@ function replayVariant(mutate: (m: Record<string, unknown>) => void): ReturnType
   const fx = loadCommittedFixtures();
   const m = cloneManifest(fx.manifest);
   mutate(m);
-  return runReplay(m, { anchorJsonl: fx.anchorJsonl, poolJsonls: fx.poolJsonls });
+  return runReplay(m, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
 }
 
 describe('E1-T11 — the pass-rule report binds to the pre-registered N and D', () => {

@@ -19,7 +19,7 @@ function replayVariant(mutate: (m: Record<string, unknown>) => void): ReturnType
   const fx = loadCommittedFixtures();
   const m = cloneManifest(fx.manifest);
   mutate(m);
-  return runReplay(m, { anchorJsonl: fx.anchorJsonl, poolJsonls: fx.poolJsonls });
+  return runReplay(m, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
 }
 
 describe('fail-closed manifest validation', () => {
@@ -104,6 +104,7 @@ describe('fail-closed archive handling', () => {
     broken[10] = '{not-json';
     const r = runReplay(fx.manifest, {
       anchorJsonl: broken.join('\n'),
+      usdPriceJsonl: fx.usdPriceJsonl,
       poolJsonls: fx.poolJsonls,
     });
     expect(r.ok).toBe(false);
@@ -115,6 +116,7 @@ describe('fail-closed archive handling', () => {
     const fx = loadCommittedFixtures();
     const r = runReplay(fx.manifest, {
       anchorJsonl: fx.anchorJsonl,
+      usdPriceJsonl: fx.usdPriceJsonl,
       poolJsonls: { ...fx.poolJsonls, '0x9999999999999999999999999999999999999999': '' },
     });
     expect(r.ok).toBe(false);
@@ -126,7 +128,7 @@ describe('fail-closed archive handling', () => {
     const fx = loadCommittedFixtures();
     const pools = { ...fx.poolJsonls };
     delete pools['0x00000000000000000000000000000000000000a3'];
-    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, poolJsonls: pools });
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: pools });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.errors.join(' ')).toContain('pool_file_missing');
@@ -141,7 +143,10 @@ describe('fail-closed archive handling', () => {
     const startBlock = 1000;
     const step = 10;
     const samples = 10;
+    const WHYPE = '0x' + '11'.repeat(20);
+    const KHYPE = '0x' + '22'.repeat(20);
     const anchorLines: string[] = [];
+    const usdLines: string[] = [];
     const poolLines: string[] = [];
     for (let i = 0; i < samples; i++) {
       const block = startBlock + i * step;
@@ -149,6 +154,7 @@ describe('fail-closed archive handling', () => {
       if (i !== 5) {
         anchorLines.push(JSON.stringify({ chainId: 999, blockHeight: block, blockTimestampSec: ts, anchorRawHex: '0xde0b6b3a7640000', anchorReadAtSec: ts }));
       }
+      usdLines.push(JSON.stringify({ chainId: 999, blockHeight: block, blockTimestampSec: ts, priceRawHex: '0x' + (20n * 10n ** 18n).toString(16), source: 'synthetic-usd-reference' }));
       const rawRatio = i >= 3 && i <= 6 ? (1006n * (1n << 192n)) / 1000n : 1n << 192n;
       const Sqrt = sqrtOf(rawRatio);
       poolLines.push(JSON.stringify({
@@ -156,6 +162,8 @@ describe('fail-closed archive handling', () => {
         poolAddress: '0x00000000000000000000000000000000000000bb',
         blockHeight: block,
         blockTimestampSec: ts,
+        token0Address: WHYPE,
+        token1Address: KHYPE,
         sqrtPriceX96Hex: '0x' + Sqrt.toString(16),
         tick: tickOf(Sqrt),
         liquidityHex: '0x' + TUNED_L.toString(16),
@@ -169,13 +177,14 @@ describe('fail-closed archive handling', () => {
       {
         address: '0x00000000000000000000000000000000000000bb',
         venue: 'synthetic-inline',
-        token0: { symbol: 'WHYPE', decimals: 18 },
-        token1: { symbol: 'kHYPE', decimals: 18 },
+        token0: { symbol: 'WHYPE', decimals: 18, address: WHYPE },
+        token1: { symbol: 'KHYPE', decimals: 18, address: KHYPE },
         expectedFeeTier: 100,
       },
     ];
     const r = runReplay(manifest, {
       anchorJsonl: anchorLines.join('\n') + '\n',
+      usdPriceJsonl: usdLines.join('\n') + '\n',
       poolJsonls: { '0x00000000000000000000000000000000000000bb': poolLines.join('\n') + '\n' },
     });
     expect(r.ok).toBe(true);
@@ -236,5 +245,267 @@ describe('architectural isolation guards', () => {
       expect(text.includes('VIEW_QUOTER'), `VIEW_QUOTER reference in ${f}`).toBe(false);
       expect(text.includes('@edge/scanner'), `scanner import in ${f}`).toBe(false);
     }
+  });
+});
+
+// ─── EM-STRAT-014-E1-R1 — USD depth, chain provenance, orientation, duplicates ──
+
+describe('E1-R1: per-sample USD depth conversion (no 1 WHYPE = $1 anywhere)', () => {
+  // Rewrite every committed USD line's price (full-series variant keeps the
+  // 289-block coverage intact).
+  function usdSeriesWith(usdPriceRaw: bigint): { usdPriceJsonl: string; source: string } {
+    const fx = loadCommittedFixtures();
+    const lines = fx.usdPriceJsonl.trim().split('\n').map(line => {
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      return JSON.stringify({ ...obj, priceRawHex: '0x' + usdPriceRaw.toString(16) });
+    });
+    return { usdPriceJsonl: lines.join('\n') + '\n', source: (JSON.parse(lines[0]!) as Record<string, unknown>).source as string };
+  }
+
+  function replayWithUsd(usdPriceRaw: bigint) {
+    const fx = loadCommittedFixtures();
+    const usd = usdSeriesWith(usdPriceRaw);
+    return runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: usd.usdPriceJsonl, poolJsonls: fx.poolJsonls });
+  }
+
+  it('$20/WHYPE: $10,000 -> exactly 500*10^18 wei walked (T1 identity preserved)', () => {
+    const r = replayWithUsd(20n * 10n ** 18n);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    const ev = p.events[0];
+    expect(ev.passed).toBe(true);
+    expect(ev.depthQuote).not.toBeNull();
+    expect(BigInt(ev.depthQuote!.amountInGrossWei)).toBe(500n * 10n ** 18n);
+    expect(ev.depthQuote!.usdPriceRaw).toBe((20n * 10n ** 18n).toString());
+    expect(ev.netAtDMaxPctStr).toBe('0.500000000000');
+  });
+
+  it('$40/WHYPE: $10,000 -> exactly 250*10^18 wei walked (different non-$1 price)', () => {
+    const r = replayWithUsd(40n * 10n ** 18n);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    const ev = p.events[0];
+    expect(BigInt(ev.depthQuote!.amountInGrossWei)).toBe(250n * 10n ** 18n);
+    expect(ev.depthQuote!.usdPriceRaw).toBe((40n * 10n ** 18n).toString());
+  });
+
+  it('non-divisible conversion ceil-conservatively per wei (price $30: 333.33..e18 -> +1 wei ≥ D)', () => {
+    const r = replayWithUsd(30n * 10n ** 18n);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    const wei = BigInt(p.events[0].depthQuote!.amountInGrossWei);
+    // 10^4*10^36 / (3*10^19) = 333.33..e18 wei -> ceil to the NEXT WEI
+    // (conservative: the walked amount is never smaller than D USD implies).
+    expect(wei).toBe(333333333333333333334n);
+    expect(wei * 30n).toBeGreaterThanOrEqual(10_000n * 10n ** 18n); // notional >= D
+  });
+
+  it('missing USD record at a dip block -> sample excluded from pass rule with counted usd_price_unavailable', () => {
+    const fx = loadCommittedFixtures();
+    // Remove the USD records for the dip blocks of pool a1 (grid 48..66).
+    const kept: string[] = [];
+    for (const line of fx.usdPriceJsonl.trim().split('\n')) {
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      const block = obj.blockHeight as number;
+      if (block >= 5_000_000 + 48 * 50 && block <= 5_000_000 + 66 * 50) continue;
+      kept.push(line);
+    }
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: kept.join('\n') + '\n', poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    expect(p.events[0].passed).toBe(false);
+    expect(p.events[0].failingReason).toBe('depth_unmeasurable');
+    expect(p.depthExclusions.some(e => e.reason === 'usd_price_unavailable')).toBe(true);
+    expect(r.reportObject.aggregate.exclusionsByReason['usd_price_unavailable']).toBeGreaterThan(0);
+  });
+
+  it('malformed USD price (zero) at an EVALUATED block -> counted usd_price_malformed, no default adopted', () => {
+    const fx = loadCommittedFixtures();
+    // Line index 48 = block 5,002,400 = grid 48 = the d_max sample of pool
+    // a1's event (d is constant 0.6% across the dip; earliest block wins
+    // ties) — the block the pass rule actually walks.
+    const lines = fx.usdPriceJsonl.trim().split('\n').map((line, i) => {
+      if (i !== 48) return line;
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      return JSON.stringify({ ...obj, priceRawHex: '0x0' });
+    });
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: lines.join('\n') + '\n', poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    // The d_max sample (grid 48) is excluded with a counted reason; the
+    // event may still pass via another qualifying in-span sample (the pass
+    // rule requires at least one) — the COUNTED exclusion is the invariant.
+    expect(p.exclusions.some(e => e.reason === 'usd_price_malformed' && e.blockHeight === 5_002_400)).toBe(true);
+    expect(r.reportObject.aggregate.exclusionsByReason['usd_price_malformed']).toBeGreaterThan(0);
+  });
+
+  it('USD record without provenance (empty source) at an EVALUATED block -> counted usd_price_malformed', () => {
+    const fx = loadCommittedFixtures();
+    const lines = fx.usdPriceJsonl.trim().split('\n').map((line, i) => {
+      if (i !== 48) return line; // grid 48 = pool a1's d_max sample
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      return JSON.stringify({ ...obj, source: '' });
+    });
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: lines.join('\n') + '\n', poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    expect(p.exclusions.some(e => e.reason === 'usd_price_malformed' && e.blockHeight === 5_002_400)).toBe(true);
+    expect(r.reportObject.aggregate.exclusionsByReason['usd_price_malformed']).toBeGreaterThan(0);
+  });
+
+  it('report declares the conversion rule + USD provenance sources; no fixed wei figure', () => {
+    const r = replayWithUsd(20n * 10n ** 18n);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const params = r.reportObject.parameters;
+    expect(params.depthWhypeWeiRule).toContain('usdPriceRaw');
+    expect(params.depthWhypeWeiRule).not.toContain('10^18/');
+    expect(params.usdPriceSources).toEqual(['synthetic-usd-reference']);
+    expect((params as unknown as Record<string, unknown>).depthNotionalWei).toBeUndefined();
+  });
+});
+
+describe('E1-R1: chain provenance fail-closed (chainId 999)', () => {
+  function firstLineWithChain(text: string, chainId: number): string {
+    const lines = text.trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    obj.chainId = chainId;
+    lines[0] = JSON.stringify(obj);
+    return lines.join('\n') + '\n';
+  }
+
+  it('wrong-chain ANCHOR record -> replay fails even though every other field is valid', () => {
+    const fx = loadCommittedFixtures();
+    const r = runReplay(fx.manifest, {
+      anchorJsonl: firstLineWithChain(fx.anchorJsonl, 1),
+      usdPriceJsonl: fx.usdPriceJsonl,
+      poolJsonls: fx.poolJsonls,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('chain_id_mismatch:anchor');
+    expect(r.errors.join(' ')).toContain('expected_999_got_1');
+  });
+
+  it('wrong-chain POOL record -> replay fails even though every other field is valid', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = { ...fx.poolJsonls };
+    const a1Key = Object.keys(pools).find(k => k.endsWith('00a1'))!;
+    pools[a1Key] = firstLineWithChain(pools[a1Key], 137);
+    const r = runReplay(fx.manifest, {
+      anchorJsonl: fx.anchorJsonl,
+      usdPriceJsonl: fx.usdPriceJsonl,
+      poolJsonls: pools,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('chain_id_mismatch:pool_');
+    expect(r.errors.join(' ')).toContain('expected_999_got_137');
+  });
+
+  it('wrong-chain USD record -> replay fails (same provenance rule)', () => {
+    const fx = loadCommittedFixtures();
+    const r = runReplay(fx.manifest, {
+      anchorJsonl: fx.anchorJsonl,
+      usdPriceJsonl: firstLineWithChain(fx.usdPriceJsonl, 42161),
+      poolJsonls: fx.poolJsonls,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('chain_id_mismatch:usd_price');
+  });
+});
+
+describe('E1-R1: token identity / price orientation integrity', () => {
+  it('census with inverted token order (token0=kHYPE, token1=WHYPE) -> manifest REJECTED, no unverified orientation', () => {
+    const fx = loadCommittedFixtures();
+    const m = cloneManifest(fx.manifest) as Record<string, unknown>;
+    const census = (m.poolCensus as Array<Record<string, unknown>>);
+    for (const e of census) {
+      const t0 = e.token0 as Record<string, unknown>;
+      const t1 = e.token1 as Record<string, unknown>;
+      e.token0 = t1;
+      e.token1 = t0;
+    }
+    const r = runReplay(m, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('pool_orientation_unsupported');
+  });
+
+  it('pool record whose token addresses disagree with the census -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = { ...fx.poolJsonls };
+    const a1Key = Object.keys(pools).find(k => k.endsWith('00a1'))!;
+    const lines = pools[a1Key].trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    // Swap the recorded token addresses (data from a DIFFERENT market).
+    const t0 = obj.token0Address as string;
+    obj.token0Address = obj.token1Address;
+    obj.token1Address = t0;
+    lines[0] = JSON.stringify(obj);
+    pools[a1Key] = lines.join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: pools });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('token_address_mismatch');
+  });
+
+  it('pool record with malformed token address -> sample excluded (counted), replay survives', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = { ...fx.poolJsonls };
+    const a1Key = Object.keys(pools).find(k => k.endsWith('00a1'))!;
+    const lines = pools[a1Key].trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    obj.token0Address = 'not-an-address';
+    lines[0] = JSON.stringify(obj);
+    pools[a1Key] = lines.join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: pools });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.reportObject.pools.find(x => x.address.endsWith('00a1'))!;
+    expect(p.exclusions.some(e => e.reason === 'sample_field_invalid' && e.detail?.includes('invalid_address'))).toBe(true);
+  });
+});
+
+describe('E1-R1: duplicate record handling (never silently first-wins)', () => {
+  it('duplicate anchor record with IDENTICAL decoded content -> counted, replay succeeds', () => {
+    const fx = loadCommittedFixtures();
+    const lines = fx.anchorJsonl.trim().split('\n');
+    const withDup = [lines[0], lines[0], ...lines.slice(1)].join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: withDup, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.reportObject.aggregate.duplicateRecords['duplicate_anchor_record']).toBe(1);
+  });
+
+  it('duplicate anchor record with CONFLICTING values -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const lines = fx.anchorJsonl.trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    obj.anchorRawHex = '0xde0b6b3a7640001'; // different anchor value, same block
+    const conflicting = [lines[0], JSON.stringify(obj), ...lines.slice(1)].join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: conflicting, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_anchor_conflict');
+  });
+
+  it('duplicate USD record with conflicting price -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const lines = fx.usdPriceJsonl.trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    obj.priceRawHex = '0x' + (25n * 10n ** 18n).toString(16);
+    const conflicting = [lines[0], JSON.stringify(obj), ...lines.slice(1)].join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: conflicting, poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_usd_price_conflict');
   });
 });

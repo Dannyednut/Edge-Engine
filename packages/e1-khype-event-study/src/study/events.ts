@@ -41,6 +41,19 @@ import { rat, ratCmp, ratIsPositive, ratMul, ratSub, ratToDecimalString, ratToEx
 import { quoteExactInWhypeToKhype, type WalkQuote } from '../v3/tick-walk.js';
 import { sampleToPoolState, type PoolSeries, type SeriesExclusion, type SeriesSample } from './discount-series.js';
 
+/**
+ * EM-STRAT-014-E1-R1: per-sample depth resolver. Converts the declared USD
+ * depth D into the WHYPE wei amount walked for THIS sample, using the
+ * block-aligned, provenance-bearing USD reference price. Failure excludes
+ * the sample from depth/pass evaluation with a counted reason (never a
+ * default, never a fabricated price, never `1 WHYPE = $1`).
+ */
+export type DepthResolverResult =
+  | { ok: true; wei: bigint; usdPriceRaw: string }
+  | { ok: false; reason: string; detail: string };
+
+export type DepthResolver = (s: SeriesSample) => DepthResolverResult;
+
 export interface DepthQuoteView {
   /** kHYPE received for D (decimal string of wei). */
   amountOut: string;
@@ -50,6 +63,8 @@ export interface DepthQuoteView {
   /** Average realized price (kHYPE per WHYPE), exact fraction + 12dp. */
   avgPriceExact: string;
   avgPriceStr: string;
+  /** EM-STRAT-014-E1-R1: USD-per-WHYPE reference used (raw 1e18 scale, decimal). */
+  usdPriceRaw: string;
 }
 
 export interface DepthExclusion extends SeriesExclusion {
@@ -110,14 +125,15 @@ function contiguous(usable: SeriesSample[], fromIdx: number, toIdx: number): boo
 
 /**
  * Evaluate one sample: walk depth D (fee=0), derive realized d and net.
+ * `depthWei` is the ALREADY-RESOLVED per-sample WHYPE input amount.
  * Returns failure instead of throwing for any walk-level rejection.
  */
 function evaluateSample(
   s: SeriesSample,
-  depthNotionalWei: bigint,
+  depthWei: bigint,
   feesSumPct: Rational,
 ): SampleEval | { failure: string } {
-  const walk = quoteExactInWhypeToKhype(sampleToPoolState(s), depthNotionalWei, 0n);
+  const walk = quoteExactInWhypeToKhype(sampleToPoolState(s), depthWei, 0n);
   if (!walk.ok) return { failure: walk.reason };
   // d_realized = (amountOut/amountInGross) * anchorRate - 1, in percent.
   const avgPrice = rat(walk.amountOut, walk.amountInGross);
@@ -132,11 +148,21 @@ export function detectEvents(
   series: PoolSeries,
   grossThresholdPct: Rational,
   feesSumPct: Rational,
-  depthNotionalWei: bigint,
+  depthWeiFor: DepthResolver,
 ): EventsResult {
   const usable = series.samples;
   const events: StudyEvent[] = [];
   const depthExclusions: DepthExclusion[] = [];
+  // Dedupe counted depth exclusions per (block, reason): the d_max sample
+  // is also in the pass-evaluation span; a resolver failure must be counted
+  // exactly once per sample.
+  const countedDepth = new Set<string>();
+  const countDepthExclusion = (s: SeriesSample, reason: string, detail: string, eventIndex: number): void => {
+    const key = `${s.blockHeight}|${reason}`;
+    if (countedDepth.has(key)) return;
+    countedDepth.add(key);
+    depthExclusions.push({ blockHeight: s.blockHeight, reason, detail, eventIndex });
+  };
 
   // --- 1. excursions ---
   const excursions: Excursion[] = [];
@@ -210,36 +236,47 @@ export function detectEvents(
     let netAtDMax: Rational | null = null;
     let dMaxDepthFailed = false;
     if (ratCmp(dMaxSample.dPct, feesSumPct) > 0) {
-      const evalRes = evaluateSample(dMaxSample, depthNotionalWei, feesSumPct);
-      if ('failure' in evalRes) {
+      // EM-STRAT-014-E1-R1: per-sample USD->WHYPE depth resolution first.
+      const depthRes = depthWeiFor(dMaxSample);
+      if (!depthRes.ok) {
         dMaxDepthFailed = true;
-        depthExclusions.push({
-          blockHeight: dMaxSample.blockHeight,
-          reason: 'depth_quote_failed',
-          detail: evalRes.failure,
-          eventIndex,
-        });
+        countDepthExclusion(dMaxSample, depthRes.reason, depthRes.detail, eventIndex);
       } else {
-        impactAtDMax = evalRes.impact;
-        netAtDMax = evalRes.net;
-        depthQuote = {
-          amountOut: evalRes.walk.amountOut.toString(),
-          amountInGrossWei: evalRes.walk.amountInGross.toString(),
-          sqrtPriceX96After: evalRes.walk.sqrtPriceX96After.toString(),
-          ticksCrossed: [...evalRes.walk.ticksCrossed],
-          avgPriceExact: ratToExactFractionString(evalRes.avgPrice),
-          avgPriceStr: ratToDecimalString(evalRes.avgPrice, 12),
-        };
+        const evalRes = evaluateSample(dMaxSample, depthRes.wei, feesSumPct);
+        if ('failure' in evalRes) {
+          dMaxDepthFailed = true;
+          countDepthExclusion(dMaxSample, 'depth_quote_failed', evalRes.failure, eventIndex);
+        } else {
+          impactAtDMax = evalRes.impact;
+          netAtDMax = evalRes.net;
+          depthQuote = {
+            amountOut: evalRes.walk.amountOut.toString(),
+            amountInGrossWei: evalRes.walk.amountInGross.toString(),
+            sqrtPriceX96After: evalRes.walk.sqrtPriceX96After.toString(),
+            ticksCrossed: [...evalRes.walk.ticksCrossed],
+            avgPriceExact: ratToExactFractionString(evalRes.avgPrice),
+            avgPriceStr: ratToDecimalString(evalRes.avgPrice, 12),
+            usdPriceRaw: depthRes.usdPriceRaw,
+          };
+        }
       }
     }
 
     // Pass evaluation over ALL usable in-span samples (skip-safe: samples
-    // with d <= feesSum cannot qualify because impact >= 0).
+    // with d <= feesSum cannot qualify because impact >= 0). Each evaluated
+    // sample first resolves its per-sample USD->WHYPE depth; an unusable
+    // USD reference excludes the sample from the pass rule with a counted
+    // reason (EM-STRAT-014-E1-R1 — no default price, no fabrication).
     let passed = false;
     let qualifyingSampleBlock: number | null = null;
     for (const s of span) {
       if (ratCmp(s.dPct, feesSumPct) <= 0) continue;
-      const evalRes = evaluateSample(s, depthNotionalWei, feesSumPct);
+      const depthRes = depthWeiFor(s);
+      if (!depthRes.ok) {
+        countDepthExclusion(s, depthRes.reason, depthRes.detail, eventIndex);
+        continue;
+      }
+      const evalRes = evaluateSample(s, depthRes.wei, feesSumPct);
       if ('failure' in evalRes) continue;
       if (ratIsPositive(evalRes.net)) {
         passed = true;

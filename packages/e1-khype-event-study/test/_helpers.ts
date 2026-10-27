@@ -33,12 +33,14 @@ export const RAW_DIR = join(FIXTURES_DIR, 'raw');
 export interface LoadedFixtures {
   manifest: unknown;
   anchorJsonl: string;
+  usdPriceJsonl: string;
   poolJsonls: Record<string, string>;
 }
 
 export function loadCommittedFixtures(): LoadedFixtures {
   const manifest = JSON.parse(readFileSync(join(FIXTURES_DIR, 'SYNTHETIC-manifest.json'), 'utf8')) as unknown;
   const anchorJsonl = readFileSync(join(RAW_DIR, 'anchor.jsonl'), 'utf8');
+  const usdPriceJsonl = readFileSync(join(RAW_DIR, 'usd-price.jsonl'), 'utf8');
   const poolJsonls: Record<string, string> = {};
   for (const addr of [
     '0x00000000000000000000000000000000000000a1',
@@ -48,14 +50,27 @@ export function loadCommittedFixtures(): LoadedFixtures {
   ]) {
     poolJsonls[addr] = readFileSync(join(RAW_DIR, `${addr}.jsonl`), 'utf8');
   }
-  return { manifest, anchorJsonl, poolJsonls };
+  return { manifest, anchorJsonl, usdPriceJsonl, poolJsonls };
 }
 
 export function replayCommitted(): Extract<ReplayResult, { ok: true }> {
   const fx = loadCommittedFixtures();
-  const result = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, poolJsonls: fx.poolJsonls });
+  const result = runReplay(fx.manifest, {
+    anchorJsonl: fx.anchorJsonl,
+    usdPriceJsonl: fx.usdPriceJsonl,
+    poolJsonls: fx.poolJsonls,
+  });
   if (!result.ok) throw new Error(`replay failed: ${JSON.stringify(result.errors)}`);
   return result;
+}
+
+/** Build a full RawArchiveInput from a loaded fixture set (for variant tests). */
+export function archiveFrom(fx: LoadedFixtures, overrides: Partial<{ anchorJsonl: string; usdPriceJsonl: string; poolJsonls: Record<string, string> }> = {}): { anchorJsonl: string; usdPriceJsonl: string; poolJsonls: Record<string, string> } {
+  return {
+    anchorJsonl: overrides.anchorJsonl ?? fx.anchorJsonl,
+    usdPriceJsonl: overrides.usdPriceJsonl ?? fx.usdPriceJsonl,
+    poolJsonls: overrides.poolJsonls ?? fx.poolJsonls,
+  };
 }
 
 export function poolByAddress(result: Extract<ReplayResult, { ok: true }>, suffix: string) {

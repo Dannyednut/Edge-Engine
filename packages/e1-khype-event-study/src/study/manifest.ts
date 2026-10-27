@@ -29,13 +29,26 @@ export const CONVENTION_DISCOUNT_SIGN = 'd > 0 => kHYPE below redemption value (
 export const CONVENTION_WHYPE_HYPE = 'ASSUMPTION_NOT_FACT';
 /** 1 WHYPE = 10^18 wei (both fixture tokens are 18 decimals). */
 export const WEI_PER_WHYPE = '1000000000000000000';
+/**
+ * EM-STRAT-014-E1-R1: the USD depth conversion. `1 WHYPE = $1` is FORBIDDEN
+ * — D USD is converted to a WHYPE wei amount PER SAMPLE via a provenance-
+ * bearing, block-aligned WHYPE-to-USD reference price from the archive's
+ * usd-price.jsonl series: depthWei = ceil(D_usd * 10^18 / usdPriceRaw).
+ * Ceil is the conservative direction (the walked amount is never smaller
+ * than the declared USD depth). Missing/stale/malformed/not-aligned USD
+ * input excludes the sample from depth evaluation with a counted reason.
+ */
+export const CONVENTION_DEPTH_CONVERSION = 'per_sample_ceil(D_usd*10^36/usdPriceRaw)';
+/** Expected pool orientation: token0 = WHYPE, token1 = kHYPE (declared). */
+export const EXPECTED_TOKEN0_SYMBOL = 'WHYPE';
+export const EXPECTED_TOKEN1_SYMBOL = 'KHYPE';
 
 export interface PoolCensusEntry {
   /** Lowercase hex pool address (also the raw archive file key). */
   address: string;
   venue: string;
-  token0: { symbol: string; decimals: number };
-  token1: { symbol: string; decimals: number };
+  token0: { symbol: string; decimals: number; address: string };
+  token1: { symbol: string; decimals: number; address: string };
   /** Expected V3 fee tier (millionths, e.g. 100 = 0.01%); null = no expectation. */
   expectedFeeTier: number | null;
 }
@@ -95,8 +108,8 @@ export interface ParsedManifest {
   /** flashloan + redemption fees, in percent, exact. */
   extraFeesPct: Rational;
   nEventsPerWeek: Rational;
-  /** D converted to WHYPE wei via the declared 1 WHYPE = $1 (assumption). */
-  depthNotionalWei: bigint;
+  /** D — the pre-registered USD depth, exact rational (NO wei fabrication). */
+  depthUsd: Rational;
   grossEventThresholdPct: Rational;
   independenceBandPct: Rational;
 }
@@ -289,7 +302,7 @@ export function validateManifest(raw: unknown): ManifestResult {
       for (const tokKey of ['token0', 'token1'] as const) {
         const t = e[tokKey] as Record<string, unknown> | undefined;
         if (t === null || typeof t !== 'object') {
-          errors.push(`poolCensus[${i}].${tokKey}:required-{symbol,decimals}`);
+          errors.push(`poolCensus[${i}].${tokKey}:required-{symbol,decimals,address}`);
           continue;
         }
         if (typeof t.symbol !== 'string' || t.symbol.length === 0) errors.push(`poolCensus[${i}].${tokKey}.symbol:required-non-empty-string`);
@@ -301,6 +314,34 @@ export function validateManifest(raw: unknown): ManifestResult {
           // rejected rather than silently mis-scaled.
           errors.push(`poolCensus[${i}].${tokKey}.decimals:expected-18-code-convention,got:${t.decimals}`);
         }
+        // EM-STRAT-014-E1-R1: token ADDRESSES are required — price
+        // orientation is validated against actual token identity, never
+        // assumed from slot order alone.
+        if (typeof t.address !== 'string' || !HEX_ADDR_RE.test(t.address)) {
+          errors.push(`poolCensus[${i}].${tokKey}.address:required-lowercase-hex-address,got:${JSON.stringify(t.address)}`);
+        }
+      }
+      // EM-STRAT-014-E1-R1: orientation integrity — the study subject is
+      // kHYPE-per-WHYPE and the local walk is fixed token0=WHYPE ->
+      // token1=kHYPE. The census MUST declare exactly that pair in the
+      // expected order; anything else fails closed (inverting requires a
+      // separately reviewed walk change — see assumption register).
+      const t0 = e.token0 as Record<string, unknown> | undefined;
+      const t1 = e.token1 as Record<string, unknown> | undefined;
+      if (
+        t0 && t1 &&
+        typeof t0.symbol === 'string' && typeof t1.symbol === 'string' &&
+        typeof t0.address === 'string' && typeof t1.address === 'string' &&
+        HEX_ADDR_RE.test(t0.address) && HEX_ADDR_RE.test(t1.address)
+      ) {
+        if (t0.address === t1.address) {
+          errors.push(`poolCensus[${i}].tokens:token0-and-token1-addresses-identical`);
+        }
+        const orderOk =
+          t0.symbol === EXPECTED_TOKEN0_SYMBOL && t1.symbol === EXPECTED_TOKEN1_SYMBOL;
+        if (!orderOk) {
+          errors.push(`poolCensus[${i}].tokens:pool_orientation_unsupported_expected_token0_${EXPECTED_TOKEN0_SYMBOL}_token1_${EXPECTED_TOKEN1_SYMBOL},got_${String(t0.symbol)}_${String(t1.symbol)}`);
+        }
       }
       if (e.expectedFeeTier !== null && !isNonNegInt(e.expectedFeeTier)) {
         errors.push(`poolCensus[${i}].expectedFeeTier:required-null-or-non-negative-integer,got:${JSON.stringify(e.expectedFeeTier)}`);
@@ -311,12 +352,10 @@ export function validateManifest(raw: unknown): ManifestResult {
   if (errors.length > 0) return { ok: false, errors };
 
   // --- derived quantities (exact) ---
-  // D in USD -> WHYPE wei under the declared 1 WHYPE = $1 assumption.
-  const depthWei = (dR as Rational).num * BigInt(WEI_PER_WHYPE);
-  const depthDen = (dR as Rational).den;
-  if (depthWei % depthDen !== 0n) {
-    return { ok: false, errors: [`parameters.depthUsd:must-yield-integer-wei,got:${String(depthWei)} / ${depthDen}`] };
-  }
+  // EM-STRAT-014-E1-R1: D stays a USD rational at manifest level. The
+  // per-sample WHYPE-wei conversion happens in the replay against the
+  // block-aligned USD reference price. The former `D * 10^18` wei
+  // derivation (which silently assumed 1 WHYPE = $1) is REMOVED.
 
   return {
     ok: true,
@@ -324,7 +363,7 @@ export function validateManifest(raw: unknown): ManifestResult {
       manifest: raw as unknown as StudyManifest,
       extraFeesPct: extraFeesPct as Rational,
       nEventsPerWeek: nR as Rational,
-      depthNotionalWei: depthWei / depthDen,
+      depthUsd: dR as Rational,
       grossEventThresholdPct: grossR as Rational,
       independenceBandPct: bandR as Rational,
     },
