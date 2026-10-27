@@ -37,6 +37,22 @@ export interface PerpFundingAlert {
   confidence: number;            // 0..1, from cross-validation
   source: 'sharpe+vooi' | 'sharpe' | 'vooi';
   vooiExecutable: boolean;       // true if both legs on VOOI venue set
+  /**
+   * EM-STRAT-014-E11-Cluster1-R1: server-provided Sharpe observation
+   * timestamp (epoch ms), propagated verbatim from the response meta.
+   * null when the server did not provide one — NEVER fabricated with
+   * Date.now(), and never inferred from local scan time.
+   */
+  sharpeAsOf: number | null;
+  /**
+   * EM-STRAT-014-E11-Cluster1-R1: explicit freshness label for the Sharpe
+   * leg of this alert. 'server-asof' means the server supplied an asOf
+   * timestamp (carried in sharpeAsOf); 'unknown' means the server did not,
+   * so the data's freshness is UNVERIFIED. No freshness SLA is configured
+   * for this provider, so no fresh/stale judgment is made — unknown stays
+   * unknown. VOOI-only alerts (no Sharpe row) are always 'unknown'.
+   */
+  freshness: 'server-asof' | 'unknown';
 }
 
 export class PerpFundingStrategy implements Strategy {
@@ -77,6 +93,19 @@ export class PerpFundingStrategy implements Strategy {
       minOiUsd: 50_000,
       assetClass: 'crypto',
     });
+
+    // EM-STRAT-014-E11-Cluster1-R1: propagate the server-provided asOf
+    // verbatim. Absent → null → every Sharpe-derived alert is labeled
+    // freshness 'unknown'. Local scan time is NEVER substituted. A malformed
+    // value (non-number / non-finite) is treated as absent (defensive at
+    // the consumer even though the client already normalizes to null).
+    const rawAsOf = sharpeResp.meta?.asOf;
+    const sharpeAsOf: number | null =
+      typeof rawAsOf === 'number' && Number.isFinite(rawAsOf) && rawAsOf > 0
+        ? rawAsOf
+        : null;
+    const sharpeFreshness: PerpFundingAlert['freshness'] =
+      sharpeAsOf === null ? 'unknown' : 'server-asof';
 
     // 2. Pull VOOI scanner (no auth needed)
     let vooiPairs: VooiArbitragePair[] = [];
@@ -133,7 +162,11 @@ export class PerpFundingStrategy implements Strategy {
       let source: PerpFundingAlert['source'] = 'sharpe';
 
       if (vooiPair) {
-        confidence = 0.9;
+        // EM-STRAT-014-E11-Cluster1-R1: VOOI agreement must NOT silently
+        // upgrade confidence for data whose Sharpe freshness is unknown.
+        // Full 0.9 cross-validated confidence requires a server-verified
+        // Sharpe asOf; with unknown freshness the cap is 0.7.
+        confidence = sharpeFreshness === 'server-asof' ? 0.9 : 0.7;
         priceSpreadPct = (vooiPair.priceSpreadAtSize ?? vooiPair.priceSpread ?? 0) * 100;
         source = 'sharpe+vooi';
         // If VOOI price spread is too wide, we lose on entry/exit
@@ -164,6 +197,8 @@ export class PerpFundingStrategy implements Strategy {
         confidence,
         source,
         vooiExecutable,
+        sharpeAsOf,
+        freshness: sharpeFreshness,
       });
     }
 
@@ -193,6 +228,11 @@ export class PerpFundingStrategy implements Strategy {
             confidence: 0.7,
             source: 'vooi',
             vooiExecutable: true,   // VOOI pair → both legs are on VOOI venues by definition
+            // VOOI-only row: no Sharpe data behind it, so freshness is
+            // unknown regardless of the VOOI row's presence (a VOOI row
+            // must never silently upgrade Sharpe-side freshness).
+            sharpeAsOf: null,
+            freshness: 'unknown',
           });
         }
       }

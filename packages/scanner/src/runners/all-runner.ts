@@ -243,6 +243,10 @@ async function main() {
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
             `Source: ${a.source} | VOOI: ${a.vooiExecutable ? 'YES' : 'NO'}`,
+            // EM-STRAT-014-E11-Cluster1-R1: Sharpe-source freshness must be
+            // explicit. 'unknown' means the server provided no asOf — the
+            // data is UNVERIFIED, not fresh. Never inferred from scan time.
+            `Sharpe freshness: ${a.freshness === 'server-asof' ? `server asOf ${new Date(a.sharpeAsOf as number).toISOString()}` : 'UNKNOWN (server provided no asOf — unverified)'}`,
           ].join('\n'),
           channels: ['telegram'],
         });
