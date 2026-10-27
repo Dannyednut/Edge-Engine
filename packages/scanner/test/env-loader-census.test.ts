@@ -12,22 +12,45 @@ import {
 //
 // Offline CI test that enforces the invariant: every `.env` loader in
 // scripts-explore/**/*.mts (excluding archive/ and *.mts.quarantined) must
-// either (a) use the shared loadDotEnvIntoProcessEnv helper (which excludes
-// EDGE_EXECUTION_AUTH), or (b) manually exclude EDGE_EXECUTION_AUTH.
+// either (a) call the shared loadDotEnvIntoProcessEnv helper IMPORTED FROM
+// THE APPROVED MODULE (packages/risk/src/dotenv-safety.ts / @edge/risk), or
+// (b) manually exclude EDGE_EXECUTION_AUTH.
 //
-// This is a GLOB-BASED scan (not a fixed allowlist): any newly added .mts
-// file that introduces a .env loader without the helper or manual exclusion
-// fails CI. The invariant is enforced for future files, not just the 139
-// files converted in EM-STRAT-014-C.
+// EM-STRAT-014-C-R1 — HARDENED ADVERSARIAL DETECTION:
+//   - Detection is BROADENED beyond `readFileSync(resolve(REPO_ROOT, '.env'))`:
+//     any readFileSync/readFile whose argument list references a `.env`
+//     string literal (covers join(...), resolve(...), __dirname, any
+//     differently named root constant, single/double quotes), plus any call
+//     receiving a `.env` path literal, plus `dotenv` npm-module imports.
+//   - A `loadDotEnvIntoProcessEnv(...)` call is only SAFE when the name is
+//     IMPORTED from the approved shared module. A locally defined lookalike
+//     (function/const with the same name, or a call without the approved
+//     import) FAILS the census.
+//   - The adversarial fixtures below feed SYNTHETIC SOURCE STRINGS through
+//     the EXACT classification function CI runs, proving: join/__dirname
+//     variants are caught, a local fake helper is caught, and the approved
+//     import passes.
+//
+// KNOWN LIMITS OF STATIC ANALYSIS (declared, per the work order):
+//   - This is a regex tripwire, not a proof. It cannot see through:
+//     multiline call arguments (`.env` on a different line from the call
+//     name), dynamic path construction ('.en' + 'v'), aliased imports
+//     (`import { x as loadDotEnvIntoProcessEnv }`), re-exported helpers,
+//     or reads routed through a non-fs indirection module. Deliberate
+//     evasion is out of scope for an accident-prevention control; the
+//     detection above aims to catch ACCIDENTAL reintroductions of the
+//     hand-rolled loader pattern in its common shapes.
+//   - The scan is GLOB-BASED (no fixed allowlist): future files are
+//     automatically covered. archive/ and *.mts.quarantined are excluded
+//     exactly as documented (dormant, not executable) and are NOT edited.
 //
 // Synthetic fixtures (Section 2) prove the shared helper excludes
-// EDGE_EXECUTION_AUTH: a temp .env file containing the key is loaded, and
-// process.env.EDGE_EXECUTION_AUTH must remain undefined. No real .env file
-// is ever read; all fixtures use synthetic keys with temp-file paths.
+// EDGE_EXECUTION_AUTH at runtime: a temp synthetic .env is loaded and the
+// key must stay absent from process.env. No real .env file is ever read;
+// no .env value is ever logged.
 //
-// Constraints: $0 budget, offline-only, no real .env reads, no scanner /
-// executor / daemon / RPC / API / deployment execution. This test only
-// reads source files and writes temp fixture files under os.tmpdir().
+// Constraints: $0 budget, offline-only, no real .env inspection, no scanner
+// / executor / daemon / RPC / API / deployment execution.
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
 const SCRIPTS_EXPLORE_DIR = resolve(REPO_ROOT, 'scripts-explore');
@@ -52,21 +75,80 @@ function collectExecutableMtsFiles(dir: string): string[] {
   const results: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
-    // Skip the archive/ subdirectory entirely (dormant by convention).
-    if (entry === 'archive') continue;
-    // Skip node_modules.
+    if (entry === 'archive') continue; // dormant by convention (documented)
     if (entry === 'node_modules') continue;
-    // Recurse into subdirectories.
     if (existsSync(full) && statSync(full).isDirectory()) {
       results.push(...collectExecutableMtsFiles(full));
       continue;
     }
-    // Include .mts files; EXCLUDE .mts.quarantined (not executable).
     if (entry.endsWith('.mts') && !entry.endsWith('.mts.quarantined')) {
       results.push(full);
     }
   }
   return results;
+}
+
+// ─── EM-STRAT-014-C-R1: the EXACT detection/classification CI runs ──────
+//
+// Pure functions over source text so the adversarial synthetic fixtures
+// exercise the same logic as the live tree scan (execution-sink-census
+// pattern).
+
+/** Broadened `.env`-loader detection (see the limits note above). */
+export function detectEnvLoaderSource(src: string): boolean {
+  const helperCall = /loadDotEnvIntoProcessEnv\s*\(/.test(src);
+  // readFileSync/readFile whose single-line argument list references a
+  // `.env` string literal — catches resolve(...), join(...), __dirname,
+  // REPO_ROOT, differently named roots, relative/absolute literals, and
+  // both quote styles.
+  const fsReadEnv = /\b(?:readFileSync|readFile)\s*\([^)]*?['"]\.env['"]/.test(src);
+  // Any call whose argument list ENDS with a `.env` path literal (wrapped
+  // read helpers, e.g. loadDotEnv(resolve(ROOT, '.env')) or readEnv(join(d, '.env'))).
+  const envArgCall = /['"]\.env['"]\s*\)/.test(src);
+  // The dotenv npm module (its config() does NOT exclude EDGE_EXECUTION_AUTH).
+  const dotenvModule = /(?:import\s[^;]*from\s*|require\(\s*)['"]dotenv(?:\/[a-z-]+)?['"]/.test(src);
+  return helperCall || fsReadEnv || envArgCall || dotenvModule;
+}
+
+/** The ONLY import sources the shared helper may come from. */
+const APPROVED_HELPER_IMPORT_RE =
+  /import\s*\{[^}]*loadDotEnvIntoProcessEnv[^}]*\}\s*from\s*['"](?:@edge\/risk(?:\/[a-z-]+)?|(?:\.\.?\/)+packages\/risk\/src\/dotenv-safety\.(?:ts|js))['"]/;
+
+/** A locally defined lookalike helper is NEVER the approved import. */
+const LOCAL_HELPER_DEF_RE =
+  /(?:function\s+loadDotEnvIntoProcessEnv\b|(?:const|let|var)\s+loadDotEnvIntoProcessEnv\s*[:=])/;
+
+export interface EnvLoaderClassification {
+  isLoader: boolean;
+  safe: boolean;
+  /** Why the loader is unsafe (only when isLoader && !safe). */
+  violation?: string;
+}
+
+/** Classify one source file's `.env`-loader posture (the census invariant). */
+export function classifyEnvLoaderSource(src: string): EnvLoaderClassification {
+  const s = stripComments(src);
+  if (!detectEnvLoaderSource(s)) return { isLoader: false, safe: true };
+
+  const hasManualExclusion = /EDGE_EXECUTION_AUTH/.test(s);
+  const hasApprovedImport = APPROVED_HELPER_IMPORT_RE.test(s);
+  const hasLocalDef = LOCAL_HELPER_DEF_RE.test(s);
+  const fsReadEnv = /\b(?:readFileSync|readFile)\s*\([^)]*?['"]\.env['"]/.test(s);
+  const dotenvModule = /(?:import\s[^;]*from\s*|require\(\s*)['"]dotenv(?:\/[a-z-]+)?['"]/.test(s);
+
+  if (hasLocalDef) {
+    return { isLoader: true, safe: false, violation: 'local_lookalike_helper_definition' };
+  }
+  if (dotenvModule) {
+    return { isLoader: true, safe: false, violation: 'dotenv_npm_module_config_does_not_exclude_edge_execution_auth' };
+  }
+  if (fsReadEnv && !hasManualExclusion) {
+    return { isLoader: true, safe: false, violation: 'inline_env_file_read_without_edge_execution_auth_exclusion' };
+  }
+  if (/loadDotEnvIntoProcessEnv\s*\(/.test(s) && !hasApprovedImport) {
+    return { isLoader: true, safe: false, violation: 'helper_name_called_without_approved_import' };
+  }
+  return { isLoader: true, safe: true };
 }
 
 // ─── Section 1: Glob-based census invariant ─────────────────────────────
@@ -75,83 +157,53 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
   const allFiles = collectExecutableMtsFiles(SCRIPTS_EXPLORE_DIR);
 
   it('scan discovered executable .mts files in scripts-explore/ (sanity)', () => {
-    // Sanity: the scan found files (not an empty glob).
     expect(allFiles.length).toBeGreaterThan(100);
   });
 
-  it('every .env loader uses the shared helper OR manually excludes EDGE_EXECUTION_AUTH', () => {
+  it('every .env loader uses the approved imported helper OR manually excludes EDGE_EXECUTION_AUTH', () => {
     const violations: string[] = [];
-    const loaders: string[] = [];
-    const safeLoaders: string[] = [];
     const helperLoaders: string[] = [];
+    const safeManualLoaders: string[] = [];
 
     for (const filepath of allFiles) {
       const rel = relative(REPO_ROOT, filepath);
-      const raw = readFileSync(filepath, 'utf8');
-      const src = stripComments(raw);
-
-      // Detect a .env loader: readFileSync(resolve(REPO_ROOT, '.env'))
-      // (the hand-rolled pattern) OR loadDotEnvIntoProcessEnv(...) (the
-      // shared helper). Files without either are not .env loaders.
-      const hasInlineLoader = /readFileSync\(\s*resolve\(\s*REPO_ROOT\s*,\s*['"]\.env['"]\s*\)/.test(src);
-      const hasHelperLoader = /loadDotEnvIntoProcessEnv\s*\(/.test(src);
-
-      if (!hasInlineLoader && !hasHelperLoader) continue; // not a .env loader
-
-      // This file IS a .env loader. It must satisfy the invariant.
-      const usesHelper = hasHelperLoader;
-      const hasManualExclusion = /EDGE_EXECUTION_AUTH/.test(src);
-
-      if (usesHelper) {
-        helperLoaders.push(rel);
-      } else if (hasManualExclusion) {
-        safeLoaders.push(rel);
+      const src = readFileSync(filepath, 'utf8');
+      const cls = classifyEnvLoaderSource(src);
+      if (!cls.isLoader) continue;
+      if (cls.safe) {
+        if (/EDGE_EXECUTION_AUTH/.test(stripComments(src))) safeManualLoaders.push(rel);
+        else helperLoaders.push(rel);
       } else {
-        // VIOLATION: .env loader without the helper and without manual exclusion.
-        violations.push(rel);
+        violations.push(`${rel}: ${cls.violation}`);
       }
-
-      // Additional check: if the file has the inline loader pattern (not the
-      // helper), it MUST have the manual exclusion. The inline pattern alone
-      // is a violation.
-      if (hasInlineLoader && !hasManualExclusion) {
-        if (!violations.includes(rel)) violations.push(rel);
-      }
-
-      loaders.push(rel);
     }
 
-    // The invariant: zero violations.
     expect(violations).toEqual([]);
 
-    // Sanity counts: we expect ~139 helper loaders + 5 safe loaders = ~144.
-    // (Use >= so the test does not break if new safe loaders are added.)
+    // Sanity counts on the remediated tree: 139 approved-helper loaders +
+    // 5 safe manual-exclusion loaders. Use >= so adding MORE safe loaders
+    // does not break the census.
     expect(helperLoaders.length).toBeGreaterThanOrEqual(139);
-    expect(safeLoaders.length).toBeGreaterThanOrEqual(5);
+    expect(safeManualLoaders.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('no executable .mts file in scripts-explore/ has the old inline .env parser without exclusion', () => {
-    // Direct check for the old inline pattern: readFileSync(resolve(REPO_ROOT, '.env'))
-    // followed by the regex match loop, WITHOUT EDGE_EXECUTION_AUTH exclusion.
-    // This catches a future regression where someone copies the old block back.
-    const oldPatternFiles: string[] = [];
+  it('helper loaders import from the APPROVED shared module (not a lookalike source)', () => {
     for (const filepath of allFiles) {
-      const rel = relative(REPO_ROOT, filepath);
-      const raw = readFileSync(filepath, 'utf8');
-      const src = stripComments(raw);
-
-      const hasOldInlineLoader = /readFileSync\(\s*resolve\(\s*REPO_ROOT\s*,\s*['"]\.env['"]\s*\)/.test(src);
-      const hasManualExclusion = /EDGE_EXECUTION_AUTH/.test(src);
-
-      if (hasOldInlineLoader && !hasManualExclusion) {
-        oldPatternFiles.push(rel);
-      }
+      const src = readFileSync(filepath, 'utf8');
+      const s = stripComments(src);
+      if (!/loadDotEnvIntoProcessEnv\s*\(/.test(s)) continue;
+      expect(
+        APPROVED_HELPER_IMPORT_RE.test(s),
+        `${relative(REPO_ROOT, filepath)} must import loadDotEnvIntoProcessEnv from @edge/risk or ../packages/risk/src/dotenv-safety.{ts,js}`,
+      ).toBe(true);
+      expect(
+        LOCAL_HELPER_DEF_RE.test(s),
+        `${relative(REPO_ROOT, filepath)} must not define a local lookalike helper`,
+      ).toBe(false);
     }
-    expect(oldPatternFiles).toEqual([]);
   });
 
   it('archive/ and .mts.quarantined files are excluded from the scan (dormant)', () => {
-    // Verify no archive/ or .quarantined file appears in the scan results.
     for (const filepath of allFiles) {
       const rel = relative(REPO_ROOT, filepath);
       expect(rel).not.toContain('archive/');
@@ -160,32 +212,146 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
   });
 });
 
-// ─── Section 2: Synthetic fixtures — .env cannot arm the guard ──────────
+// ─── Section 1b: Adversarial synthetic source fixtures (C-R1) ───────────
 
-describe('EM-STRAT-014-C — synthetic fixtures: loadDotEnvIntoProcessEnv excludes EDGE_EXECUTION_AUTH', () => {
+describe('EM-STRAT-014-C-R1 — adversarial synthetic source fixtures (the exact CI classifier)', () => {
+  it('UNSAFE: readFileSync(join(ROOT, \'.env\')) — differently named root via join — is caught', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "const ROOT = '/somewhere';",
+      "const env = readFileSync(join(ROOT, '.env'), 'utf8');",
+      "process.env.FOO = 'bar';",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE: readFileSync(resolve(__dirname, \'.env\')) — __dirname root — is caught', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "const env = readFileSync(resolve(__dirname, '.env'), 'utf8');",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE: locally defined fake helper with the approved name is caught (no approved import)', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "function loadDotEnvIntoProcessEnv(p: string): void {",
+      "  const c = readFileSync(p, 'utf8');",
+      "  for (const line of c.split('\\n')) {",
+      "    const [k, v] = line.split('=');",
+      "    if (k && v && !process.env[k]) process.env[k] = v; // NO exclusion!",
+      "  }",
+      "}",
+      "loadDotEnvIntoProcessEnv('.env');",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('local_lookalike_helper_definition');
+  });
+
+  it('UNSAFE: helper-name call without ANY approved import is caught (renamed-source evasion)', () => {
+    const src = [
+      "import { loadDotEnvIntoProcessEnv } from './my-own-env-helper';",
+      "loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('helper_name_called_without_approved_import');
+  });
+
+  it('UNSAFE: dotenv npm module import is caught (config() does not exclude the auth key)', () => {
+    const src = [
+      "import dotenv from 'dotenv';",
+      "dotenv.config();",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('dotenv_npm_module_config_does_not_exclude_edge_execution_auth');
+  });
+
+  it('SAFE: the approved import from ../packages/risk/src/dotenv-safety.ts passes', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';",
+      "const REPO_ROOT = resolve(__dirname, '..');",
+      "loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(true);
+    expect(cls.violation).toBeUndefined();
+  });
+
+  it('SAFE: the approved import from the @edge/risk package export passes', () => {
+    const src = [
+      "import { loadDotEnvIntoProcessEnv } from '@edge/risk';",
+      "loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(true);
+  });
+
+  it('SAFE: inline read WITH the EDGE_EXECUTION_AUTH manual exclusion passes (the 5 legacy safe loaders)', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "try {",
+      "  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "  for (const line of env.split('\\n')) {",
+      "    const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "    if (!m) continue;",
+      "    const [, k, v] = m;",
+      "    if (k === 'EDGE_EXECUTION_AUTH') continue;",
+      "    if (!process.env[k]) process.env[k] = v;",
+      "  }",
+      "} catch {}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(true);
+  });
+
+  it('SAFE: a file with no .env reference at all is not a loader', () => {
+    const src = "console.log('hello');\n";
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(false);
+    expect(cls.safe).toBe(true);
+  });
+});
+
+// ─── Section 2: Synthetic runtime fixtures — .env cannot arm the guard ──
+
+describe('EM-STRAT-014-C — synthetic runtime fixtures: helper excludes EDGE_EXECUTION_AUTH', () => {
   let tempDir: string;
 
   beforeEach(() => {
     tempDir = join(process.cwd(), '.tmp-env-loader-test-' + process.pid + '-' + Date.now());
     mkdirSync(tempDir, { recursive: true });
-    // Ensure EDGE_EXECUTION_AUTH is not set from the test runner environment.
     delete process.env[EXECUTION_AUTH_ENV_VAR];
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
     delete process.env[EXECUTION_AUTH_ENV_VAR];
-    // Clean up any synthetic keys that might have been set.
     delete process.env.SYNTHETIC_API_KEY;
     delete process.env.SYNTHETIC_RPC_URL;
     delete process.env.SYNTHETIC_TOKEN;
   });
 
   it('EDGE_EXECUTION_AUTH in .env is NOT copied to process.env (the helper excludes it)', () => {
-    // Write a synthetic .env fixture containing EDGE_EXECUTION_AUTH + regular keys.
-    // The value is a SYNTHETIC descriptor (not a real credential); it is never
-    // used to authorize anything — the test only checks that the helper does
-    // NOT copy it to process.env.
     const envPath = join(tempDir, '.env');
     const syntheticDescriptor = JSON.stringify({
       authId: 'SYNTHETIC-NEVER-USED',
@@ -200,20 +366,15 @@ describe('EM-STRAT-014-C — synthetic fixtures: loadDotEnvIntoProcessEnv exclud
       'SYNTHETIC_TOKEN=abc123',
     ].join('\n') + '\n');
 
-    // Load via the shared helper.
     loadDotEnvIntoProcessEnv(envPath);
 
-    // Regular keys ARE loaded.
     expect(process.env.SYNTHETIC_API_KEY).toBe('test-key-12345');
     expect(process.env.SYNTHETIC_RPC_URL).toBe('https://synthetic.example.com');
     expect(process.env.SYNTHETIC_TOKEN).toBe('abc123');
-
-    // EDGE_EXECUTION_AUTH is NOT loaded (the helper excludes it).
     expect(process.env[EXECUTION_AUTH_ENV_VAR]).toBeUndefined();
   });
 
   it('parseDotEnvContents excludes EDGE_EXECUTION_AUTH from the returned record', () => {
-    // Pure-parser test: the excluded key never appears in the parsed record.
     const syntheticDescriptor = JSON.stringify({
       authId: 'SYNTHETIC-PARSER-TEST',
       expiresAtMs: Date.now() + 60_000,
@@ -227,27 +388,18 @@ describe('EM-STRAT-014-C — synthetic fixtures: loadDotEnvIntoProcessEnv exclud
 
     const parsed = parseDotEnvContents(content);
 
-    // Regular keys are present.
     expect(parsed.SYNTHETIC_API_KEY).toBe('parser-test-key');
     expect(parsed.SYNTHETIC_TOKEN).toBe('parser-test-token');
-
-    // EDGE_EXECUTION_AUTH is absent from the record.
     expect(parsed[EXECUTION_AUTH_ENV_VAR]).toBeUndefined();
     expect(Object.keys(parsed)).not.toContain(EXECUTION_AUTH_ENV_VAR);
   });
 
-  it('DOTENV_EXCLUDED_KEYS contains exactly EDGE_EXECUTION_AUTH', () => {
-    // The exclusion set must contain the execution-auth env var.
+  it('DOTENV_EXCLUDED_KEYS contains EDGE_EXECUTION_AUTH', () => {
     expect(DOTENV_EXCLUDED_KEYS.has(EXECUTION_AUTH_ENV_VAR)).toBe(true);
-    // And it should be the only excluded key (unless future work adds more).
     expect(DOTENV_EXCLUDED_KEYS.size).toBeGreaterThanOrEqual(1);
   });
 
   it('parent-process EDGE_EXECUTION_AUTH is NOT overwritten by .env (parent wins)', () => {
-    // Even if .env contained EDGE_EXECUTION_AUTH (which the helper skips),
-    // the helper also does not overwrite existing process.env keys. This
-    // double-proves: a parent-process descriptor is preserved, and a .env
-    // descriptor cannot arm the guard.
     const envPath = join(tempDir, '.env');
     const parentDescriptor = JSON.stringify({
       authId: 'SYNTHETIC-PARENT-PROC',
@@ -268,17 +420,13 @@ describe('EM-STRAT-014-C — synthetic fixtures: loadDotEnvIntoProcessEnv exclud
 
     loadDotEnvIntoProcessEnv(envPath);
 
-    // The parent-process value is preserved (helper does not overwrite).
     expect(process.env[EXECUTION_AUTH_ENV_VAR]).toBe(parentDescriptor);
-    // Regular key is loaded (helper works).
     expect(process.env.SYNTHETIC_API_KEY).toBe('parent-wins-test');
   });
 
   it('missing .env file is a no-op (no throw, no mutation)', () => {
     const missingPath = join(tempDir, 'does-not-exist.env');
-    // Should not throw.
     expect(() => loadDotEnvIntoProcessEnv(missingPath)).not.toThrow();
-    // No mutation.
     expect(process.env[EXECUTION_AUTH_ENV_VAR]).toBeUndefined();
   });
 
@@ -296,7 +444,6 @@ describe('EM-STRAT-014-C — synthetic fixtures: loadDotEnvIntoProcessEnv exclud
     expect(process.env.SYNTHETIC_SINGLE).toBe('single-quoted-value');
     expect(process.env.SYNTHETIC_BARE).toBe('bare-value');
 
-    // Cleanup.
     delete process.env.SYNTHETIC_DOUBLE;
     delete process.env.SYNTHETIC_SINGLE;
     delete process.env.SYNTHETIC_BARE;
@@ -321,7 +468,6 @@ describe('EM-STRAT-014-C — .env cannot arm the guard (integration with executi
   });
 
   it('a .env containing a valid-looking descriptor does NOT arm the guard', async () => {
-    // Write a .env with a descriptor that WOULD be valid if it reached the guard.
     const envPath = join(tempDir, '.env');
     const validLookingDescriptor = JSON.stringify({
       authId: 'SYNTHETIC-GUARD-TEST',
@@ -333,19 +479,11 @@ describe('EM-STRAT-014-C — .env cannot arm the guard (integration with executi
       'SYNTHETIC_GUARD_TEST_KEY=loaded',
     ].join('\n') + '\n');
 
-    // Load via the shared helper.
     loadDotEnvIntoProcessEnv(envPath);
 
-    // The regular key IS loaded.
     expect(process.env.SYNTHETIC_GUARD_TEST_KEY).toBe('loaded');
-
-    // EDGE_EXECUTION_AUTH is NOT in process.env (helper excluded it).
     expect(process.env[EXECUTION_AUTH_ENV_VAR]).toBeUndefined();
 
-    // Therefore the guard would DENY (we verify by re-parsing the env var).
-    // We do NOT call assertExecutionAuthorized here (it would throw); instead
-    // we verify the precondition: the env var is unset, so the guard's
-    // parseExecutionAuthorization would return { ok: false }.
     const { parseExecutionAuthorization } = await import('@edge/risk');
     const result = parseExecutionAuthorization(
       process.env[EXECUTION_AUTH_ENV_VAR],
