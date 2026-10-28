@@ -73,7 +73,16 @@ import { HYPERSWAP_V3_POOLS, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman, HY
 const ACCOUNTANT_ADDR = '0x9209648Ec9D448EF57116B73A2f081835643dc7A';
 const KHYPE_TO_HYPE_SELECTOR = '0x759bc2fc';
 const STAKING_MANAGER_ADDR = '0x393D0B87Ed38fc779FD9611144aE649BA6082109';
-const WITHDRAWAL_DELAY_SELECTOR = '0x5e8a8c20'; // withdrawalDelay()
+// EM-STRAT-014-X3-F1: canonical signature withdrawalDelay() keccak256 =
+// 0xa7ab6961a81d2ea0ed142ae45a7fd8038411863e463027e5780af59b1187c5ba →
+// selector 0xa7ab6961, verified against the StakingManager implementation's
+// verified ABI (EI_STRAT014_E10_X3_ONCHAIN_READS_2026-10-27 §1/§9) and
+// independently recomputed via viem keccak256 in
+// test/hl-lst-arb-scanner.test.ts. The previous constant 0x5e8a8c20 was NOT
+// a function on this contract: every call reverted, fetchWithdrawalDelay()
+// failed closed (null), and the withdrawal-delay input silently suppressed
+// this scanner's signals.
+const WITHDRAWAL_DELAY_SELECTOR = '0xa7ab6961'; // withdrawalDelay()
 const SLOT0_SELECTOR = '0x3850c7bd';            // slot0()
 const LIQUIDITY_SELECTOR = '0x1a686502';        // liquidity()
 const ONE_E18 = 10n ** 18n;
@@ -242,8 +251,10 @@ export class HlLstArbScanner implements Strategy {
 
   /**
    * Fetch the withdrawal delay from the Kinetiq StakingManager.
-   * Selector: withdrawalDelay() = 0x5e8a8c20
-   * Returns seconds, or null if unavailable.
+   * Selector: withdrawalDelay() = 0xa7ab6961 (EM-STRAT-014-X3-F1 — the
+   * previous 0x5e8a8c20 selector does not exist on the verified ABI and
+   * always reverted, suppressing this input).
+   * Returns seconds, or null if unavailable (fail-closed).
    */
   async fetchWithdrawalDelay(): Promise<number | null> {
     try {
