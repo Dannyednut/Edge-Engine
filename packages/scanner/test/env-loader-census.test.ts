@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync, existsSync, statSync } from 'node:fs';
 import { resolve, join, relative } from 'node:path';
+import ts from 'typescript';
 import {
   loadDotEnvIntoProcessEnv,
   parseDotEnvContents,
@@ -12,34 +13,47 @@ import {
 //
 // Offline CI test that enforces the invariant: every `.env` loader in
 // scripts-explore/**/*.mts (excluding archive/ and *.mts.quarantined) must
-// either (a) call the shared loadDotEnvIntoProcessEnv helper IMPORTED FROM
-// THE APPROVED MODULE (packages/risk/src/dotenv-safety.ts / @edge/risk), or
-// (b) manually exclude EDGE_EXECUTION_AUTH.
+// either (a) call the shared loadDotEnvIntoProcessEnv helper whose IMPORTED
+// SYMBOL is exactly that export of an APPROVED module (packages/risk/src/
+// dotenv-safety.ts / @edge/risk), or (b) carry a PROVEN ACTIVE manual
+// exclusion of EDGE_EXECUTION_AUTH.
 //
 // EM-STRAT-014-C-R1 — HARDENED ADVERSARIAL DETECTION:
-//   - Detection is BROADENED beyond `readFileSync(resolve(REPO_ROOT, '.env'))`:
-//     any readFileSync/readFile whose argument list references a `.env`
-//     string literal (covers join(...), resolve(...), __dirname, any
-//     differently named root constant, single/double quotes), plus any call
-//     receiving a `.env` path literal, plus `dotenv` npm-module imports.
-//   - A `loadDotEnvIntoProcessEnv(...)` call is only SAFE when the name is
-//     IMPORTED from the approved shared module. A locally defined lookalike
-//     (function/const with the same name, or a call without the approved
-//     import) FAILS the census.
-//   - The adversarial fixtures below feed SYNTHETIC SOURCE STRINGS through
-//     the EXACT classification function CI runs, proving: join/__dirname
-//     variants are caught, a local fake helper is caught, and the approved
-//     import passes.
+//   - Detection broadened beyond readFileSync(resolve(REPO_ROOT, '.env')):
+//     join(...), __dirname, any root name, both quotes, wrapped helpers,
+//     dotenv npm imports.
 //
-// KNOWN LIMITS OF STATIC ANALYSIS (declared, per the work order):
-//   - This is a regex tripwire, not a proof. It cannot see through:
-//     multiline call arguments (`.env` on a different line from the call
-//     name), dynamic path construction ('.en' + 'v'), aliased imports
-//     (`import { x as loadDotEnvIntoProcessEnv }`), re-exported helpers,
-//     or reads routed through a non-fs indirection module. Deliberate
-//     evasion is out of scope for an accident-prevention control; the
-//     detection above aims to catch ACCIDENTAL reintroductions of the
-//     hand-rolled loader pattern in its common shapes.
+// EM-STRAT-014-C-R2 — PROOF-BASED CLASSIFICATION (TypeScript AST):
+//   The `typescript` package is already a devDependency of this package;
+//   no new dependency is added. Two proven R1 false-negative paths are
+//   closed:
+//
+//   1. A bare mention of EDGE_EXECUTION_AUTH is NOT proof of exclusion
+//      (R1 accepted any occurrence — a log, a stale comment, an unrelated
+//      branch, or dead code counted as "safe"). The classifier now
+//      requires an ACTIVE GUARD tied to the loader's key variable: an
+//      `if` statement comparing some identifier K to the literal
+//      'EDGE_EXECUTION_AUTH' (===/==, either operand order) whose taken
+//      branch contains `continue` or `return`, where the SAME identifier
+//      K is used as the KEY of a `process.env[K] = ...` (or ??=/||=)
+//      assignment. Anything the recognizer cannot prove is UNSAFE.
+//   2. The approved-import check now proves IMPORTED SYMBOL IDENTITY, not
+//      alias text: the named import's propertyName must be exactly
+//      `loadDotEnvIntoProcessEnv` from an approved module specifier.
+//      `import { unrelatedFn as loadDotEnvIntoProcessEnv } from
+//      '@edge/risk'` is rejected (helper_imported_symbol_not_approved).
+//
+// KNOWN LIMITS OF STATIC ANALYSIS (declared, per the work orders):
+//   - Still not a proof of arbitrary program semantics. The identifier tie
+//     between guard and assignment is name-based, not full dataflow (two
+//     same-named variables in unrelated scopes could in principle defeat
+//     it — deliberate evasion is out of scope for an accident-prevention
+//     control). require()-based dynamic loading, re-export indirection,
+//     and reads routed through a non-fs helper module are not resolved.
+//     Guard styles other than continue/return fail closed.
+//   - Comment and string content are invisible to the AST walk (R1's
+//     line-based comment stripper is gone — comments can never make a
+//     loader safe anymore).
 //   - The scan is GLOB-BASED (no fixed allowlist): future files are
 //     automatically covered. archive/ and *.mts.quarantined are excluded
 //     exactly as documented (dormant, not executable) and are NOT edited.
@@ -54,20 +68,6 @@ import {
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
 const SCRIPTS_EXPLORE_DIR = resolve(REPO_ROOT, 'scripts-explore');
-
-// ─── Comment stripping (mirrors execution-sink-census.test.ts) ──────────
-
-function stripComments(source: string): string {
-  return source.split('\n').map(line => {
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith('//') || trimmed.startsWith('*')) return '';
-    const idx = line.indexOf('//');
-    if (idx > 0 && line[idx - 1] !== ':' && line[idx - 1] !== "'") {
-      return line.slice(0, idx);
-    }
-    return line;
-  }).join('\n');
-}
 
 // ─── Glob: collect all executable .mts files in scripts-explore/ ────────
 
@@ -88,67 +88,250 @@ function collectExecutableMtsFiles(dir: string): string[] {
   return results;
 }
 
-// ─── EM-STRAT-014-C-R1: the EXACT detection/classification CI runs ──────
+// ─── EM-STRAT-014-C-R2: AST-based classifier (the EXACT logic CI runs) ──
 //
 // Pure functions over source text so the adversarial synthetic fixtures
 // exercise the same logic as the live tree scan (execution-sink-census
 // pattern).
 
-/** Broadened `.env`-loader detection (see the limits note above). */
-export function detectEnvLoaderSource(src: string): boolean {
-  const helperCall = /loadDotEnvIntoProcessEnv\s*\(/.test(src);
-  // readFileSync/readFile whose single-line argument list references a
-  // `.env` string literal — catches resolve(...), join(...), __dirname,
-  // REPO_ROOT, differently named roots, relative/absolute literals, and
-  // both quote styles.
-  const fsReadEnv = /\b(?:readFileSync|readFile)\s*\([^)]*?['"]\.env['"]/.test(src);
-  // Any call whose argument list ENDS with a `.env` path literal (wrapped
-  // read helpers, e.g. loadDotEnv(resolve(ROOT, '.env')) or readEnv(join(d, '.env'))).
-  const envArgCall = /['"]\.env['"]\s*\)/.test(src);
-  // The dotenv npm module (its config() does NOT exclude EDGE_EXECUTION_AUTH).
-  const dotenvModule = /(?:import\s[^;]*from\s*|require\(\s*)['"]dotenv(?:\/[a-z-]+)?['"]/.test(src);
-  return helperCall || fsReadEnv || envArgCall || dotenvModule;
+const AUTH_KEY_LITERAL = 'EDGE_EXECUTION_AUTH';
+const HELPER_NAME = 'loadDotEnvIntoProcessEnv';
+
+/** The ONLY module specifiers the shared helper may be imported from. */
+export function isApprovedModuleSpecifier(spec: string): boolean {
+  return (
+    spec === '@edge/risk' ||
+    /^@edge\/risk\/[a-z-]+$/.test(spec) ||
+    /^(?:\.\.?\/)+packages\/risk\/src\/dotenv-safety\.(?:ts|js)$/.test(spec)
+  );
 }
 
-/** The ONLY import sources the shared helper may come from. */
-const APPROVED_HELPER_IMPORT_RE =
-  /import\s*\{[^}]*loadDotEnvIntoProcessEnv[^}]*\}\s*from\s*['"](?:@edge\/risk(?:\/[a-z-]+)?|(?:\.\.?\/)+packages\/risk\/src\/dotenv-safety\.(?:ts|js))['"]/;
+function isDotenvModuleSpecifier(spec: string): boolean {
+  return /^dotenv(?:\/[a-z-]+)?$/.test(spec);
+}
 
-/** A locally defined lookalike helper is NEVER the approved import. */
-const LOCAL_HELPER_DEF_RE =
-  /(?:function\s+loadDotEnvIntoProcessEnv\b|(?:const|let|var)\s+loadDotEnvIntoProcessEnv\s*[:=])/;
+export interface ImportFact {
+  /** Local binding name in the file. */
+  localName: string;
+  /** The symbol name AS EXPORTED by the module (propertyName when aliased). */
+  importedName: string;
+  module: string;
+}
+
+export interface EnvLoaderFacts {
+  /** Any call receiving a '.env' string literal, any helper-name call, or any dotenv import. */
+  isLoader: boolean;
+  /** Calls whose callee is LITERALLY named loadDotEnvIntoProcessEnv. */
+  helperNameCallCount: number;
+  /** True when a call resolves to the helper through an import binding (direct or deliberately aliased). */
+  hasHelperCall: boolean;
+  /** readFileSync/readFile (plain or property-named) receiving a '.env' literal. */
+  fsReadEnvLiteralCallCount: number;
+  /** ANY call receiving a '.env' literal anywhere in its argument subtree. */
+  envArgCallCount: number;
+  imports: ImportFact[];
+  dotenvImport: boolean;
+  /** Locally declared function/const/let/var named loadDotEnvIntoProcessEnv. */
+  localHelperDef: boolean;
+  /** Identifiers K used as the KEY of a process.env[K] = ... (or ??=/||=) assignment. */
+  envAssignKeyIds: Set<string>;
+  /** Identifiers K guarded by `if (K === 'EDGE_EXECUTION_AUTH') <continue|return>`. */
+  activeGuardKeyIds: Set<string>;
+  /** All plain-identifier callee names observed (for import-binding resolution). */
+  callCalleeNames: Set<string>;
+}
+
+function containsEnvLiteral(root: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isStringLiteral(n) && n.text === '.env') {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return found;
+}
+
+function subtreeHasContinueOrReturn(root: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isContinueStatement(n) || ts.isReturnStatement(n)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return found;
+}
+
+/** Collect the structural facts the classifier needs (one AST walk). */
+export function collectEnvLoaderFacts(src: string): EnvLoaderFacts {
+  const sf = ts.createSourceFile('census-target.mts', src, ts.ScriptTarget.ES2022, /* setParentNodes */ true, ts.ScriptKind.TS);
+  const facts: EnvLoaderFacts = {
+    isLoader: false,
+    helperNameCallCount: 0,
+    hasHelperCall: false,
+    fsReadEnvLiteralCallCount: 0,
+    envArgCallCount: 0,
+    imports: [],
+    dotenvImport: false,
+    localHelperDef: false,
+    envAssignKeyIds: new Set(),
+    activeGuardKeyIds: new Set(),
+    callCalleeNames: new Set(),
+  };
+
+  const visit = (node: ts.Node): void => {
+    // Imports (ESM): record every named binding with its EXPORTED name.
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const mod = node.moduleSpecifier.text;
+      if (isDotenvModuleSpecifier(mod)) facts.dotenvImport = true;
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const el of named.elements) {
+          facts.imports.push({ localName: el.name.text, importedName: (el.propertyName ?? el.name).text, module: mod });
+        }
+      }
+    }
+    // require('dotenv') form.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'require' &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      isDotenvModuleSpecifier(node.arguments[0].text)
+    ) {
+      facts.dotenvImport = true;
+    }
+    // Calls: helper-name calls and '.env'-receiving calls (deep argument
+    // search — multiline and nested-call shapes the R1 regex missed).
+    if (ts.isCallExpression(node)) {
+      const calleeName = ts.isIdentifier(node.expression)
+        ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression)
+          ? node.expression.name.text
+          : null;
+      if (calleeName !== null) facts.callCalleeNames.add(calleeName);
+      if (calleeName === HELPER_NAME) facts.helperNameCallCount++;
+      if (node.arguments.some(containsEnvLiteral)) {
+        facts.envArgCallCount++;
+        if (calleeName === 'readFileSync' || calleeName === 'readFile') facts.fsReadEnvLiteralCallCount++;
+      }
+    }
+    // Local lookalike helper definitions.
+    if (ts.isFunctionDeclaration(node) && node.name?.text === HELPER_NAME) facts.localHelperDef = true;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === HELPER_NAME) facts.localHelperDef = true;
+    // process.env[K] assignments (K must be a plain identifier).
+    if (ts.isAssignmentExpression(node) && ts.isElementAccessExpression(node.left)) {
+      const target = node.left;
+      if (
+        ts.isPropertyAccessExpression(target.expression) &&
+        ts.isIdentifier(target.expression.expression) &&
+        target.expression.expression.text === 'process' &&
+        target.expression.name.text === 'env' &&
+        ts.isIdentifier(target.argumentExpression)
+      ) {
+        facts.envAssignKeyIds.add(target.argumentExpression.text);
+      }
+    }
+    // Active exclusion guards: if (K === 'EDGE_EXECUTION_AUTH') { continue|return }.
+    // NOTE: TypeScript's IfStatement node names its condition property
+    // `expression` (historical API), not `condition`.
+    if (ts.isIfStatement(node) && ts.isBinaryExpression(node.expression)) {
+      const op = node.expression.operatorToken.kind;
+      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
+        const { left, right } = node.expression;
+        const idSide = ts.isIdentifier(left) ? left : ts.isIdentifier(right) ? right : null;
+        const litSide = ts.isStringLiteral(left) ? left : ts.isStringLiteral(right) ? right : null;
+        if (idSide && litSide && litSide.text === AUTH_KEY_LITERAL && subtreeHasContinueOrReturn(node.thenStatement)) {
+          facts.activeGuardKeyIds.add(idSide.text);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+
+  // A helper call is EITHER a call literally named loadDotEnvIntoProcessEnv
+  // OR a call through a deliberate local alias whose IMPORTED SYMBOL is the
+  // helper (identity, not alias text — R2).
+  const helperBindings = facts.imports.filter(i => i.importedName === HELPER_NAME);
+  facts.hasHelperCall =
+    facts.helperNameCallCount > 0 ||
+    [...facts.callCalleeNames].some(
+      n => n !== HELPER_NAME && helperBindings.some(b => b.localName === n),
+    );
+
+  facts.isLoader =
+    facts.dotenvImport || facts.hasHelperCall || facts.envArgCallCount > 0;
+  return facts;
+}
 
 export interface EnvLoaderClassification {
   isLoader: boolean;
   safe: boolean;
+  /** True when the loader was proven safe via an ACTIVE manual-exclusion guard. */
+  manualExclusion?: boolean;
   /** Why the loader is unsafe (only when isLoader && !safe). */
   violation?: string;
 }
 
 /** Classify one source file's `.env`-loader posture (the census invariant). */
 export function classifyEnvLoaderSource(src: string): EnvLoaderClassification {
-  const s = stripComments(src);
-  if (!detectEnvLoaderSource(s)) return { isLoader: false, safe: true };
+  const facts = collectEnvLoaderFacts(src);
+  if (!facts.isLoader) return { isLoader: false, safe: true };
 
-  const hasManualExclusion = /EDGE_EXECUTION_AUTH/.test(s);
-  const hasApprovedImport = APPROVED_HELPER_IMPORT_RE.test(s);
-  const hasLocalDef = LOCAL_HELPER_DEF_RE.test(s);
-  const fsReadEnv = /\b(?:readFileSync|readFile)\s*\([^)]*?['"]\.env['"]/.test(s);
-  const dotenvModule = /(?:import\s[^;]*from\s*|require\(\s*)['"]dotenv(?:\/[a-z-]+)?['"]/.test(s);
-
-  if (hasLocalDef) {
+  if (facts.localHelperDef) {
     return { isLoader: true, safe: false, violation: 'local_lookalike_helper_definition' };
   }
-  if (dotenvModule) {
+  if (facts.dotenvImport) {
     return { isLoader: true, safe: false, violation: 'dotenv_npm_module_config_does_not_exclude_edge_execution_auth' };
   }
-  if (fsReadEnv && !hasManualExclusion) {
+
+  // R2: manual exclusion must be PROVEN — an active continue/return guard
+  // on the literal, tied to the SAME identifier used as a process.env key.
+  // A bare mention (log/comment/unrelated branch/dead check) never proves.
+  const hasActiveExclusion =
+    facts.activeGuardKeyIds.size > 0 &&
+    [...facts.activeGuardKeyIds].some(k => facts.envAssignKeyIds.has(k));
+
+  // Inline fs reads of .env are only safe behind a proven active guard.
+  if (facts.fsReadEnvLiteralCallCount > 0 && !hasActiveExclusion) {
     return { isLoader: true, safe: false, violation: 'inline_env_file_read_without_edge_execution_auth_exclusion' };
   }
-  if (/loadDotEnvIntoProcessEnv\s*\(/.test(s) && !hasApprovedImport) {
-    return { isLoader: true, safe: false, violation: 'helper_name_called_without_approved_import' };
+
+  // R2: helper calls resolve to the IMPORTED SYMBOL, not the alias text —
+  // both for direct-name calls and for deliberately aliased calls.
+  if (facts.hasHelperCall) {
+    const helperBindings = facts.imports.filter(i => i.importedName === HELPER_NAME);
+    const approvedUsed =
+      // direct-name call bound to the approved export
+      (facts.helperNameCallCount > 0 &&
+        helperBindings.some(b => b.localName === HELPER_NAME && isApprovedModuleSpecifier(b.module))) ||
+      // deliberately aliased call bound to the approved export
+      helperBindings.some(
+        b => b.localName !== HELPER_NAME &&
+          isApprovedModuleSpecifier(b.module) &&
+          facts.callCalleeNames.has(b.localName),
+      );
+    if (!approvedUsed) {
+      const masquerade =
+        facts.imports.some(i => i.localName === HELPER_NAME && i.importedName !== HELPER_NAME);
+      return {
+        isLoader: true,
+        safe: false,
+        violation: masquerade ? 'helper_imported_symbol_not_approved' : 'helper_name_called_without_approved_import',
+      };
+    }
   }
-  return { isLoader: true, safe: true };
+
+  return { isLoader: true, safe: true, manualExclusion: hasActiveExclusion };
 }
 
 // ─── Section 1: Glob-based census invariant ─────────────────────────────
@@ -160,7 +343,7 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
     expect(allFiles.length).toBeGreaterThan(100);
   });
 
-  it('every .env loader uses the approved imported helper OR manually excludes EDGE_EXECUTION_AUTH', () => {
+  it('every .env loader uses the approved imported helper OR a PROVEN active exclusion guard', () => {
     const violations: string[] = [];
     const helperLoaders: string[] = [];
     const safeManualLoaders: string[] = [];
@@ -171,7 +354,7 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
       const cls = classifyEnvLoaderSource(src);
       if (!cls.isLoader) continue;
       if (cls.safe) {
-        if (/EDGE_EXECUTION_AUTH/.test(stripComments(src))) safeManualLoaders.push(rel);
+        if (cls.manualExclusion) safeManualLoaders.push(rel);
         else helperLoaders.push(rel);
       } else {
         violations.push(`${rel}: ${cls.violation}`);
@@ -185,21 +368,38 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
     // does not break the census.
     expect(helperLoaders.length).toBeGreaterThanOrEqual(139);
     expect(safeManualLoaders.length).toBeGreaterThanOrEqual(5);
-  });
 
-  it('helper loaders import from the APPROVED shared module (not a lookalike source)', () => {
+    // R2: the manual-exclusion classification must be a PROOF (active
+    // guard), not a keyword search — every safe manual loader's source
+    // must contain the structural guard the recognizer requires.
     for (const filepath of allFiles) {
       const src = readFileSync(filepath, 'utf8');
-      const s = stripComments(src);
-      if (!/loadDotEnvIntoProcessEnv\s*\(/.test(s)) continue;
+      const facts = collectEnvLoaderFacts(src);
+      if (!facts.isLoader || facts.helperNameCallCount > 0) continue;
+      const proven = [...facts.activeGuardKeyIds].some(k => facts.envAssignKeyIds.has(k));
+      expect(proven, `${relative(REPO_ROOT, filepath)} classified as manual-exclusion must have an active guard tied to its process.env key`).toBe(true);
+    }
+  });
+
+  it('helper loaders import the APPROVED SYMBOL from the APPROVED module (R2: identity, not alias text)', () => {
+    for (const filepath of allFiles) {
+      const src = readFileSync(filepath, 'utf8');
+      const facts = collectEnvLoaderFacts(src);
+      if (!facts.hasHelperCall) continue;
+      const rel = relative(REPO_ROOT, filepath);
+      const cls = classifyEnvLoaderSource(src);
+      expect(cls.safe, `${rel}: ${cls.violation ?? 'unexpectedly unsafe'}`).toBe(true);
+      expect(cls.manualExclusion, `${rel} must use the approved import, not a manual guard`).toBe(false);
+      // The imported symbol itself must be the approved export — a local
+      // alias of an unrelated function does NOT satisfy this.
+      const approvedBinding = facts.imports.some(
+        i => i.importedName === HELPER_NAME && isApprovedModuleSpecifier(i.module),
+      );
       expect(
-        APPROVED_HELPER_IMPORT_RE.test(s),
-        `${relative(REPO_ROOT, filepath)} must import loadDotEnvIntoProcessEnv from @edge/risk or ../packages/risk/src/dotenv-safety.{ts,js}`,
+        approvedBinding,
+        `${rel} must import loadDotEnvIntoProcessEnv (exact exported symbol) from @edge/risk or ../packages/risk/src/dotenv-safety.{ts,js}`,
       ).toBe(true);
-      expect(
-        LOCAL_HELPER_DEF_RE.test(s),
-        `${relative(REPO_ROOT, filepath)} must not define a local lookalike helper`,
-      ).toBe(false);
+      expect(facts.localHelperDef, `${rel} must not define a local lookalike helper`).toBe(false);
     }
   });
 
@@ -212,9 +412,122 @@ describe('EM-STRAT-014-C — .env loader hygiene census (glob-based, no allowlis
   });
 });
 
-// ─── Section 1b: Adversarial synthetic source fixtures (C-R1) ───────────
+// ─── Section 1b: Adversarial synthetic source fixtures (C-R1 + C-R2) ────
 
-describe('EM-STRAT-014-C-R1 — adversarial synthetic source fixtures (the exact CI classifier)', () => {
+describe('EM-STRAT-014-C-R2 — adversarial synthetic source fixtures (the exact CI classifier)', () => {
+  it('UNSAFE (R2 mandated): loader that LOGS the auth key but does not skip its assignment', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, k, v] = m;",
+      "  if (k === 'EDGE_EXECUTION_AUTH') console.log('saw auth key', k); // mention, NO skip",
+      "  if (!process.env[k]) process.env[k] = v;",
+      "}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE (R2 mandated): stale COMMENT mentioning the key cannot make a loader safe', () => {
+    // Comments are invisible to the AST walk — the R1 keyword search could
+    // be satisfied by a comment; R2 cannot.
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "// NOTE: EDGE_EXECUTION_AUTH is excluded here (stale comment — it is not).",
+      "const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, k, v] = m;",
+      "  if (!process.env[k]) process.env[k] = v; // copies EVERY key incl. the auth descriptor",
+      "}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE: guard checks a DIFFERENT literal (related key name) and skips — not proof for the auth key', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, k, v] = m;",
+      "  if (k === 'EDGE_EXECUTION_AUTH_TIMEOUT') continue; // wrong key!",
+      "  if (!process.env[k]) process.env[k] = v;",
+      "}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE: guard on the right key but body only logs (no continue/return) — not an active exclusion', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, k, v] = m;",
+      "  if (k === 'EDGE_EXECUTION_AUTH') { console.warn('refusing?'); } // no skip",
+      "  if (!process.env[k]) process.env[k] = v;",
+      "}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE (R2 mandated): guard and assignment use DIFFERENT identifiers — tie not proven', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, key, v] = m;",
+      "  if (key === 'EDGE_EXECUTION_AUTH') continue; // guards `key`",
+      "  if (!process.env[k]) process.env[k] = v;     // assigns `k` (unrelated)",
+      "}",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE (R2 mandated): aliased import — an UNRELATED symbol renamed to the helper name — is rejected', () => {
+    const src = [
+      "import { unrelatedFunction as loadDotEnvIntoProcessEnv } from '@edge/risk';",
+      "loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('helper_imported_symbol_not_approved');
+  });
+
+  it('UNSAFE: deliberately ALIASED call but the MODULE is not approved — the alias does not launder the source', () => {
+    const src = [
+      "import { loadDotEnvIntoProcessEnv as loadEnv } from './my-own-env-helper';",
+      "loadEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('helper_name_called_without_approved_import');
+  });
+
   it('UNSAFE: readFileSync(join(ROOT, \'.env\')) — differently named root via join — is caught', () => {
     const src = [
       "import { readFileSync } from 'node:fs';",
@@ -234,6 +547,23 @@ describe('EM-STRAT-014-C-R1 — adversarial synthetic source fixtures (the exact
       "import { readFileSync } from 'node:fs';",
       "import { resolve } from 'node:path';",
       "const env = readFileSync(resolve(__dirname, '.env'), 'utf8');",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(false);
+    expect(cls.violation).toBe('inline_env_file_read_without_edge_execution_auth_exclusion');
+  });
+
+  it('UNSAFE: multiline readFileSync argument with a nested call is STILL caught (R1 regex limit closed)', () => {
+    const src = [
+      "import { readFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "const env = readFileSync(",
+      "  getBase(),",
+      "  resolve(getBase(), '.env'),",
+      "  'utf8',",
+      ");",
+      "for (const line of env.split('\\n')) { const [k, v] = line.split('='); if (k && v && !process.env[k]) process.env[k] = v; }",
     ].join('\n');
     const cls = classifyEnvLoaderSource(src);
     expect(cls.isLoader).toBe(true);
@@ -305,7 +635,19 @@ describe('EM-STRAT-014-C-R1 — adversarial synthetic source fixtures (the exact
     expect(cls.safe).toBe(true);
   });
 
-  it('SAFE: inline read WITH the EDGE_EXECUTION_AUTH manual exclusion passes (the 5 legacy safe loaders)', () => {
+  it('SAFE: a deliberately ALIASED import of the REAL approved export passes (identity, not alias text)', () => {
+    // R2 validates the IMPORTED SYMBOL (propertyName), so a deliberate local
+    // rename of the genuine export is still provably the approved helper.
+    const src = [
+      "import { loadDotEnvIntoProcessEnv as loadEnv } from '@edge/risk';",
+      "loadEnv(resolve(REPO_ROOT, '.env'));",
+    ].join('\n');
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.isLoader).toBe(true);
+    expect(cls.safe).toBe(true);
+  });
+
+  it('SAFE: inline read WITH the active exclusion guard passes (the 5 legacy safe loaders, exact shape)', () => {
     const src = [
       "import { readFileSync } from 'node:fs';",
       "try {",
@@ -322,6 +664,37 @@ describe('EM-STRAT-014-C-R1 — adversarial synthetic source fixtures (the exact
     const cls = classifyEnvLoaderSource(src);
     expect(cls.isLoader).toBe(true);
     expect(cls.safe).toBe(true);
+    expect(cls.manualExclusion).toBe(true);
+  });
+
+  it('SAFE: guard in block-brace form and guard via return (wrapped in a function) both pass', () => {
+    const blockForm = [
+      "import { readFileSync } from 'node:fs';",
+      "const env = readFileSync(resolve(ROOT, '.env'), 'utf8');",
+      "for (const line of env.split('\\n')) {",
+      "  const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "  if (!m) continue;",
+      "  const [, k, v] = m;",
+      "  if (k === 'EDGE_EXECUTION_AUTH') { continue; }",
+      "  if (!process.env[k]) process.env[k] = v;",
+      "}",
+    ].join('\n');
+    expect(classifyEnvLoaderSource(blockForm).safe).toBe(true);
+
+    const returnForm = [
+      "import { readFileSync } from 'node:fs';",
+      "export function applyEnv(): void {",
+      "  const env = readFileSync(resolve(ROOT, '.env'), 'utf8');",
+      "  for (const line of env.split('\\n')) {",
+      "    const m = line.match(/^\\\\s*([A-Z_][A-Z0-9_]*)\\\\s*=\\\\s*(.*)\\\\s*$/);",
+      "    if (!m) continue;",
+      "    const [, k, v] = m;",
+      "    if (k === 'EDGE_EXECUTION_AUTH') return;",
+      "    if (!process.env[k]) process.env[k] = v;",
+      "  }",
+      "}",
+    ].join('\n');
+    expect(classifyEnvLoaderSource(returnForm).safe).toBe(true);
   });
 
   it('SAFE: a file with no .env reference at all is not a loader', () => {
