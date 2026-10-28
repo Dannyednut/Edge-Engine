@@ -14,6 +14,12 @@
  *       not a silent empty-array fallback.
  *     - scanTs (scan clock) distinguished from venueTs (null — APIs provide
  *       no verified venue observation timestamp).
+ *
+ * EM-STRAT-014-E11-Cluster2-R2: string numerics are validated against a
+ * strict FULL-string decimal grammar before conversion. The previous
+ * prefix-tolerant parseFloat accepted malformed provider strings such as
+ * '100garbage' → 100 or '50000USD' → 50000, turning malformed data into a
+ * fabricated positive OI.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
@@ -21,6 +27,23 @@ import { canonAsset, canonVenue } from '../lib/venue-asset-aliases.js';
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const VOI_API = 'https://perps-api.vooi.io';
+
+/**
+ * EM-STRAT-014-E11-Cluster2-R2 — strict full-string numeric grammar for
+ * provider string fields (openInterest / price):
+ *
+ *   [+-]? ( DIGITS [ '.' DIGITS? ] | '.' DIGITS ) ( [eE] [+-]? DIGITS )?
+ *
+ * applied AFTER trimming surrounding whitespace; the ENTIRE trimmed string
+ * must match. Accepted: '100', '50000.5', '.5', '1.', '+100', '1e6',
+ * '1E-6'. Rejected (each of which parseFloat would have mis-accepted as a
+ * numeric prefix): '100garbage', '50000USD', '1.2.3', '1e', '1e+',
+ * 'Infinity', 'NaN', and hex forms ('0x10' — where parseFloat actually
+ * yields 0, while Number would yield 16; both are non-answers here). A
+ * string failing this grammar converts to NaN and therefore to `oi: null`
+ * (fail-closed, unchanged).
+ */
+const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 export interface FundingDivergenceParams {
   /** Min divergence (spread) to alert (default 20%/yr) */
@@ -206,16 +229,23 @@ export class FundingDivergenceScanner implements Strategy {
     }
 
     if (vooiData?.items) {
-      // EM-STRAT-014-E11-Cluster2-R1: OI is derived from the ACTUAL VOOI
+      // EM-STRAT-014-E11-Cluster2-R1/R2: OI is derived from the ACTUAL VOOI
       // response fields — `openInterest × price` (both provider fields per
       // the VooiArbitragePair schema) — with strict finite-positive
       // validation on each input and the product. Absent/invalid fields →
       // null (excluded from EXTREME_FUNDING downstream). A precomputed
       // `oiUsd` field is NOT part of the provider schema and is not
-      // consulted.
+      // consulted. R2: strings must match VOI_NUMERIC_RE IN FULL — no
+      // parseFloat prefix parsing.
       const parseVooiOiUsd = (leg: { openInterest?: unknown; price?: unknown }): number | null => {
-        const toNum = (v: unknown): number =>
-          typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? parseFloat(v) : NaN;
+        const toNum = (v: unknown): number => {
+          if (typeof v === 'number') return v;
+          if (typeof v === 'string') {
+            const t = v.trim();
+            return VOI_NUMERIC_RE.test(t) ? Number(t) : NaN;
+          }
+          return NaN;
+        };
         const oi = toNum(leg.openInterest);
         const px = toNum(leg.price);
         if (!Number.isFinite(oi) || !Number.isFinite(px) || oi <= 0 || px <= 0) return null;

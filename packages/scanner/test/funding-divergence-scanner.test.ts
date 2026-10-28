@@ -269,6 +269,108 @@ describe('Cluster2-R1: VOOI OI parsed from actual response fields (openInterest 
   });
 });
 
+// ─── EM-STRAT-014-E11-Cluster2-R2 — strict full-string numeric grammar ──
+
+describe('Cluster2-R2: strict full-string numeric validation (parseFloat prefix parsing removed)', () => {
+  function makeVooiResponse(legOverrides: Record<string, unknown>): any {
+    const leg = {
+      exchange: 'hyperliquid',
+      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      ...legOverrides,
+    };
+    return {
+      items: [
+        {
+          asset: 'BTC',
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+        },
+      ],
+    };
+  }
+
+  /**
+   * Work-order-mandated prefix traps. Under the R1 parseFloat helper each of
+   * these converts to a number that CROSSES the $1M EXTREME_FUNDING OI gate
+   * (100 × 50,000 = $5,000,000 or 50,000 × 100 = $5,000,000) — the exact
+   * fabrication R2 closes. Under the strict full-string grammar each must
+   * yield oi=null: no EXTREME_FUNDING, the row stays usable for DIVERGENCE
+   * (R1 semantics preserved), and nothing is silently skipped.
+   */
+  const GATE_CROSSING_PREFIX_TRAPS: Array<[string, Record<string, unknown>]> = [
+    ['openInterest numeric suffix', { openInterest: '100garbage', price: '50000' }],
+    ['price currency suffix', { openInterest: '100', price: '50000USD' }],
+    ['malformed exponent with trailing junk', { openInterest: '1e2JUNK', price: '50000' }],
+  ];
+
+  for (const [name, bad] of GATE_CROSSING_PREFIX_TRAPS) {
+    it(`prefix trap rejected → NO EXTREME_FUNDING (${name}; permissive parse would fabricate OI $5,000,000)`, async () => {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse(bad) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts.find(a => a.type === 'EXTREME_FUNDING'), `case ${JSON.stringify(bad)}`).toBeUndefined();
+      // Row remains usable for DIVERGENCE with null OI (R1 design intact).
+      const div = alerts.find(a => a.type === 'DIVERGENCE');
+      expect(div, `DIVERGENCE still emitted for ${JSON.stringify(bad)}`).toBeDefined();
+      expect(div!.oi).toBeNull();
+      expect(degradation.vooiSkipped).toBe(0);
+    });
+  }
+
+  /**
+   * Broader grammar rejections. Each of these strings is either mis-parsed
+   * to a numeric prefix by parseFloat ('1.2.3' → 1.2, '1e' → 1, '1e+' → 1,
+   * '1 00' → 1, '1,000' → 1) or would be mis-accepted by a naive `Number()`
+   * swap ('0x64' → 100 → $5,000,000). The strict grammar rejects them all,
+   * so none may satisfy the EXTREME_FUNDING OI gate.
+   */
+  const OTHER_REJECTED_FORMS: Array<[string, unknown]> = [
+    ['doubled decimal point', '1.2.3'],
+    ['bare exponent', '1e'],
+    ['dangling exponent sign', '1e+'],
+    ['embedded whitespace', '1 00'],
+    ['thousands separator', '1,000'],
+    ['hex form', '0x64'],
+    ['Infinity literal', 'Infinity'],
+    ['NaN literal', 'NaN'],
+    ['empty string', '   '],
+  ];
+
+  for (const [name, badOi] of OTHER_REJECTED_FORMS) {
+    it(`non-grammar openInterest rejected → NO EXTREME_FUNDING (${name})`, async () => {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ openInterest: badOi, price: '50000' }) }), now: () => FIXED_NOW });
+      const { alerts } = await scanner.scanWithDegradation();
+      expect(alerts.find(a => a.type === 'EXTREME_FUNDING'), `case ${JSON.stringify(badOi)}`).toBeUndefined();
+    });
+  }
+
+  it('valid grammar forms remain ACCEPTED: trimmed whitespace, scientific notation, leading +', async () => {
+    // Each triple below multiplies to exactly $5,000,000 (≥ $1M gate) and
+    // 175.2%/yr (≥ 50 threshold) — EXTREME_FUNDING must fire with exact OI.
+    const cases: Array<[unknown, unknown]> = [
+      ['  100  ', '50000'], // surrounding whitespace trimmed, then full match
+      ['1e2', '50000'], // scientific notation
+      ['1E2', '5e4'], // uppercase exponent + exponent on price
+      ['+100', '50000.0'], // explicit sign + trailing-dot decimal
+      ['100.000', '50000'], // trailing fraction zeros
+    ];
+    for (const [oi, px] of cases) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ openInterest: oi, price: px }) }), now: () => FIXED_NOW });
+      const { alerts } = await scanner.scanWithDegradation();
+      const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+      expect(extreme, `case openInterest=${JSON.stringify(oi)} price=${JSON.stringify(px)}`).toBeDefined();
+      expect(extreme!.oi).toBe(5_000_000);
+    }
+  });
+
+  it('exponent-form string whose VALUE is finite but grammar-broken stays null (e.g. "1e2 " with inner junk)', async () => {
+    // '1e2 ' trims to '1e2' (accepted); but ' 1e2 JUNK' does not. Prove the
+    // trim-then-full-match order with a suffix case that would parse to 100
+    // under parseFloat.
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: makeVooiResponse({ openInterest: '1e2 JUNK', price: '50000' }) }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    expect(alerts.find(a => a.type === 'EXTREME_FUNDING')).toBeUndefined();
+  });
+});
+
 // ─── EM-STRAT-014-E11-Cluster2-R1 — production-visible degradation ──────
 
 describe('Cluster2-R1: degradation reaches production observability', () => {
