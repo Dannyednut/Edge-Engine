@@ -63,7 +63,6 @@ function generateSdkCode(): string {
 // No extra cost to developer — HL pays us the rebate
 
 import { getBuilderField } from '@edge/builder-sdk';
-import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 // When placing HL orders, include the builder field:
 const order = {

@@ -868,3 +868,172 @@ describe('EM-STRAT-014-C — .env cannot arm the guard (integration with executi
     }
   });
 });
+
+// ─── Section 4: EM-STRAT-014-C-R3 — generated SDK example hygiene ───────
+//
+// The #15 codemod correctly added a real top-level
+// `loadDotEnvIntoProcessEnv` import and call to
+// `scripts-explore/builder-code-sdk.mts` (those satisfy the loader census
+// above). It also accidentally inserted the SAME helper import inside the
+// template literal returned by `generateSdkCode()`. That line is emitted as
+// TEXT into the SDK example shown to consumers — a developer who copied the
+// example would inherit an Edge-Engine repository-relative dependency that
+// does not exist in any normal external project. R3 removes the accidental
+// template-literal line while preserving the real top-level loader.
+//
+// This test reads the source OFFLINE (no execution of `builder-code-sdk.mts`,
+// no access to any real `.env`) and uses TypeScript AST to extract the
+// template literal returned by `generateSdkCode()`, then asserts:
+//   1. The emitted SDK example contains neither `loadDotEnvIntoProcessEnv`
+//      nor `../packages/risk/src/dotenv-safety`.
+//   2. The source file still retains the legitimate top-level approved
+//      import (identity, not alias text) and the top-level helper call —
+//      i.e. the R3 cleanup did not silently remove the real loader.
+
+describe('EM-STRAT-014-C-R3 — generated SDK example carries no repository-internal helper import', () => {
+  const BUILDER_SDK_PATH = resolve(SCRIPTS_EXPLORE_DIR, 'builder-code-sdk.mts');
+
+  /**
+   * Walk a TypeScript AST and return the concatenated text of the FIRST
+   * template literal returned by a function named `generateSdkCode()`.
+   * Returns `null` if no such function-or-method declaration with a
+   * returned template literal is found.
+   */
+  function extractGenerateSdkCodeTemplate(src: string): string | null {
+    const sf = ts.createSourceFile(
+      'builder-code-sdk.mts',
+      src,
+      ts.ScriptTarget.ES2022,
+      /* setParentNodes */ true,
+      ts.ScriptKind.TS,
+    );
+    let extracted: string | null = null;
+    const visit = (node: ts.Node): void => {
+      if (extracted !== null) return;
+      // Function declaration: `function generateSdkCode(): string { return \`...\`; }`
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === 'generateSdkCode'
+      ) {
+        const found = findFirstReturnedTemplateLiteral(node);
+        if (found !== null) extracted = found;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    return extracted;
+  }
+
+  function findFirstReturnedTemplateLiteral(scope: ts.Node): string | null {
+    let found: string | null = null;
+    const walk = (n: ts.Node): void => {
+      if (found !== null) return;
+      // return <TemplateLiteral>;
+      if (ts.isReturnStatement(n) && n.expression) {
+        const expr = n.expression;
+        if (ts.isTemplateExpression(expr)) {
+          // Template with ${...} spans.
+          found = templateLiteralFullText(expr);
+          return;
+        }
+        if (ts.isNoSubstitutionTemplateLiteral(expr)) {
+          // Plain template literal with no interpolations — TS exposes the
+          // raw inner text via `text` (the surrounding backticks are NOT
+          // part of `text`).
+          found = expr.text;
+          return;
+        }
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(scope);
+    return found;
+  }
+
+  /** Concatenate head + each middle + each span's text into a single string. */
+  function templateLiteralFullText(node: ts.TemplateExpression): string {
+    let out = node.head.text;
+    for (const span of node.templateSpans) {
+      out += span.expression.getText();
+      out += span.literal.text;
+    }
+    return out;
+  }
+
+  it('reads the source offline (file exists; no execution)', () => {
+    // Sanity: the source file is present at the expected path so the
+    // assertions below are exercising the real R3 target.
+    expect(existsSync(BUILDER_SDK_PATH)).toBe(true);
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    // The source must declare a generateSdkCode function — otherwise the
+    // R3 regression test would silently pass against a refactored file.
+    expect(src).toMatch(/function\s+generateSdkCode\s*\(/);
+  });
+
+  it('AST-extracts the generateSdkCode() template (test harness sanity)', () => {
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    const tpl = extractGenerateSdkCodeTemplate(src);
+    expect(tpl, 'generateSdkCode() must return a template literal so R3 can inspect emitted text').not.toBeNull();
+    // The generated example must still carry its intended public import —
+    // otherwise the cleanup went too far and stripped the real SDK API.
+    expect(tpl!).toContain("import { getBuilderField } from '@edge/builder-sdk'");
+  });
+
+  it('R3 mandated: emitted SDK example does NOT contain the helper import statement', () => {
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    const tpl = extractGenerateSdkCodeTemplate(src);
+    expect(tpl).not.toBeNull();
+    // The exact line the codemod accidentally inserted inside the template:
+    expect(tpl!).not.toContain('loadDotEnvIntoProcessEnv');
+  });
+
+  it('R3 mandated: emitted SDK example does NOT reference the repository-internal dotenv-safety path', () => {
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    const tpl = extractGenerateSdkCodeTemplate(src);
+    expect(tpl).not.toBeNull();
+    expect(tpl!).not.toContain('../packages/risk/src/dotenv-safety');
+  });
+
+  it('source retains the legitimate top-level approved import (identity, not alias text)', () => {
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    const facts = collectEnvLoaderFacts(src);
+    const approvedBinding = facts.imports.some(
+      i => i.importedName === HELPER_NAME && isApprovedModuleSpecifier(i.module),
+    );
+    expect(
+      approvedBinding,
+      'builder-code-sdk.mts must keep its real top-level import of loadDotEnvIntoProcessEnv from @edge/risk or ../packages/risk/src/dotenv-safety.{ts,js}',
+    ).toBe(true);
+  });
+
+  it('source retains the legitimate top-level helper call (the loader census must still see it)', () => {
+    const src = readFileSync(BUILDER_SDK_PATH, 'utf8');
+    const facts = collectEnvLoaderFacts(src);
+    expect(facts.hasHelperCall, 'top-level loadDotEnvIntoProcessEnv(...) call must remain').toBe(true);
+    expect(facts.helperNameCallCount).toBeGreaterThanOrEqual(1);
+    // And the file is still classified as a SAFE loader by the R2 classifier.
+    const cls = classifyEnvLoaderSource(src);
+    expect(cls.safe, `builder-code-sdk.mts must remain a safe loader: ${cls.violation ?? ''}`).toBe(true);
+  });
+
+  it('regression guard: a synthetic source that RE-INSERTS the helper import into the template literal fails R3', () => {
+    // Construct a deliberately-broken source by re-adding the exact line
+    // into the template literal of a minimal generateSdkCode() — this
+    // proves the R3 assertions above would catch a reintroduction.
+    const brokenSrc = [
+      "import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';",
+      'loadDotEnvIntoProcessEnv("/dev/null");',
+      'function generateSdkCode(): string {',
+      "  return `import { getBuilderField } from '@edge/builder-sdk';",
+      "import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';",
+      'const order = {};',
+      '`;',
+      '}',
+    ].join('\n');
+    const tpl = extractGenerateSdkCodeTemplate(brokenSrc);
+    expect(tpl).not.toBeNull();
+    expect(tpl!).toContain('loadDotEnvIntoProcessEnv');
+    expect(tpl!).toContain('../packages/risk/src/dotenv-safety');
+  });
+});
