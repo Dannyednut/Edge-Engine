@@ -23,12 +23,20 @@
  *      (`fee_tier_inconsistent`), timestamp monotonicity
  *      (`non_monotonic_series`), duplicate grid blocks
  *      (`duplicate_sample`), grid gaps (`sample_missing`).
+ *
+ *   4. EM-STRAT-014-E1-R2 duplicate integrity: identical duplicate records
+ *      for a block are a visible `duplicate_sample` exclusion (first kept,
+ *      deterministic); CONFLICTING duplicates throw a deterministic error —
+ *      runReplay enforces the same policy upstream and fails the replay
+ *      with { ok:false } before this function is reached. Silent
+ *      first-record-wins on conflicting data is impossible.
  */
 
 import { rat, ratAbs, ratCmp, ratMul, ratToDecimalString, ratToExactFractionString, type Rational } from '../math/rational.js';
 import { Q192, getSqrtRatioAtTick, tickFromSqrtPrice } from '../v3/tick-math.js';
 import { activeLiquidityFromTicks, type PoolState, type TickEntry } from '../v3/tick-walk.js';
 import type { AnchorRecord, PoolSampleRecord } from './raw-archive.js';
+import { poolDuplicateKind } from './raw-archive.js';
 
 export interface SeriesExclusion {
   blockHeight: number;
@@ -112,6 +120,16 @@ export function buildDiscountSeries(
   for (const rec of records) {
     const existing = byBlock.get(rec.blockHeight);
     if (existing !== undefined) {
+      // EM-STRAT-014-E1-R2: a duplicate that disagrees on ANY decoded field
+      // is a self-contradicting archive and must NEVER be silently resolved
+      // by first-record-wins. Fail LOUDLY with a deterministic error.
+      // The sanctioned pipeline (runReplay) enforces the same policy
+      // upstream and fails closed with { ok:false } BEFORE calling this
+      // function — reaching this throw means buildDiscountSeries was
+      // invoked directly on a stream that replay would have rejected.
+      if (poolDuplicateKind(existing, rec) === 'conflict') {
+        throw new Error(`discount_series:conflicting_duplicate_pool_sample:block_${rec.blockHeight}:records_disagree_on_decoded_values`);
+      }
       exclusions.push({
         blockHeight: rec.blockHeight,
         reason: 'duplicate_sample',

@@ -19,6 +19,13 @@
  *     exclusion (first kept, deterministic); conflicting values -> the
  *     replay FAILS CLOSED. Same policy for duplicate USD price records.
  *     Nothing is silently discarded by "first wins" anymore.
+ *   - (R2) Same policy now applied to EVERY pool JSONL stream, keyed by
+ *     (pool address, block height): identical duplicates are visibly
+ *     counted (aggregate.duplicateRecords['duplicate_pool_record']);
+ *     conflicting duplicates fail the WHOLE replay with the pool and block
+ *     identified — BEFORE buildDiscountSeries runs and before any event or
+ *     pass verdict can be built. The former silent first-record-wins
+ *     handling inside buildDiscountSeries is superseded here.
  *   - D USD is converted to the walked WHYPE wei amount PER SAMPLE via the
  *     block-aligned, provenance-bearing USD reference price:
  *       depthWei = ceil(D_usd * 10^18 / usdPriceRaw)
@@ -33,7 +40,7 @@ import { detectEvents, type DepthExclusion, type DepthResolverResult, type Study
 import { mulDivCeil } from './math/bigint-math.js';
 import { rat, ratAdd, ratMul, type Rational } from './math/rational.js';
 import { validateManifest, WEI_PER_WHYPE, CONVENTION_DEPTH_CONVERSION, type ParsedManifest } from './study/manifest.js';
-import { parseAnchorJsonl, parsePoolJsonl, parseUsdPriceJsonl, type AnchorRecord, type PoolSampleRecord, type UsdPriceRecord } from './study/raw-archive.js';
+import { parseAnchorJsonl, parsePoolJsonl, parseUsdPriceJsonl, poolDuplicateKind, type AnchorRecord, type PoolSampleRecord, type UsdPriceRecord } from './study/raw-archive.js';
 import { buildReport, sha256Hex } from './study/report.js';
 
 export interface RawArchiveInput {
@@ -223,12 +230,35 @@ export function runReplay(manifestRaw: unknown, raw: RawArchiveInput): ReplayRes
       }
     }
 
+    // --- per-pool duplicate policy (EM-STRAT-014-E1-R2) ---
+    // Same integrity rule as the anchor/USD streams, applied to each pool's
+    // JSONL BEFORE any series, event, or pass verdict is built: two records
+    // at the same (pool address, block height) must agree on EVERY decoded
+    // field (incl. the full ordered tick data and fieldError state).
+    // Identical duplicates are visibly counted in the aggregate duplicate
+    // report; conflicting duplicates FAIL the whole replay with the pool
+    // and block identified — buildDiscountSeries can no longer silently
+    // keep a first conflicting record.
+    const poolByBlock = new Map<number, PoolSampleRecord>();
+    for (const rec of records) {
+      const existing = poolByBlock.get(rec.blockHeight);
+      if (existing === undefined) {
+        poolByBlock.set(rec.blockHeight, rec);
+        continue;
+      }
+      if (poolDuplicateKind(existing, rec) === 'identical') {
+        bumpDuplicate('duplicate_pool_record');
+      } else {
+        return { ok: false, errors: [`raw_archive:duplicate_pool_conflict:pool_${censusEntry.address}:block_${rec.blockHeight}:records_disagree_on_decoded_values`] };
+      }
+    }
+
     const series = buildDiscountSeries(
       censusEntry.address,
       m.window.sampleCount,
       expectedBlockAt,
       { byBlock: anchorByBlock },
-      records,
+      [...poolByBlock.values()],
       m.conventions.anchorStalenessMaxSec,
       m.conventions.anchorFutureToleranceSec,
       pm.independenceBandPct,

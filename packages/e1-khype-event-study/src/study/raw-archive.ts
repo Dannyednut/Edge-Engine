@@ -56,6 +56,42 @@ export interface PoolSampleRecord {
 }
 
 /**
+ * EM-STRAT-014-E1-R2: duplicate-integrity comparison for pool sample
+ * records. Two records are 'identical' only when EVERY decoded field that
+ * carries source identity or replay-relevant content agrees:
+ * chainId, blockHeight, blockTimestampSec, token0/token1 addresses,
+ * sqrtPriceX96, tick, liquidity, feeTier, decoder fieldError state, and the
+ * FULL tick-data array compared STRUCTURALLY — same length, same ORDER,
+ * entry-by-entry (tick, liquidityNet). JavaScript object references are
+ * never compared. Any disagreement returns 'conflict'.
+ */
+export function poolDuplicateKind(a: PoolSampleRecord, b: PoolSampleRecord): 'identical' | 'conflict' {
+  const scalars: Array<[unknown, unknown]> = [
+    [a.chainId, b.chainId],
+    [a.blockHeight, b.blockHeight],
+    [a.blockTimestampSec, b.blockTimestampSec],
+    [a.token0Address, b.token0Address],
+    [a.token1Address, b.token1Address],
+    [a.sqrtPriceX96, b.sqrtPriceX96],
+    [a.tick, b.tick],
+    [a.liquidity, b.liquidity],
+    [a.feeTier, b.feeTier],
+    [a.fieldError, b.fieldError],
+  ];
+  for (const [x, y] of scalars) {
+    if (x !== y) return 'conflict';
+  }
+  const ta = a.tickData;
+  const tb = b.tickData;
+  if (ta === null || tb === null) return ta === tb ? 'identical' : 'conflict';
+  if (ta.length !== tb.length) return 'conflict';
+  for (let i = 0; i < ta.length; i++) {
+    if (ta[i].tick !== tb[i].tick || ta[i].liquidityNet !== tb[i].liquidityNet) return 'conflict';
+  }
+  return 'identical';
+}
+
+/**
  * EM-STRAT-014-E1-R1: per-block WHYPE/HYPE-to-USD reference price record
  * (provenance-bearing). priceRaw is a uint256 in 1e18 scale: USD per WHYPE
  * with 18 decimal places (e.g. 20 USD -> 0x + (20*10^18).toString(16)).

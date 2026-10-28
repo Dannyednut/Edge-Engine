@@ -508,4 +508,171 @@ describe('E1-R1: duplicate record handling (never silently first-wins)', () => {
     if (r.ok) return;
     expect(r.errors.join(' ')).toContain('duplicate_usd_price_conflict');
   });
+
+  it('duplicate USD record with IDENTICAL content -> counted, replay succeeds (policy unchanged in R2)', () => {
+    const fx = loadCommittedFixtures();
+    const lines = fx.usdPriceJsonl.trim().split('\n');
+    const withDup = [lines[0], lines[0], ...lines.slice(1)].join('\n') + '\n';
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: withDup, poolJsonls: fx.poolJsonls });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.reportObject.aggregate.duplicateRecords['duplicate_usd_price_record']).toBe(1);
+  });
+});
+
+describe('E1-R2: pool duplicate integrity (never silently first-wins)', () => {
+  const A1 = '0x00000000000000000000000000000000000000a1';
+
+  function poolWithIdenticalDup(text: string): string {
+    const lines = text.trim().split('\n');
+    return [lines[0], lines[0], ...lines.slice(1)].join('\n') + '\n';
+  }
+
+  function poolWithMutatedDup(text: string, mutate: (obj: Record<string, unknown>) => void): string {
+    const lines = text.trim().split('\n');
+    const obj = JSON.parse(lines[0]) as Record<string, unknown>;
+    mutate(obj);
+    return [lines[0], JSON.stringify(obj), ...lines.slice(1)].join('\n') + '\n';
+  }
+
+  function replayPools(pools: Record<string, string>): ReturnType<typeof runReplay> {
+    const fx = loadCommittedFixtures();
+    return runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: pools });
+  }
+
+  it('identical duplicate pool sample -> replay succeeds, visibly counted, study result unchanged', () => {
+    const fx = loadCommittedFixtures();
+    const withDup: Record<string, string> = { ...fx.poolJsonls, [A1]: poolWithIdenticalDup(fx.poolJsonls[A1]) };
+    const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: withDup });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.reportObject.aggregate.duplicateRecords['duplicate_pool_record']).toBe(1);
+    // Deterministic + content-preserving: the series for the affected pool
+    // must be IDENTICAL to the no-duplicate run (same samples, same d).
+    const baseline = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
+    expect(baseline.ok).toBe(true);
+    if (!baseline.ok) return;
+    const pDup = r.reportObject.pools.find(x => x.address === A1)!;
+    const pBase = baseline.reportObject.pools.find(x => x.address === A1)!;
+    expect(pDup.series.length).toBe(pBase.series.length);
+    expect(pDup.series.map(s => s.dPctExact).join('|')).toBe(pBase.series.map(s => s.dPctExact).join('|'));
+  });
+
+  it('conflicting duplicate (sqrtPriceX96Hex differs) -> replay FAILS CLOSED naming pool and block', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => { obj.sqrtPriceX96Hex = '0x1000000000000000000000001'; }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+    expect(r.errors.join(' ')).toContain(`pool_${A1}`);
+    expect(r.errors.join(' ')).toContain('block_5000000');
+  });
+
+  it('conflicting duplicate (liquidityHex differs) -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => { obj.liquidityHex = '0xd58f8b61c007fa015138'; }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (tick differs) -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => { obj.tick = 1; }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (tickData CONTENT differs, same length) -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => {
+        const td = structuredClone(obj.tickData) as Array<Record<string, unknown>>;
+        td[1].liquidityNetDec = String(BigInt(td[1].liquidityNetDec as string) - 1n);
+        obj.tickData = td;
+      }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (tickData ORDER differs, same entries) -> replay FAILS CLOSED (order is part of identity)', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => {
+        const td = structuredClone(obj.tickData) as Array<Record<string, unknown>>;
+        obj.tickData = [td[1], td[0]];
+      }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (blockTimestampSec differs) -> replay FAILS CLOSED', () => {
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => { obj.blockTimestampSec = 1700000001; }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (decoder field-error state differs: malformed vs clean) -> replay FAILS CLOSED', () => {
+    // One record at a block decodes cleanly; its duplicate carries a
+    // malformed tick. First-wins would have silently chosen one of them —
+    // the archive is instead declared self-contradictory.
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => { obj.tick = 'not-an-integer'; }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(' ')).toContain('duplicate_pool_conflict');
+  });
+
+  it('conflicting duplicate (token-address orientation differs between duplicates) -> replay FAILS CLOSED', () => {
+    // Both records keep token0=WHYPE/token1=kHYPE SET membership, but the
+    // duplicate swaps the two addresses — an orientation conflict at the
+    // same block. (One of the two also necessarily disagrees with the
+    // census, and the census check fires first; this test pins that the
+    // replay cannot return ok in either path.)
+    const fx = loadCommittedFixtures();
+    const pools: Record<string, string> = {
+      ...fx.poolJsonls,
+      [A1]: poolWithMutatedDup(fx.poolJsonls[A1], obj => {
+        const t0 = obj.token0Address as string;
+        obj.token0Address = obj.token1Address;
+        obj.token1Address = t0;
+      }),
+    };
+    const r = replayPools(pools);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    const joined = r.errors.join(' ');
+    expect(joined.includes('duplicate_pool_conflict') || joined.includes('token_address_mismatch')).toBe(true);
+  });
 });
