@@ -13,6 +13,9 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { cloneManifest, loadCommittedFixtures, PACKAGE_ROOT } from './_helpers.js';
 import { runReplay } from '../src/replay.js';
+import { buildDiscountSeries } from '../src/study/discount-series.js';
+import { validateManifest } from '../src/study/manifest.js';
+import { parseAnchorJsonl, parsePoolJsonl } from '../src/study/raw-archive.js';
 import { TUNED_L } from '../src/fixtures/synthetic-generator.js';
 
 function replayVariant(mutate: (m: Record<string, unknown>) => void): ReturnType<typeof runReplay> {
@@ -540,22 +543,53 @@ describe('E1-R2: pool duplicate integrity (never silently first-wins)', () => {
     return runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: pools });
   }
 
-  it('identical duplicate pool sample -> replay succeeds, visibly counted, study result unchanged', () => {
+  it('identical duplicate pool sample -> replay succeeds, visibly counted, study result unchanged (R3: FULL report equality except the duplicate counter)', () => {
     const fx = loadCommittedFixtures();
     const withDup: Record<string, string> = { ...fx.poolJsonls, [A1]: poolWithIdenticalDup(fx.poolJsonls[A1]) };
     const r = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: withDup });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.reportObject.aggregate.duplicateRecords['duplicate_pool_record']).toBe(1);
-    // Deterministic + content-preserving: the series for the affected pool
-    // must be IDENTICAL to the no-duplicate run (same samples, same d).
+    // The identical duplicate is counted EXACTLY once, under exactly this reason.
+    expect(r.reportObject.aggregate.duplicateRecords).toEqual({ duplicate_pool_record: 1 });
+
     const baseline = runReplay(fx.manifest, { anchorJsonl: fx.anchorJsonl, usdPriceJsonl: fx.usdPriceJsonl, poolJsonls: fx.poolJsonls });
     expect(baseline.ok).toBe(true);
     if (!baseline.ok) return;
+
+    // EM-STRAT-014-E1-R3: the affected pool's ENTIRE report entry must be
+    // deep-equal to the baseline's — the COMPLETE series content (every
+    // sample field: gridIndex, block, ts, dPct 12dp + exact, withinBand,
+    // liquidity, feeTier), the FULL exclusion list (block + reason +
+    // detail), events, depth exclusions, fee tier, and usable/exclusion
+    // counts. R2 compared only series length + dPctExact, which cannot
+    // detect a reporting divergence hidden in the exclusion list.
     const pDup = r.reportObject.pools.find(x => x.address === A1)!;
     const pBase = baseline.reportObject.pools.find(x => x.address === A1)!;
-    expect(pDup.series.length).toBe(pBase.series.length);
-    expect(pDup.series.map(s => s.dPctExact).join('|')).toBe(pBase.series.map(s => s.dPctExact).join('|'));
+    expect(pDup).toEqual(pBase);
+
+    // R3 — the exact double-reporting concern: an identical duplicate that
+    // runReplay already counted in aggregate.duplicateRecords must NOT
+    // resurface as a per-series 'duplicate_sample' exclusion. runReplay
+    // passes DEDUPLICATED records ([...poolByBlock.values()]) to
+    // buildDiscountSeries, so the duplicate row is reported in exactly one
+    // place: the aggregate counter.
+    expect(pDup.exclusions.filter(e => e.reason === 'duplicate_sample')).toEqual([]);
+    expect(r.reportObject.aggregate.exclusionsByReason['duplicate_sample']).toBeUndefined();
+
+    // R3 — whole-report stability: the duplicate run is identical to the
+    // baseline run everywhere except aggregate.duplicateRecords (same
+    // series, exclusions, events, verdict, and all other aggregate
+    // counters). If this assertion ever fails, the duplicate policy is
+    // leaking into study results.
+    const dupClone = JSON.parse(JSON.stringify(r.reportObject)) as { aggregate: Record<string, unknown> };
+    const baseClone = JSON.parse(JSON.stringify(baseline.reportObject)) as { aggregate: Record<string, unknown> };
+    const aggDup = { ...dupClone.aggregate };
+    const aggBase = { ...baseClone.aggregate };
+    delete aggDup.duplicateRecords;
+    delete aggBase.duplicateRecords;
+    dupClone.aggregate = aggDup;
+    baseClone.aggregate = aggBase;
+    expect(dupClone).toEqual(baseClone);
   });
 
   it('conflicting duplicate (sqrtPriceX96Hex differs) -> replay FAILS CLOSED naming pool and block', () => {
@@ -674,5 +708,88 @@ describe('E1-R2: pool duplicate integrity (never silently first-wins)', () => {
     if (r.ok) return;
     const joined = r.errors.join(' ');
     expect(joined.includes('duplicate_pool_conflict') || joined.includes('token_address_mismatch')).toBe(true);
+  });
+});
+
+// ─── EM-STRAT-014-E1-R3 — duplicate-accounting contract ─────────────────
+//
+// Reconciliation record (R3 work order): the preferred resolution — pass
+// only the canonical first record per block to buildDiscountSeries — is
+// ALREADY implemented at the R2 anchor 8712576 (runReplay calls
+// buildDiscountSeries with [...poolByBlock.values()], proven by the R2
+// commit diff `- records, + [...poolByBlock.values()]`); the R2 identical-
+// duplicate test above now guards that wiring with full-report equality.
+//
+// What remained undefined was the CONTRACT BOUNDARY between the two
+// duplicate-detection layers. runReplay pre-validates and pre-dedups, so
+// its identical duplicates are reported ONLY in
+// aggregate.duplicateRecords. buildDiscountSeries retains its own guard
+// for DIRECT library callers (work order item 4: "keep the direct-call
+// duplicate guard for library safety"). These tests pin that guard's own
+// deterministic semantics so neither layer's behavior can drift silently.
+
+describe('E1-R3: buildDiscountSeries direct-call duplicate guard (library safety; unreachable via runReplay)', () => {
+  const A1 = '0x00000000000000000000000000000000000000a1';
+
+  function directCallArgs() {
+    const fx = loadCommittedFixtures();
+    const parsed = validateManifest(fx.manifest);
+    if (!parsed.ok) throw new Error(`fixture manifest failed validation: ${parsed.errors.join('; ')}`);
+    const pm = parsed.parsed;
+    const m = pm.manifest;
+    const anchorParsed = parseAnchorJsonl(fx.anchorJsonl);
+    if (!anchorParsed.ok) throw new Error(`fixture anchor failed parsing: ${anchorParsed.error}`);
+    const anchorByBlock = new Map(anchorParsed.records.map(r => [r.blockHeight, r]));
+    const poolParsed = parsePoolJsonl(fx.poolJsonls[A1], A1);
+    if (!poolParsed.ok) throw new Error(`fixture pool failed parsing: ${poolParsed.error}`);
+    const expectedBlockAt = (gridIndex: number): number => m.window.startBlock + gridIndex * m.window.blockStep;
+    return {
+      records: poolParsed.records,
+      call: (records: typeof poolParsed.records) => buildDiscountSeries(
+        A1,
+        m.window.sampleCount,
+        expectedBlockAt,
+        { byBlock: anchorByBlock },
+        records,
+        m.conventions.anchorStalenessMaxSec,
+        m.conventions.anchorFutureToleranceSec,
+        pm.independenceBandPct,
+      ),
+    };
+  }
+
+  it('identical duplicate passed DIRECTLY -> visible duplicate_sample exclusion, first record kept, samples identical to single-record call', () => {
+    const { records, call } = directCallArgs();
+    const single = call(records);
+    const withDup = call([records[0], records[0], ...records.slice(1)]);
+
+    // The duplicate is a VISIBLE exclusion in the series (direct-call
+    // semantic — distinct from the runReplay aggregate view). Exclusions
+    // are deterministically sorted (block, then reason) inside
+    // buildDiscountSeries, so the extra entry is compared by content, not
+    // by position.
+    expect(withDup.exclusions.filter(e => e.reason === 'duplicate_sample')).toEqual([
+      {
+        blockHeight: records[0].blockHeight,
+        reason: 'duplicate_sample',
+        detail: `duplicate_raw_record_for_block_${records[0].blockHeight}_first_record_kept`,
+      },
+    ]);
+    expect(withDup.exclusions.length).toBe(single.exclusions.length + 1);
+    // First record kept, deterministically: the usable samples are the same.
+    expect(withDup.samples).toEqual(single.samples);
+    expect(withDup.feeTierRecorded).toBe(single.feeTierRecorded);
+  });
+
+  it('conflicting duplicate passed DIRECTLY -> deterministic throw (defense-in-depth)', () => {
+    const { records, call } = directCallArgs();
+    const clean = records[0];
+    expect(clean.fieldError).toBeNull();
+    const mutated: typeof clean = {
+      ...clean,
+      sqrtPriceX96: (clean.sqrtPriceX96 as bigint) + 1n, // conflicts on price
+    };
+    expect(() => call([clean, mutated, ...records.slice(1)]))
+      .toThrowError(/discount_series:conflicting_duplicate_pool_sample:block_\d+:records_disagree_on_decoded_values/);
   });
 });
