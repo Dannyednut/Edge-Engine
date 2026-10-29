@@ -29,6 +29,92 @@ import {
 } from '../src/index.js';
 import { keccak256, encodeFunctionData, encodeAbiParameters } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import {
+  EXECUTION_AUTH_ENV_VAR,
+  setExecutionClockForTesting,
+  resetExecutionClockForTesting,
+} from '@edge/risk';
+
+// ─── Guard provisioning (reconciliation with main's execution guard) ──
+//
+// main hardened EvmExecutor with fail-closed scope gates: the constructor
+// requires 'evm-executor:construct-signer' and every submission path
+// requires 'evm-executor:send-transaction'. These tests therefore provision
+// a deterministic, test-only authorization descriptor through the same
+// env-var mechanism the production guard reads — the same pattern the
+// CexExecutor containment tests use. No real .env file is read, and no
+// network call is possible (all viem clients are mocked below).
+
+const FIXED_NOW = 1_700_000_000_000;
+
+/** Stub a valid test-only authorization descriptor into the guard env var. */
+function grant(scopes: readonly string[], expiresAtMs: number = FIXED_NOW + 60_000): void {
+  vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({ authId: 'em-strat-014-b2-reconcile-test', expiresAtMs, scopes: [...scopes] }));
+}
+
+beforeEach(() => {
+  setExecutionClockForTesting(() => FIXED_NOW);
+  grant(['evm-executor:construct-signer', 'evm-executor:send-transaction']);
+});
+
+afterEach(() => {
+  resetExecutionClockForTesting();
+  vi.unstubAllEnvs();
+});
+
+// ─── viem client mocks (reconciliation with main's hard-private signer) ─
+//
+// main moved walletClient/account into ECMAScript #private fields, so the
+// previous approach (patching executor.walletClient) can no longer reach
+// the signer — by design. Instead the viem client FACTORIES are partially
+// mocked: createWalletClient/createPublicClient/http return configurable
+// fakes while everything else in viem (ABI encoding, chains, accounts)
+// stays real. The class still stores its clients in #private fields; the
+// fakes merely make offline, deterministic behavior injectable without any
+// backdoor into the instance.
+
+const fakeViemClients = vi.hoisted(() => {
+  // Each EvmExecutor construction creates FRESH fakes (one wallet + one
+  // public client); the holder records the most recent pair so the factory
+  // helper can configure the behavior of the executor it just built.
+  // Independent executors therefore get independent mock behavior.
+  const holder: {
+    lastWallet: { state: { sendTransaction?: (args: unknown) => Promise<`0x${string}`> }; walletClient: Record<string, unknown> } | null;
+    lastPublic: { state: { getTransactionReceipt?: (args: unknown) => Promise<unknown> }; publicClient: Record<string, unknown> } | null;
+  } = { lastWallet: null, lastPublic: null };
+  return { holder };
+});
+
+vi.mock('viem', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('viem')>();
+  return {
+    ...actual,
+    createWalletClient: ((config: unknown) => {
+      const state: { sendTransaction?: (args: unknown) => Promise<`0x${string}`> } = {};
+      const walletClient = {
+        ...(typeof config === 'object' && config !== null ? config : {}),
+        sendTransaction: (args: unknown) => {
+          if (!state.sendTransaction) throw new Error('mock sendTransaction not configured');
+          return state.sendTransaction(args);
+        },
+      };
+      fakeViemClients.holder.lastWallet = { state, walletClient };
+      return walletClient;
+    }) as unknown as typeof actual.createWalletClient,
+    createPublicClient: ((_config: unknown) => {
+      const state: { getTransactionReceipt?: (args: unknown) => Promise<unknown> } = {};
+      const publicClient = {
+        getTransactionReceipt: (args: unknown) => {
+          if (!state.getTransactionReceipt) throw new Error('mock getTransactionReceipt not configured');
+          return state.getTransactionReceipt(args);
+        },
+      };
+      fakeViemClients.holder.lastPublic = { state, publicClient };
+      return publicClient;
+    }) as unknown as typeof actual.createPublicClient,
+    http: (() => 'mock-transport') as unknown as typeof actual.http,
+  };
+});
 
 // ─── Constants ────────────────────────────────────────────────────────
 
@@ -229,9 +315,16 @@ describe('encodeAbi — encoding failures', () => {
 // ─── 4-9. ExecutionResult status semantics ───────────────────────────
 
 /**
- * Helper: create an EvmExecutor with mocked walletClient and publicClient.
+ * Helper: create an EvmExecutor with mocked viem clients.
  * The mocked clients allow us to simulate sendTransaction + getTransactionReceipt
  * outcomes without broadcasting real transactions.
+ *
+ * Reconciliation note: main's EvmExecutor keeps its viem clients in
+ * ECMAScript #private fields (hard-private signer material — no instance
+ * property is reachable from outside), so the previous approach of patching
+ * `executor.walletClient` cannot work. The viem factories are partially
+ * mocked at module level instead; behavior is injected through the shared
+ * state holder below. The guard is provisioned by the file-level beforeEach.
  */
 function makeExecutorWithMocks(opts: {
   sendTransaction?: (args: unknown) => Promise<`0x${string}`>;
@@ -240,8 +333,6 @@ function makeExecutorWithMocks(opts: {
   receiptTimeoutMs?: number;
   receiptPollMs?: number;
 }): { executor: EvmExecutor; walletClient: unknown; publicClient: unknown } {
-  // We can't easily mock viem's internal transport, so we create a real
-  // executor but override its clients' methods via prototype patching.
   const executor = new EvmExecutor({
     chainId: 'ethereum',
     agentPrivateKey: TEST_PRIVATE_KEY,
@@ -252,23 +343,17 @@ function makeExecutorWithMocks(opts: {
     receiptPollMs: opts.receiptPollMs ?? 10,
   });
 
-  // Patch walletClient.sendTransaction
-  const walletClient = executor.walletClient as unknown as {
-    sendTransaction: (args: unknown) => Promise<`0x${string}`>;
-  };
-  if (opts.sendTransaction) {
-    walletClient.sendTransaction = opts.sendTransaction;
-  }
+  // The constructor just created a FRESH fake pair for this executor
+  // (recorded by the viem factory mocks). Configure its behavior here.
+  const wallet = fakeViemClients.holder.lastWallet;
+  const pub = fakeViemClients.holder.lastPublic;
+  if (!wallet || !pub) throw new Error('viem client mocks were not invoked during construction');
+  wallet.state.sendTransaction = opts.sendTransaction;
+  pub.state.getTransactionReceipt = opts.getTransactionReceipt as
+    | ((args: unknown) => Promise<unknown>)
+    | undefined;
 
-  // Patch publicClient.getTransactionReceipt
-  const publicClient = executor.publicClient as unknown as {
-    getTransactionReceipt: (args: { hash: `0x${string}` }) => Promise<unknown>;
-  };
-  if (opts.getTransactionReceipt) {
-    publicClient.getTransactionReceipt = opts.getTransactionReceipt;
-  }
-
-  return { executor, walletClient, publicClient };
+  return { executor, walletClient: wallet.walletClient, publicClient: pub.publicClient };
 }
 
 describe('EvmExecutor.execute — fail-closed status semantics', () => {

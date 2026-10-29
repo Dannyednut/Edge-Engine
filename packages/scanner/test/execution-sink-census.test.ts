@@ -315,8 +315,14 @@ const CANONICAL_SINKS: CanonicalSink[] = [
   // ── VooiPriceSpreadExecutor (runner class) — direct local guard ─────────
   { file: 'packages/scanner/src/runners/vooi-price-spread-executor.ts', sink: 'placeArbitrageOrder', expectedCount: 1, guardScope: 'vooi-price-spread-executor:execute-opp', guardMode: 'direct', rationale: 'local executor-scope guard; the client sink additionally re-checks vooi:place-arbitrage-order' },
 
-  // ── EvmExecutor — hard-private signer; three sendTransaction sites ──────
-  { file: 'packages/executor/src/index.ts', sink: 'sendTransaction', expectedCount: 3, guardScope: 'evm-executor:send-transaction', guardMode: 'direct' },
+  // ── EvmExecutor — hard-private signer; ONE consolidated sendTransaction site ──
+  // PR #2 reconciliation: the three former direct sendTransaction call sites
+  // (execute / balancerFlashLoanArb / aaveFlashLoanArb) were consolidated into
+  // the private submitAndWait() helper, which itself re-asserts
+  // 'evm-executor:send-transaction' (defense-in-depth at the sink) and each
+  // public entry point still asserts the scope before calling it. Net effect:
+  // FEWER direct sink call sites, same scope, strictly guarded.
+  { file: 'packages/executor/src/index.ts', sink: 'sendTransaction', expectedCount: 1, guardScope: 'evm-executor:send-transaction', guardMode: 'direct', rationale: 'single sendTransaction site inside #private submitAndWait(); the sink re-asserts the scope (defense-in-depth) and all public entry points assert it before calling' },
   // submitViaFlashbotsProtect broadcasts a real signed tx (eth_sendRawTransaction)
   // — guarded with the send-transaction scope since Phase-0.5 (work order A/E).
   { file: 'packages/executor/src/index.ts', sink: 'eth_sendRawTransaction', expectedCount: 1, guardScope: 'evm-executor:send-transaction', guardMode: 'direct', rationale: 'submitViaFlashbotsProtect — raw broadcast sink; assertExecutionAuthorized added Phase-0.5' },

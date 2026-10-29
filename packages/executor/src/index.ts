@@ -459,6 +459,13 @@ export class EvmExecutor {
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
   }): Promise<ExecutionResult> {
+    // Defense-in-depth (reconciliation of PR #2 with main's guard): the sink
+    // itself re-checks the scope, even though every public entry point
+    // (execute / balancerFlashLoanArb / aaveFlashLoanArb) already asserts
+    // 'evm-executor:send-transaction' before calling this method. Containment
+    // at the sink means the raw sendTransaction call can never be reached
+    // without a currently-valid authorization, regardless of future callers.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     let txHash: `0x${string}`;
     try {
       txHash = await this.#walletClient.sendTransaction({
