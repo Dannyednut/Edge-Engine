@@ -209,3 +209,68 @@ describe('EM-STRAT-014-E11-Cluster1-R1 — perp_funding Sharpe freshness propaga
     expect(a!.freshness).toBe('server-asof');
   });
 });
+
+// ─── EM-STRAT-014-E11-Cluster2-R1 — canonical perp_funding join ─────────
+
+describe('EM-STRAT-014-E11-Cluster2-R1 — perp_funding join normalized on BOTH sides', () => {
+  it('case difference: Sharpe "Hyperliquid" vs VOOI "hyperliquid" → cross-validation matches', async () => {
+    const row = { ...SHARPE_ROW, longExchange: 'Hyperliquid', shortExchange: 'Binance' };
+    const pair = makeVooiPair(); // long.exchange 'hyperliquid', short 'binance'
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([row], { asOf: SERVER_ASOF }),
+      makeVooiClient([pair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const a = alerts.find(x => x.source === 'sharpe+vooi');
+    expect(a).toBeDefined(); // join must succeed despite case difference
+    expect(a!.priceSpreadPct).toBeCloseTo(0.06, 6); // VOOI priceSpreadAtSize × 100
+  });
+
+  it('approved venue alias: Sharpe "hyperliquid" vs VOOI "HL" → matches; unmapped venue spelling never matches', async () => {
+    const pair = makeVooiPair({ long: { ...makeVooiPair().long, exchange: 'HL' } } as Partial<VooiArbitragePair>);
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([SHARPE_ROW], { asOf: SERVER_ASOF }),
+      makeVooiClient([pair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts.find(x => x.source === 'sharpe+vooi')).toBeDefined();
+
+    // Unmapped venue spelling ('mynewvenue') must NOT join (no guesswork).
+    const unmapPair = makeVooiPair({ long: { ...makeVooiPair().long, exchange: 'mynewvenue' } } as Partial<VooiArbitragePair>);
+    const strat2 = new PerpFundingStrategy(
+      makeSharpeClient([SHARPE_ROW], { asOf: SERVER_ASOF }),
+      makeVooiClient([unmapPair]),
+      PARAMS,
+    );
+    const alerts2 = await strat2.scan();
+    expect(alerts2.find(x => x.source === 'sharpe+vooi')).toBeUndefined();
+  });
+
+  it('approved asset alias: Sharpe "1000PEPE" vs VOOI "PEPE" → cross-validation matches; unlisted alias never matches', async () => {
+    const pepeRow: SharpeRowLike = { coin: '1000PEPE', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
+    const pepePair = makeVooiPair({ asset: 'PEPE' } as Partial<VooiArbitragePair>);
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([pepeRow], { asOf: SERVER_ASOF }),
+      makeVooiClient([pepePair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    // The JOIN is canonical (PEPE↔1000PEPE match); the emitted asset label
+    // preserves the provider's own symbol ('1000PEPE'). What matters here is
+    // that cross-validation succeeded (source 'sharpe+vooi').
+    expect(alerts.find(x => x.source === 'sharpe+vooi' && x.asset === '1000PEPE')).toBeDefined();
+
+    // Unlisted alias ('WIFCOIN' vs 'WIF') must NOT join.
+    const wifRow: SharpeRowLike = { coin: 'WIFCOIN', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
+    const wifPair = makeVooiPair({ asset: 'WIF' } as Partial<VooiArbitragePair>);
+    const strat2 = new PerpFundingStrategy(
+      makeSharpeClient([wifRow], { asOf: SERVER_ASOF }),
+      makeVooiClient([wifPair]),
+      PARAMS,
+    );
+    const alerts2 = await strat2.scan();
+    expect(alerts2.find(x => x.source === 'sharpe+vooi')).toBeUndefined();
+  });
+});
