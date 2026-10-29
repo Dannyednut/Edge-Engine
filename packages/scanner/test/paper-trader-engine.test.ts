@@ -20,6 +20,9 @@
  *   12. Invalid existing state is NOT overwritten (fail-closed loadV2State)
  *   13. Negative P&L validation (losses are legitimate)
  *   14. Fee-accounting consistency (settled at close, not double-counted)
+ *   15. Legacy state migration safety (opportunityHistory missing)
+ *   16. APR configuration validated & fail-closed (parseAprConfig,
+ *       validateApr, createV2InitialState bounds, runScan initialAprs)
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -46,7 +49,7 @@ import {
   ONE_DAY_MS,
   SCAN_INTERVAL_MS,
 } from '../src/lib/paper-trader-accounting.js';
-import { runScan, createV2InitialState } from '../src/lib/paper-trader-engine.js';
+import { runScan, createV2InitialState, parseAprConfig, validateApr, DEFAULT_V2_APRS } from '../src/lib/paper-trader-engine.js';
 
 // ─── Test fixtures ────────────────────────────────────────────────────
 
@@ -893,5 +896,106 @@ describe('15. Legacy state migration safety (opportunityHistory missing)', () =>
     expect(state.opportunityHistory).toBeDefined();
     expect(state.opportunityHistory.entries).toEqual({});
     expect(() => validateState(state)).not.toThrow();
+  });
+});
+
+// ─── 16. APR configuration (validated, fail-closed) ──────────────────
+//
+// Supervisor follow-up #3 on PR #3: the script loads PAPER_HLP_APR /
+// PAPER_KHYPE_APR but runScan hardcoded 0.30 / 0.0193 for fresh
+// baselines. The knobs are now wired through `deps.initialAprs` via
+// `parseAprConfig()`, which fail-closes on invalid values instead of
+// silently falling back to defaults.
+
+describe('16. APR configuration (validated, fail-closed)', () => {
+  it('parseAprConfig returns documented defaults when knobs are absent', () => {
+    const cfg = parseAprConfig({});
+    expect(cfg).toEqual({ hlp: 0.30, khype: 0.0193 });
+    expect(cfg).toEqual(DEFAULT_V2_APRS);
+  });
+
+  it('parseAprConfig treats empty/whitespace values as absent (defaults)', () => {
+    expect(parseAprConfig({ PAPER_HLP_APR: '', PAPER_KHYPE_APR: '   ' })).toEqual(DEFAULT_V2_APRS);
+  });
+
+  it('parseAprConfig accepts valid overrides', () => {
+    const cfg = parseAprConfig({ PAPER_HLP_APR: '0.25', PAPER_KHYPE_APR: '0.02' });
+    expect(cfg).toEqual({ hlp: 0.25, khype: 0.02 });
+  });
+
+  it('parseAprConfig accepts boundary values 0 and 2 (0%–200%)', () => {
+    const cfg = parseAprConfig({ PAPER_HLP_APR: '0', PAPER_KHYPE_APR: '2' });
+    expect(cfg).toEqual({ hlp: 0, khype: 2 });
+  });
+
+  const invalidCases: Array<{ name: string; env: Record<string, string> }> = [
+    { name: 'non-numeric HLP APR', env: { PAPER_HLP_APR: 'thirty-percent' } },
+    { name: 'negative HLP APR', env: { PAPER_HLP_APR: '-0.1' } },
+    { name: 'HLP APR above 200%', env: { PAPER_HLP_APR: '2.5' } },
+    { name: 'non-numeric kHYPE APR', env: { PAPER_KHYPE_APR: 'high' } },
+    { name: 'negative kHYPE APR', env: { PAPER_KHYPE_APR: '-1' } },
+    { name: 'kHYPE APR above 200%', env: { PAPER_KHYPE_APR: '10' } },
+    { name: 'Infinity literal', env: { PAPER_HLP_APR: 'Infinity' } },
+  ];
+
+  for (const c of invalidCases) {
+    it(`throws on ${c.name} (no silent fallback)`, () => {
+      expect(() => parseAprConfig(c.env)).toThrow(/Invalid APR/);
+    });
+  }
+
+  it('error message names the offending env var', () => {
+    expect(() => parseAprConfig({ PAPER_KHYPE_APR: 'nope' })).toThrow(/PAPER_KHYPE_APR/);
+  });
+
+  it('validateApr rejects NaN and Infinity directly', () => {
+    expect(() => validateApr(Number.NaN, 'x')).toThrow(/finite/);
+    expect(() => validateApr(Number.POSITIVE_INFINITY, 'x')).toThrow(/finite/);
+  });
+
+  it('createV2InitialState rejects out-of-bounds APRs (fail-closed baseline)', () => {
+    expect(() => createV2InitialState(-0.5, 0.0193)).toThrow(/Invalid APR/);
+    expect(() => createV2InitialState(0.30, 99)).toThrow(/Invalid APR/);
+    expect(() => createV2InitialState(Number.NaN, 0.0193)).toThrow(/Invalid APR/);
+  });
+
+  it('runScan fresh baseline uses deps.initialAprs when provided', async () => {
+    const { deps } = makeMockDeps({ now: 1000000 });
+    (deps as any).initialAprs = { hlp: 0.10, khype: 0.05 };
+
+    const result = await runScan(deps);
+    expect(result.state.yields.hlp.apr).toBe(0.10);
+    expect(result.state.yields.khype.apr).toBe(0.05);
+  });
+
+  it('runScan fresh baseline falls back to documented defaults when initialAprs absent', async () => {
+    const { deps } = makeMockDeps({ now: 1000000 });
+
+    const result = await runScan(deps);
+    expect(result.state.yields.hlp.apr).toBe(DEFAULT_V2_APRS.hlp);
+    expect(result.state.yields.khype.apr).toBe(DEFAULT_V2_APRS.khype);
+  });
+
+  it('initialAprs never rewrites an existing state (only fresh baselines)', async () => {
+    const existing = createV2InitialState(0.30, 0.0193);
+    const { deps } = makeMockDeps({ existingState: existing, now: 1000000 });
+    (deps as any).initialAprs = { hlp: 0.10, khype: 0.05 };
+
+    const result = await runScan(deps);
+    // Existing state's yield config is preserved untouched
+    expect(result.state.yields.hlp.apr).toBe(0.30);
+    expect(result.state.yields.khype.apr).toBe(0.0193);
+  });
+
+  it('unverified-yield credit stays disabled by default regardless of APR source', async () => {
+    const { deps } = makeMockDeps({ now: 1000000 });
+    (deps as any).initialAprs = { hlp: 0.10, khype: 0.05 };
+
+    const result = await runScan(deps);
+    // Both yields remain verified:false; creditUnverified=false → nothing credited
+    expect(result.state.yields.hlp.verified).toBe(false);
+    expect(result.state.yields.khype.verified).toBe(false);
+    expect(result.summary.pnl.passiveYield).toBe(0);
+    expect(result.yieldCredited.every(y => y.amount === 0)).toBe(true);
   });
 });

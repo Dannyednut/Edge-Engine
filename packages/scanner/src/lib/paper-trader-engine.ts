@@ -58,6 +58,126 @@ export interface VooiResponse {
   total?: number;
 }
 
+/**
+ * Typed failure for the VOOI adapter. Thrown on ANY HTTP or data-shape
+ * failure so that `runScan` records it in `result.errors` instead of the
+ * failure silently looking like "no opportunities".
+ *
+ *   kind 'http'  — non-2xx HTTP status (`status` carries the code)
+ *   kind 'shape' — invalid JSON body or response shape violates the
+ *                  expected `VooiResponse` structure
+ */
+export class VooiScanError extends Error {
+  readonly kind: 'http' | 'shape';
+  readonly status?: number;
+
+  constructor(kind: 'http' | 'shape', message: string, status?: number) {
+    super(message);
+    this.name = 'VooiScanError';
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/**
+ * Validate a parsed VOOI payload against the shape the engine consumes.
+ * Fail-closed: throws `VooiScanError('shape', …)` on any violation rather
+ * than tolerating malformed data (a malformed row could silently change
+ * accounting inputs).
+ *
+ * Accepted shape (matching `VooiResponse` / `VooiItem`):
+ *   - body must be a non-null object
+ *   - `items`, if present, must be an array of non-null objects each with
+ *     a string `asset`; each item's `pairs`, if present, must be an array
+ *     of non-null objects
+ *   - `total`, if present, must be a finite number
+ */
+export function validateVooiResponse(body: unknown): VooiResponse {
+  const shapeFail = (detail: string): VooiScanError =>
+    new VooiScanError('shape', `VOOI response shape invalid: ${detail}`);
+
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw shapeFail('body is not a JSON object');
+  }
+  const rec = body as Record<string, unknown>;
+
+  if (rec.total !== undefined && (typeof rec.total !== 'number' || !Number.isFinite(rec.total))) {
+    throw shapeFail('total is present but not a finite number');
+  }
+
+  if (rec.items === undefined) return body as VooiResponse;
+
+  if (!Array.isArray(rec.items)) {
+    throw shapeFail('items is present but not an array');
+  }
+  for (const item of rec.items) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw shapeFail('items entry is not a JSON object');
+    }
+    const itemRec = item as Record<string, unknown>;
+    if (typeof itemRec.asset !== 'string') {
+      throw shapeFail('items entry is missing a string asset');
+    }
+    if (itemRec.pairs !== undefined && !Array.isArray(itemRec.pairs)) {
+      throw shapeFail('item.pairs is present but not an array');
+    }
+    if (Array.isArray(itemRec.pairs)) {
+      for (const pair of itemRec.pairs) {
+        if (pair === null || typeof pair !== 'object' || Array.isArray(pair)) {
+          throw shapeFail('item.pairs entry is not a JSON object');
+        }
+      }
+    }
+  }
+  return body as VooiResponse;
+}
+
+/**
+ * VOOI arbitrage-scanner adapter.
+ *
+ * Fail-closed contract (per supervisor follow-up on PR #3):
+ *   - non-2xx HTTP status  → throws `VooiScanError('http', …, status)`;
+ *     a 429/500 is NEVER mapped to an empty result (which previously made
+ *     an API failure look like "no opportunities")
+ *   - invalid JSON body    → throws `VooiScanError('shape', …)`
+ *   - malformed shape      → throws `VooiScanError('shape', …)`
+ *   - valid empty results  → returns `{ items: [], total: 0 }` unchanged
+ *
+ * `fetchImpl` is injectable so tests run fully offline with a mock fetch;
+ * the live script binds the real global fetch.
+ */
+export async function vooiScan(
+  baseUrl: string,
+  params: Record<string, unknown>,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<VooiResponse> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) q.set(k, String(v));
+  }
+  const url = `${baseUrl}/arbitrage-scanner?${q.toString()}`;
+
+  const res = await fetchImpl(url);
+  if (!res.ok) {
+    throw new VooiScanError(
+      'http',
+      `VOOI arbitrage-scanner returned HTTP ${res.status} ${res.statusText || ''}`.trim(),
+      res.status,
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (e) {
+    throw new VooiScanError(
+      'shape',
+      `VOOI arbitrage-scanner returned invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return validateVooiResponse(body);
+}
+
 /** Dependencies injected into the scan function. All are mockable. */
 export interface ScanDependencies {
   /** Fetch price-spread arb opportunities (mockable — no real network calls in tests). */
@@ -76,6 +196,81 @@ export interface ScanDependencies {
   creditUnverified: boolean;
   /** Scan interval in ms (default: 5 min). */
   scanIntervalMs: number;
+  /**
+   * Validated APR configuration used ONLY when creating a fresh V2
+   * baseline (no existing state). Absent → `DEFAULT_V2_APRS`. The live
+   * script passes `parseAprConfig(process.env)` here so the
+   * PAPER_HLP_APR / PAPER_KHYPE_APR env knobs actually reach the
+   * initial state instead of being silently ignored.
+   */
+  initialAprs?: V2AprConfig;
+}
+
+/**
+ * Passive-yield APR configuration for the V2 baseline.
+ * Values are decimal-fraction APRs (0.30 = 30%/yr).
+ */
+export interface V2AprConfig {
+  hlp: number;
+  khype: number;
+}
+
+/**
+ * Documented V2 baseline APRs (decimal fractions). HLP 30% remains an
+ * UNVERIFIED lowered estimate; kHYPE 1.93% was verified via DefiLlama on
+ * Oct 13, 2026 and is now STALE (see docs/PAPER_PERFORMANCE_AUDIT.md §C).
+ * Both yields stay `verified: false` in the created state, so with the
+ * default `creditUnverified=false` neither is credited until re-verified.
+ */
+export const DEFAULT_V2_APRS: V2AprConfig = { hlp: 0.30, khype: 0.0193 };
+
+/** APR validation bounds (decimal fraction: 0 = 0%/yr, 2 = 200%/yr). */
+export const APR_MIN = 0;
+export const APR_MAX = 2;
+
+/**
+ * Validate a single APR value. Fail-closed: throws on non-finite numbers
+ * or values outside `[APR_MIN, APR_MAX]`. Never silently clamps — a
+ * misconfigured APR must abort, not silently change accounting inputs.
+ */
+export function validateApr(value: number, name: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`Invalid APR for ${name}: expected a finite number, got ${String(value)}`);
+  }
+  if (value < APR_MIN || value > APR_MAX) {
+    throw new Error(
+      `Invalid APR for ${name}: ${value} is outside the accepted decimal-fraction range [${APR_MIN}, ${APR_MAX}]`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Parse and validate the PAPER_HLP_APR / PAPER_KHYPE_APR environment
+ * knobs. `env` is injectable (pass `process.env` in the live script) so
+ * tests exercise this fail-closed parser offline.
+ *
+ * Semantics:
+ *   - absent knob            → documented `DEFAULT_V2_APRS` value
+ *   - present but invalid    → THROWS (non-numeric, NaN/Infinity, or
+ *                              outside [0, 2]) — no silent fallback to
+ *                              defaults, which would re-create the very
+ *                              config/script mismatch this fixes
+ *   - empty/whitespace value → treated as absent (uses default)
+ */
+export function parseAprConfig(env: Record<string, string | undefined>): V2AprConfig {
+  const parseOne = (varName: string, fallback: number): number => {
+    const raw = env[varName];
+    if (raw === undefined) return fallback;
+    const trimmed = raw.trim();
+    if (trimmed === '') return fallback;
+    const parsed = Number(trimmed);
+    return validateApr(parsed, varName);
+  };
+  return {
+    hlp: parseOne('PAPER_HLP_APR', DEFAULT_V2_APRS.hlp),
+    khype: parseOne('PAPER_KHYPE_APR', DEFAULT_V2_APRS.khype),
+  };
 }
 
 /** Result of a scan. */
@@ -110,6 +305,11 @@ export function createV2InitialState(
   hlpApr: number,
   khypeApr: number,
 ): AccountingState {
+  // Fail-closed APR validation — a non-finite or out-of-range APR must
+  // abort baseline creation, never silently distort yield accounting.
+  validateApr(hlpApr, 'hlpApr');
+  validateApr(khypeApr, 'khypeApr');
+
   const yields: Record<YieldSource, YieldConfig> = {
     hlp: {
       source: 'hlp',
@@ -153,8 +353,14 @@ export async function runScan(deps: ScanDependencies): Promise<ScanResult> {
   let state: AccountingState;
   const loaded = deps.loadState();
   if (loaded === null) {
-    // No existing state — create fresh V2 baseline
-    state = createV2InitialState(0.30, 0.0193);
+    // No existing state — create fresh V2 baseline from the validated APR
+    // config (deps.initialAprs, e.g. parseAprConfig(process.env) from the
+    // live script) or the documented defaults. The env knobs now actually
+    // reach the initial state instead of being silently ignored.
+    state = createV2InitialState(
+      deps.initialAprs?.hlp ?? DEFAULT_V2_APRS.hlp,
+      deps.initialAprs?.khype ?? DEFAULT_V2_APRS.khype,
+    );
   } else {
     // Validate existing state — fail closed
     try {

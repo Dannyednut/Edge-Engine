@@ -13,19 +13,23 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
   type AccountingState,
-  type VooiResponse,
   validateState,
-  getSummary,
 } from '../packages/scanner/src/lib/paper-trader-accounting.js';
-import { runScan, createV2InitialState } from '../packages/scanner/src/lib/paper-trader-engine.ts';
+import {
+  runScan,
+  vooiScan as vooiScanApi,
+  parseAprConfig,
+} from '../packages/scanner/src/lib/paper-trader-engine.ts';
 import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..');
 
-// Load .env (for PAPER_HLP_APR / PAPER_KHYPE_APR config vars) — via the shared
-// fail-closed dotenv-safety helper (EM-STRAT-014-C loader-census approved form).
+// Load .env (for PAPER_HLP_APR / PAPER_KHYPE_APR config vars, consumed via
+// parseAprConfig() below and passed into runScan as validated initialAprs)
+// — via the shared fail-closed dotenv-safety helper (EM-STRAT-014-C
+// loader-census approved form).
 loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 // ─── V2 state/log paths (configurable for testing) ────────────────────
@@ -37,15 +41,17 @@ const V2_LOG   = process.env.PAPER_V2_LOG   ?? '/home/z/my-project/download/pape
 
 const VOI_API = 'https://perps-api.vooi.io';
 
-async function vooiScan(params: Record<string, unknown>): Promise<VooiResponse> {
-  const q = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null) q.set(k, String(v));
-  }
-  const url = `${VOI_API}/arbitrage-scanner?${q.toString()}`;
-  const res = await fetch(url);
-  if (!res.ok) return { items: [], total: 0 };
-  return res.json();
+/**
+ * VOOI adapter binding — delegates to the fail-closed engine adapter.
+ *
+ * A non-2xx response (429/500), invalid JSON, or malformed payload THROWS
+ * `VooiScanError`; `runScan` records it in `result.errors`. A failed API
+ * call is therefore visible in the scan output instead of silently
+ * looking like "no opportunities" (previous behavior returned
+ * `{ items: [], total: 0 }` on every non-2xx response).
+ */
+function vooiScan(params: Record<string, unknown>) {
+  return vooiScanApi(VOI_API, params);
 }
 
 // ─── V2 State I/O (fail-closed) ───────────────────────────────────────
@@ -147,6 +153,14 @@ async function main() {
   console.log('  Paper Trading Simulator V2 (accounting-integrated)');
   console.log('═══════════════════════════════════════════════════\n');
 
+  // Validated APR configuration for the fresh-V2-baseline path.
+  // parseAprConfig fail-closes on invalid PAPER_HLP_APR / PAPER_KHYPE_APR
+  // values (throws rather than silently falling back). Absent knobs use
+  // the documented defaults (see DEFAULT_V2_APRS in paper-trader-engine).
+  // NOTE: only used when no existing V2 state is present; an existing
+  // state's yield config is never rewritten by this scan.
+  const initialAprs = parseAprConfig(process.env);
+
   const result = await runScan({
     fetchPriceSpreadArbs: () => vooiScan({ limit: 10, orderBy: 'priceSpread', orderDirection: 'desc', minPriceSpread: 0.005 }),
     fetchFundingArbs: () => vooiScan({ limit: 10, orderBy: 'fundingSpread1h', orderDirection: 'desc', minFundingSpread: 0.0005 }),
@@ -156,6 +170,7 @@ async function main() {
     logTrade: logV2Trade,
     creditUnverified: process.env.PAPER_CREDIT_UNVERIFIED === 'true',
     scanIntervalMs: 5 * 60 * 1000,
+    initialAprs,
   });
 
   const s = result.summary;
