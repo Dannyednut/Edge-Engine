@@ -139,12 +139,17 @@ describe('EvmExecutor — execution guard (EM-STRAT-012)', () => {
       authId: 'test', expiresAtMs: FIXED_NOW + 60_000, scopes: ['evm-executor:send-transaction'],
     }));
     const calls: unknown[] = [];
+    // PR #2 supervisor follow-up #3: the helper now validates the JSON-RPC
+    // result as a non-empty 32-byte tx hash, so the mock must return a
+    // well-formed hash for the guard pass-through assertion to reach the
+    // return value.
+    const validHash = '0x' + 'ab'.repeat(32);
     const recordingFetch = (async (_url: any, _init?: any) => {
       calls.push({ url: _url, init: _init });
-      return { ok: true, json: async () => ({ result: '0xdeadbeef' }) } as any;
+      return { ok: true, status: 200, json: async () => ({ result: validHash }) } as any;
     }) as any;
     const r = await submitViaFlashbotsProtect('0xdeadbeef' as const, recordingFetch);
-    expect(r.txHash).toBe('0xdeadbeef');
+    expect(r.txHash).toBe(validHash);
     expect(calls.length).toBe(1);
     expect(JSON.stringify(calls[0])).toContain('eth_sendRawTransaction');
   });

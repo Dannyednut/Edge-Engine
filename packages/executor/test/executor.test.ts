@@ -5,13 +5,19 @@
  *   1. ABI encoding (selectors + calldata) via encodeVaultFunctionCall
  *   2. Dynamic arrays + bytes encoding via encodeAbi
  *   3. Encoding failures (invalid function name, wrong arg types)
- *   4. ExecutionResult status semantics (submitted/confirmed/reverted/error)
+ *   4. ExecutionResult status semantics (submitted/confirmed/reverted/ambiguous)
  *   5. Successful receipt handling
  *   6. Reverted receipt handling
- *   7. RPC/receipt-fetch error handling
+ *   7. Ambiguous send-failure handling (NOT proof of non-submission)
  *   8. Receipt timeout (submitted without confirmation)
  *   9. waitForReceipt=false returns immediately
- *  10. Flashbots Protect helper (mocked fetch)
+ *  10. Flashbots Protect helper (mocked fetch, fail-closed HTTP/JSON/hash validation)
+ *  11. Runtime privacy of #submitAndWait (supervisor follow-up #1) — the
+ *      submission helper is ECMAScript-private and unreachable at runtime;
+ *      public submissions route through agentVaultAddress only.
+ *  12. Census ratification perimeter (follow-up #4) — the single raw
+ *      sendTransaction site is provably unreachable without the guard and
+ *      without vault routing.
  *
  * No real transactions are broadcast. All viem clients use mocked
  * transports or injected stubs.
@@ -398,7 +404,7 @@ describe('EvmExecutor.execute — fail-closed status semantics', () => {
     expect(result.reason).toContain('reverted');
   });
 
-  it('returns status=error when sendTransaction throws', async () => {
+  it('returns status=ambiguous when sendTransaction throws (NOT proof of non-submission)', async () => {
     const { executor } = makeExecutorWithMocks({
       sendTransaction: async () => { throw new Error('insufficient funds for gas'); },
     });
@@ -406,8 +412,13 @@ describe('EvmExecutor.execute — fail-closed status semantics', () => {
     const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
 
     expect(result.txHash).toBeNull();
-    expect(result.status).toBe('error');
+    expect(result.status).toBe('ambiguous');
     expect(result.reason).toContain('insufficient funds');
+    // The reason must explicitly state the ambiguity — never claim the tx
+    // was not submitted, never imply retry is safe.
+    expect(result.reason).toContain('AMBIGUOUS');
+    expect(result.reason).toContain('NOT proof');
+    expect(result.reason).toContain('Do NOT automatically retry');
   });
 
   it('returns status=submitted when receipt fetch times out', async () => {
@@ -535,28 +546,92 @@ describe('EvmExecutor.aaveFlashLoanArb — fail-closed', () => {
   });
 });
 
-// ─── 10. Flashbots Protect helper (mocked fetch) ──────────────────────
+// ─── 10. Flashbots Protect helper (mocked fetch, fail-closed) ─────────
 
-describe('submitViaFlashbotsProtect — mocked fetch', () => {
-  it('returns txHash on successful submission', async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      json: async () => ({ result: '0x' + 'aa'.repeat(32) }),
-    }) as unknown as typeof fetch;
+/** Build a mock JSON-RPC response for the Flashbots helper. */
+function flashbotsResponse(body: unknown, opts: { ok?: boolean; status?: number; statusText?: string; jsonThrows?: boolean } = {}): Response {
+  return {
+    ok: opts.ok ?? true,
+    status: opts.status ?? 200,
+    statusText: opts.statusText ?? '',
+    json: async () => {
+      if (opts.jsonThrows) throw new SyntaxError('Unexpected end of JSON input');
+      return body;
+    },
+  } as unknown as Response;
+}
+
+describe('submitViaFlashbotsProtect — mocked fetch, fail-closed response handling', () => {
+  it('returns txHash on successful submission (valid 32-byte hash result)', async () => {
+    const hash = '0x' + 'aa'.repeat(32);
+    const mockFetch = vi.fn().mockResolvedValue(
+      flashbotsResponse({ jsonrpc: '2.0', id: 1, result: hash })
+    ) as unknown as typeof fetch;
     const result = await submitViaFlashbotsProtect('0xsigned', mockFetch);
-    expect(result.txHash).toBe('0x' + 'aa'.repeat(32));
+    expect(result.txHash).toBe(hash);
     expect(mockFetch).toHaveBeenCalledWith(
       'https://rpc.flashbots.net/fast',
       expect.objectContaining({ method: 'POST' })
     );
   });
 
-  it('throws on error response from Flashbots', async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      json: async () => ({ error: { message: 'bundle not included' } }),
-    }) as unknown as typeof fetch;
+  it('throws on JSON-RPC error response', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      flashbotsResponse({ error: { message: 'bundle not included' } })
+    ) as unknown as typeof fetch;
     await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow(
       'Flashbots Protect: bundle not included'
     );
+  });
+
+  it('throws on HTTP failure (non-2xx) and does NOT parse a hash out of it', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      flashbotsResponse({ error: { message: 'should not be read' } }, { ok: false, status: 503, statusText: 'Service Unavailable' })
+    ) as unknown as typeof fetch;
+    await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow(/HTTP 503/);
+  });
+
+  it('throws on malformed JSON body', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      flashbotsResponse(undefined, { jsonThrows: true })
+    ) as unknown as typeof fetch;
+    await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow(/invalid JSON/);
+  });
+
+  it('throws when the response is not a JSON-RPC object', async () => {
+    for (const body of [null, 'plain string', 42, []]) {
+      const mockFetch = vi.fn().mockResolvedValue(flashbotsResponse(body)) as unknown as typeof fetch;
+      await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow(/not a JSON-RPC object/);
+    }
+  });
+
+  it('throws when JSON-RPC result is missing, empty, or not a tx hash', async () => {
+    const badResults: unknown[] = [undefined, null, '', '0x', '0x1234', 'not-a-hash', '0x' + 'zz'.repeat(32), '0x' + 'aa'.repeat(31), 42];
+    for (const result of badResults) {
+      const mockFetch = vi.fn().mockResolvedValue(
+        flashbotsResponse({ jsonrpc: '2.0', id: 1, result })
+      ) as unknown as typeof fetch;
+      await expect(
+        submitViaFlashbotsProtect('0xsigned', mockFetch),
+      ).rejects.toThrow(/not a non-empty transaction hash/);
+    }
+  });
+
+  it('rejects an error object with non-string message without crashing', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      flashbotsResponse({ error: { code: -32000 } })
+    ) as unknown as typeof fetch;
+    await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow(/Flashbots Protect: /);
+  });
+
+  it('guard-before-network ordering: without the send-transaction scope, fetch is NEVER called', async () => {
+    // Revoke the scope: stub the env var with a descriptor lacking 'evm-executor:send-transaction'
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({
+      authId: 'no-scope-test', expiresAtMs: FIXED_NOW + 60_000, scopes: ['evm-executor:construct-signer'],
+    }));
+    const mockFetch = vi.fn() as unknown as typeof fetch;
+    await expect(submitViaFlashbotsProtect('0xsigned', mockFetch)).rejects.toThrow();
+    expect(mockFetch).not.toHaveBeenCalled(); // guard fired BEFORE any network attempt
   });
 });
 
@@ -726,7 +801,7 @@ describe('ExecutionResult status distinction — submission vs timeout vs RPC fa
     expect(result.txHash).not.toBeNull();
   });
 
-  it('status=error when sendTransaction fails (RPC failure, not submission)', async () => {
+  it('status=ambiguous when sendTransaction fails (RPC failure — outcome unknown, not "nothing sent")', async () => {
     const { executor } = makeExecutorWithMocks({
       sendTransaction: async () => {
         throw new Error('insufficient funds for gas * price + value');
@@ -735,14 +810,14 @@ describe('ExecutionResult status distinction — submission vs timeout vs RPC fa
 
     const result = await executor.execute({ target: TARGET, data: DUMMY_DATA });
 
-    expect(result.status).toBe('error');
+    expect(result.status).toBe('ambiguous');
     // txHash is null because sendTransaction never returned a hash
     expect(result.txHash).toBeNull();
     expect(result.reason).toContain('insufficient funds');
   });
 
-  it('status=error is distinct from status=submitted — no tx hash on error', async () => {
-    const { executor: errExecutor } = makeExecutorWithMocks({
+  it('status=ambiguous is distinct from status=submitted and never implies retry safety', async () => {
+    const { executor: ambExecutor } = makeExecutorWithMocks({
       sendTransaction: async () => { throw new Error('nonce too low'); },
     });
     const txHash = '0x' + 'cc'.repeat(32) as `0x${string}`;
@@ -751,19 +826,19 @@ describe('ExecutionResult status distinction — submission vs timeout vs RPC fa
       waitForReceipt: false,
     });
 
-    const errResult = await errExecutor.execute({ target: TARGET, data: DUMMY_DATA });
+    const ambResult = await ambExecutor.execute({ target: TARGET, data: DUMMY_DATA });
     const subResult = await subExecutor.execute({ target: TARGET, data: DUMMY_DATA });
 
-    // Error: no tx hash, status='error'
-    expect(errResult.txHash).toBeNull();
-    expect(errResult.status).toBe('error');
+    // Ambiguous: no tx hash, status='ambiguous'
+    expect(ambResult.txHash).toBeNull();
+    expect(ambResult.status).toBe('ambiguous');
 
     // Submitted: has tx hash, status='submitted'
     expect(subResult.txHash).toBe(txHash);
     expect(subResult.status).toBe('submitted');
 
     // The two are distinct
-    expect(errResult.status).not.toBe(subResult.status);
+    expect(ambResult.status).not.toBe(subResult.status);
   });
 
   it('status=confirmed is the ONLY status that means success', async () => {
@@ -823,5 +898,184 @@ describe('EvmExecutor — no useFlashbots option', () => {
     });
     // useFlashbots is not a property on the executor
     expect((executor as unknown as { useFlashbots?: boolean }).useFlashbots).toBeUndefined();
+  });
+});
+
+// ─── 11. Runtime privacy of #submitAndWait (supervisor follow-up #1) ──
+//
+// The submission helper was TypeScript `private`, which compiles to a
+// runtime-accessible prototype method accepting arbitrary `to`/`data` —
+// a caller with an authorized executor instance could broadcast ANY
+// transaction through the signer without routing through the AgentVault.
+// It is now an ECMAScript `#`-private method: not on the prototype, not an
+// own property, lexically unreachable from outside the class body.
+
+describe('EvmExecutor — #submitAndWait is genuinely runtime-private (follow-up #1)', () => {
+  it('submitAndWait does not exist on the prototype (TS-private would)', () => {
+    const protoMethods = Object.getOwnPropertyNames(EvmExecutor.prototype);
+    expect(protoMethods).not.toContain('submitAndWait');
+  });
+
+  it('instance does not expose submitAndWait, walletClient, or account at runtime', () => {
+    const { executor } = makeExecutorWithMocks({ waitForReceipt: false });
+    const ownProps = Object.getOwnPropertyNames(executor);
+    expect(ownProps).not.toContain('submitAndWait');
+    // Hard-private signer material (from main's Phase-0.5) still holds:
+    expect(ownProps).not.toContain('walletClient');
+    expect(ownProps).not.toContain('account');
+    expect((executor as unknown as Record<string, unknown>).submitAndWait).toBeUndefined();
+    expect((executor as unknown as Record<string, unknown>).walletClient).toBeUndefined();
+    expect((executor as unknown as Record<string, unknown>).account).toBeUndefined();
+  });
+
+  it('calling the (absent) submitAndWait with arbitrary to/data throws TypeError — no arbitrary-target broadcast', async () => {
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => {
+        throw new Error('MUST NOT BE REACHED — arbitrary-target submission must fail before any send');
+      },
+      waitForReceipt: false,
+    });
+
+    const directCall = () =>
+      (executor as unknown as { submitAndWait: (p: unknown) => Promise<unknown> })
+        .submitAndWait({ to: TARGET, data: DUMMY_DATA });
+
+    // The method is undefined at runtime — a direct invocation throws
+    // TypeError ("not a function"), and the sendTransaction mock is never
+    // reached. (A TS-private method would be a real function here.)
+    expect(() => directCall()).toThrow(TypeError);
+  });
+});
+
+describe('EvmExecutor — public submissions route through agentVaultAddress only (follow-up #1)', () => {
+  it('execute() sends to the vault with vault-encoded calldata (user target is an ARGUMENT, not the destination)', async () => {
+    const sent: Array<{ to: string; data: string }> = [];
+    const txHash = '0x' + 'aa'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async (args) => {
+        sent.push(args as { to: string; data: string });
+        return txHash;
+      },
+      waitForReceipt: false,
+    });
+
+    await executor.execute({ target: TARGET, data: DUMMY_DATA });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0].to.toLowerCase()).toBe(AGENT_VAULT.toLowerCase());
+    expect(sent[0].data.toLowerCase().startsWith(selectorOf('execute(address,bytes)').toLowerCase())).toBe(true);
+    // The caller-supplied target appears only INSIDE the vault calldata:
+    expect(sent[0].data.toLowerCase()).toContain(padAddress(TARGET));
+    // …and is never the `to` itself:
+    expect(sent[0].to.toLowerCase()).not.toBe(TARGET.toLowerCase());
+  });
+
+  it('balancerFlashLoanArb() sends to the vault with balancerFlashLoan calldata', async () => {
+    const sent: Array<{ to: string; data: string }> = [];
+    const txHash = '0x' + 'bb'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async (args) => {
+        sent.push(args as { to: string; data: string });
+        return txHash;
+      },
+      waitForReceipt: false,
+    });
+
+    await executor.balancerFlashLoanArb({
+      flashloanToken: TOKEN,
+      flashloanAmount: 1000n,
+      swapTargets: [TARGET],
+      swapCalldatas: [DUMMY_DATA],
+    });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0].to.toLowerCase()).toBe(AGENT_VAULT.toLowerCase());
+    expect(sent[0].data.toLowerCase().startsWith(selectorOf('balancerFlashLoan(address[],uint256[],bytes)').toLowerCase())).toBe(true);
+  });
+
+  it('aaveFlashLoanArb() sends to the vault with aaveFlashLoan calldata', async () => {
+    const sent: Array<{ to: string; data: string }> = [];
+    const txHash = '0x' + 'cc'.repeat(32) as `0x${string}`;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async (args) => {
+        sent.push(args as { to: string; data: string });
+        return txHash;
+      },
+      waitForReceipt: false,
+    });
+
+    await executor.aaveFlashLoanArb({
+      flashloanToken: TOKEN,
+      flashloanAmount: 500n,
+      swapTargets: [TARGET],
+      swapCalldatas: [DUMMY_DATA],
+    });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0].to.toLowerCase()).toBe(AGENT_VAULT.toLowerCase());
+    expect(sent[0].data.toLowerCase().startsWith(selectorOf('aaveFlashLoan(address,uint256,bytes)').toLowerCase())).toBe(true);
+  });
+});
+
+// ─── 12. Census ratification perimeter (supervisor follow-up #4) ──────
+//
+// The census moved EvmExecutor from 3 raw sendTransaction sites to 1
+// (consolidated inside the now-runtime-private #submitAndWait). Per the
+// disposition, that single raw census entry is retained ONLY because the
+// guard/perimeter tests prove there is no runtime-reachable bypass:
+//   (a) the sink re-asserts the scope per call (defense-in-depth),
+//   (b) an expired/absent scope blocks submission BEFORE the transport,
+//   (c) every send is vault-routed (proved in the describe above),
+//   (d) the helper is runtime-private (proved in the describe above).
+
+describe('EvmExecutor — raw-sink perimeter: guard fires before the transport (follow-up #4)', () => {
+  it('expired authorization: execute() is rejected and sendTransaction is NEVER invoked', async () => {
+    // Construct under the valid file-level grant (construction itself requires
+    // 'evm-executor:construct-signer'), THEN expire the authorization so the
+    // per-submission re-check must fire before the transport.
+    let sendCalls = 0;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => { sendCalls++; return '0x' + 'dd'.repeat(32) as `0x${string}`; },
+      waitForReceipt: false,
+    });
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({
+      authId: 'expired-scope-test', expiresAtMs: FIXED_NOW - 1_000, scopes: ['evm-executor:construct-signer', 'evm-executor:send-transaction'],
+    }));
+
+    await expect(executor.execute({ target: TARGET, data: DUMMY_DATA })).rejects.toThrow();
+    expect(sendCalls).toBe(0); // guard blocked the raw sink before any send
+  });
+
+  it('missing send-transaction scope (construct-only): execute() is rejected before any send', async () => {
+    let sendCalls = 0;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => { sendCalls++; return '0x' + 'ee'.repeat(32) as `0x${string}`; },
+      waitForReceipt: false,
+    });
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({
+      authId: 'construct-only-test', expiresAtMs: FIXED_NOW + 60_000, scopes: ['evm-executor:construct-signer'],
+    }));
+
+    await expect(executor.execute({ target: TARGET, data: DUMMY_DATA })).rejects.toThrow();
+    expect(sendCalls).toBe(0);
+  });
+
+  it('balancer/aave submission paths are equally guard-gated before any send', async () => {
+    let sendCalls = 0;
+    const { executor } = makeExecutorWithMocks({
+      sendTransaction: async () => { sendCalls++; return '0x' + 'ff'.repeat(32) as `0x${string}`; },
+      waitForReceipt: false,
+    });
+    vi.stubEnv(EXECUTION_AUTH_ENV_VAR, JSON.stringify({
+      authId: 'no-send-scope-test', expiresAtMs: FIXED_NOW + 60_000, scopes: ['evm-executor:construct-signer'],
+    }));
+
+    await expect(executor.balancerFlashLoanArb({
+      flashloanToken: TOKEN, flashloanAmount: 1n, swapTargets: [TARGET], swapCalldatas: [DUMMY_DATA],
+    })).rejects.toThrow();
+    await expect(executor.aaveFlashLoanArb({
+      flashloanToken: TOKEN, flashloanAmount: 1n, swapTargets: [TARGET], swapCalldatas: [DUMMY_DATA],
+    })).rejects.toThrow();
+    expect(sendCalls).toBe(0);
   });
 });

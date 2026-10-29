@@ -45,14 +45,24 @@
  *                     a generic "transaction reverted" message (the EVM does
  *                     not return the revert reason in the receipt itself;
  *                     decoding it requires a separate eth_call trace).
- *     - 'error':      sendTransaction itself failed (e.g., insufficient funds,
- *                     RPC error, nonce too low). No tx hash was obtained.
- *                     txHash is null. The tx was NOT submitted.
+ *     - 'ambiguous':  sendTransaction itself failed (RPC error, timeout,
+ *                     connection dropped mid-request, insufficient funds,
+ *                     nonce too low, ...). No tx hash was returned to the
+ *                     caller — but a rejected send does NOT prove the node
+ *                     never accepted the transaction (e.g. the request may
+ *                     have been broadcast before the connection failed).
+ *                     This outcome is therefore AMBIGUOUS: it is NOT proof
+ *                     of non-submission, and automatic retry is UNSAFE
+ *                     (it could double-submit). Resolution requires an
+ *                     external check (e.g. receipt lookup by caller-side
+ *                     nonce) by the caller; this executor performs no
+ *                     automatic retry.
  *
  *   IMPORTANT: status='submitted' does NOT mean 'confirmed'. It means
  *   "submitted but unconfirmed". A timeout is NOT an error — it is a
  *   'submitted' result with a reason explaining the timeout. An RPC failure
- *   during sendTransaction is an 'error', not a 'submitted'.
+ *   during sendTransaction is 'ambiguous', not 'submitted' — and likewise
+ *   NOT proof that nothing was submitted.
  */
 
 import type { ChainId } from '@edge/types';
@@ -192,10 +202,11 @@ export const AGENT_VAULT_ABI = [
  * - 'confirmed':  receipt fetched, status=1 (success). The tx was mined and
  *                 did not revert.
  * - 'reverted':   receipt fetched, status=0. The tx was mined but reverted.
- * - 'error':      RPC or receipt-fetch failure. The tx may or may not have
- *                 been submitted; the caller should check the error message.
+ * - 'ambiguous':  sendTransaction failed. The tx MAY or MAY NOT have been
+ *                 accepted by the node — this is NOT proof of non-submission.
+ *                 Do NOT automatically retry (double-submission risk).
  */
-export type ExecutionStatus = 'submitted' | 'confirmed' | 'reverted' | 'error';
+export type ExecutionStatus = 'submitted' | 'confirmed' | 'reverted' | 'ambiguous';
 
 export interface ExecutionResult {
   /** Tx hash (always populated when status is submitted/confirmed/reverted). */
@@ -321,7 +332,7 @@ export class EvmExecutor {
     // Encode the call to AgentVault.execute(target, data)
     const callData = encodeVaultFunctionCall('execute', [params.target, params.data]);
 
-    return this.submitAndWait({
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
       gas: params.gasLimit,
@@ -372,7 +383,7 @@ export class EvmExecutor {
       userData,
     ]);
 
-    return this.submitAndWait({
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
       gas: params.gasLimit,
@@ -413,7 +424,7 @@ export class EvmExecutor {
       userData,
     ]);
 
-    return this.submitAndWait({
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
       gas: params.gasLimit,
@@ -445,14 +456,25 @@ export class EvmExecutor {
     return result;
   }
 
-  // ─── Internal: submit + wait for receipt (fail-closed) ───────────────
+  // ─── Internal: submit + wait for receipt (fail-closed) ─────────────
 
   /**
    * Submit a transaction and (optionally) wait for its receipt.
    * Returns a fail-closed ExecutionResult. A tx hash alone is NEVER reported
    * as success — status='confirmed' requires a receipt with status=1.
+   *
+   * ECMAScript PRIVATE METHOD (`#` prefix), not TypeScript `private`:
+   * a TS-private method compiles to a runtime-accessible prototype method,
+   * which would let any caller holding an executor instance supply an
+   * arbitrary `to`/`data` and broadcast through the signer WITHOUT routing
+   * through `agentVaultAddress` — defeating the vault perimeter. The `#`
+   * form is genuinely unreachable at runtime (not on the prototype, not an
+   * own property, lexically confined to this class body), so the only way
+   * to reach the raw `sendTransaction` sink is through the public methods,
+   * which encode AgentVault calldata and target the vault address.
+   * Regression-tested: see executor.test.ts "runtime privacy" describe.
    */
-  private async submitAndWait(params: {
+  async #submitAndWait(params: {
     to: `0x${string}`;
     data: `0x${string}`;
     gas?: bigint;
@@ -478,10 +500,23 @@ export class EvmExecutor {
         maxPriorityFeePerGas: params.maxPriorityFeePerGas,
       });
     } catch (err: unknown) {
+      // AMBIGUOUS send failure (supervisor follow-up #2 on PR #2): a rejected
+      // RPC send does NOT prove the node did not accept the transaction —
+      // e.g. the request may have been broadcast before the connection
+      // dropped, or timed out after reaching the node. Reporting this as
+      // "error = nothing was submitted" would make retry look safe when a
+      // retry could double-submit. There is NO tx hash, but the outcome is
+      // explicitly AMBIGUOUS; resolution requires a caller-side check
+      // (e.g. receipt lookup by nonce). No automatic retry is performed.
       return {
         txHash: null,
-        status: 'error',
-        reason: err instanceof Error ? err.message : String(err),
+        status: 'ambiguous',
+        reason:
+          'AMBIGUOUS send outcome: sendTransaction failed, but this is NOT proof ' +
+          'that the transaction was not accepted by the node. Do NOT automatically ' +
+          'retry (double-submission risk); resolve via an external check such as ' +
+          'a receipt lookup by caller-side nonce. Underlying error: ' +
+          (err instanceof Error ? err.message : String(err)),
         error: err,
       };
     }
@@ -581,7 +616,7 @@ function sleep(ms: number): Promise<void> {
  *
  * NOTE (PR #2): as of this commit, this function is standalone and is NOT
  * wired into EvmExecutor.execute() or the flashloan methods. Those methods
- * submit via submitAndWait() which goes to the public mempool. Wiring
+ * submit via #submitAndWait() which goes to the public mempool. Wiring
  * Flashbots into the executor requires a sign-then-submit flow:
  *   1. walletClient.signTransaction(...) to get a signed raw tx
  *   2. submitViaFlashbotsProtect(signedTx) to submit to the relay
@@ -598,7 +633,8 @@ export async function submitViaFlashbotsProtect(
   signedTx: `0x${string}`,
   fetchImpl: typeof fetch = fetch
 ): Promise<{ txHash: `0x${string}` }> {
-  // Fail-closed BEFORE any network request.
+  // Fail-closed BEFORE any network request. Order preserved: the guard runs
+  // first; no HTTP request is made unless the scope check passes.
   assertExecutionAuthorized('evm-executor:send-transaction');
   const res = await fetchImpl('https://rpc.flashbots.net/fast', {
     method: 'POST',
@@ -610,9 +646,44 @@ export async function submitViaFlashbotsProtect(
       params: [signedTx],
     }),
   });
-  const json = await res.json() as { result?: string; error?: { message: string } };
-  if (json.error) throw new Error(`Flashbots Protect: ${json.error.message}`);
-  return { txHash: json.result as `0x${string}` };
+
+  // Fail-closed response handling (supervisor follow-up #3 on PR #2):
+  // HTTP failure, malformed JSON, a JSON-RPC error object, or a missing/
+  // malformed transaction hash is a THROWN typed failure — never silently
+  // mapped to a txHash that was not actually returned by the relay.
+  if (!res.ok) {
+    throw new Error(
+      `Flashbots Protect: HTTP ${res.status} ${res.statusText || ''}`.trim() +
+      ' — raw transaction NOT confirmed as accepted by the relay (outcome ambiguous)',
+    );
+  }
+
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch (err: unknown) {
+    throw new Error(
+      `Flashbots Protect: invalid JSON response: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('Flashbots Protect: response is not a JSON-RPC object');
+  }
+  const rec = json as { result?: unknown; error?: { message?: unknown } };
+  if (rec.error) {
+    const msg = typeof rec.error.message === 'string' ? rec.error.message : JSON.stringify(rec.error);
+    throw new Error(`Flashbots Protect: ${msg}`);
+  }
+  const result = rec.result;
+  const TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+  if (typeof result !== 'string' || !TX_HASH_RE.test(result)) {
+    throw new Error(
+      `Flashbots Protect: JSON-RPC result is not a non-empty transaction hash ` +
+      `(got: ${typeof result === 'string' ? result.slice(0, 80) : typeof result}) ` +
+      '— raw transaction NOT confirmed as accepted by the relay (outcome ambiguous)',
+    );
+  }
+  return { txHash: result as `0x${string}` };
 }
 
 // ─── Kinetiq Liquid Staking (HyperEVM chain 999) ───────────────────────
