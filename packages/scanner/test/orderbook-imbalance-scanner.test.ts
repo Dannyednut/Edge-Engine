@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { OrderbookImbalanceScanner } from '../src/strategies/orderbook-imbalance-scanner.js';
+// EM-STRAT-006 §2: register offline mocks so scan() does NOT call live API.
+import "./_setup/offline-mocks.js";
 
 describe('OrderbookImbalanceScanner', () => {
   const params = {

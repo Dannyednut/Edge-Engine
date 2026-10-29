@@ -1,0 +1,146 @@
+"""Manual CLI: python -m funding_harness <collect|stats|verify|fees>
+
+No scheduler, no daemon, no cron — every action is a single explicitly
+invoked process that exits when done. Exit codes:
+  collect: 0 complete (no gaps) · 1 recorded with gaps · 2 hard failure
+  stats:   0 verdict computed (PASS/FAIL/BETWEEN) · 1 UNRESOLVED ·
+           3 gate-config drift refusal · 4 non-slot-aligned --window-start
+           refusal (EI-STRAT-005)
+  verify:  0 consistent · 1 inconsistencies found
+  fees:    0 always (NON-GATE sensitivity sidecar; never a verdict)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from . import TOOL_NAME, TOOL_VERSION, config
+from .collect import GateDriftError, run_collection
+from .stats import (VERDICT_UNRESOLVED, WindowAnchorError, compute_report,
+                    write_report)
+from .store import verify as verify_store
+
+DEFAULT_BASE_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def _base_dir(args) -> Path:
+    return Path(args.base_dir).resolve() if args.base_dir else DEFAULT_BASE_DIR
+
+
+def cmd_collect(args) -> int:
+    from .transport import UrllibTransport
+    cfg = config.HarnessConfig(base_dir=str(_base_dir(args)))
+    if args.assets:
+        cfg.assets = tuple(a.strip().upper() for a in args.assets.split(",") if a.strip())
+    if args.sources:
+        cfg.sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    outcome = run_collection(cfg, UrllibTransport())
+    for line in outcome.summary_lines():
+        print(line)
+    if outcome.persist is not None:
+        print(f"run_dir={outcome.persist.run_dir}")
+    return outcome.exit_code
+
+
+def cmd_stats(args) -> int:
+    base = _base_dir(args)
+    report = compute_report(base, window_days=args.window_days,
+                            window_start_utc=args.window_start)
+    path = write_report(base, report)
+    print(f"verdict={report['verdict']}")
+    for r in report.get("verdict_reasons", []):
+        print(f"  - {r}")
+    for asset, a in (report.get("per_asset") or {}).items():
+        print(f"  {asset}: median_net_apr={a['median_net_apr_pre_registered']} "
+              f"({a['median_net_apr_pct']}%) persistence={a['daily_persistence']} "
+              f"flips={a['sign_flips']} completeness={a['sample_completeness']} "
+              f"-> {a['verdict']}")
+    print(f"coverage: {report.get('coverage_statement')}")
+    print(f"report={path}")
+    return 1 if report["verdict"] == VERDICT_UNRESOLVED else 0
+
+
+def cmd_verify(args) -> int:
+    report = verify_store(_base_dir(args))
+    print(json.dumps(report, indent=2))
+    return 0 if report["ok"] else 1
+
+
+def cmd_fees(args) -> int:
+    """NON-GATE fee sensitivity sidecar. Reads no network, no credentials;
+    never touches GATE_CONFIG or any verdict. Exit code always 0."""
+    from . import fees
+    holding = tuple(
+        float(x) for x in str(args.holding_days).split(",") if x.strip())
+    if args.report:
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+        out = fees.apply_to_gate_report(report, holding_days=holding)
+    else:
+        out = fees.sensitivity_table(holding_days=holding)
+    text = json.dumps(out, indent=2)
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+        print(f"fee-sensitivity sidecar written (non-gate): {args.out}")
+    else:
+        print(text)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m funding_harness",
+        description=f"{TOOL_NAME} v{TOOL_VERSION} — read-only funding-carry "
+                    "evidence collection (manual invocation only; no scheduler)")
+    p.add_argument("--base-dir", help="data directory "
+                   f"(default {DEFAULT_BASE_DIR})")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    c = sub.add_parser("collect", help="run one manual collection (writes a "
+                       "new run directory; never modifies existing runs)")
+    c.add_argument("--assets", help="comma-separated assets (default BTC,ETH,SOL)")
+    c.add_argument("--sources", help="comma-separated subset of sources to probe")
+    c.set_defaults(func=cmd_collect)
+
+    s = sub.add_parser("stats", help="compute derived statistics + pre-registered "
+                       "gate verdict across all recorded runs")
+    s.add_argument("--window-days", type=int, default=14,
+                   help="DIAGNOSTIC ONLY — the gate window is fixed at 14 "
+                        "days by GATE_CONFIG and never changes")
+    s.add_argument("--window-start", default=None,
+                   help="pin the authorized gate-window anchor (UTC, "
+                        "YYYY-MM-DDTHH:MM:SSZ; MUST be slot-aligned: "
+                        "exactly 00:00:00Z or 12:00:00Z — EI-STRAT-005; "
+                        "non-aligned values are refused, never floored); "
+                        "default anchors at the earliest run timestamp "
+                        "(diagnostic only, never an authorized start)")
+    s.set_defaults(func=cmd_stats)
+
+    f = sub.add_parser("fees", help="NON-GATE fee sensitivity sidecar: "
+                       "one-time round-trip fee amortized over illustrative "
+                       "holding periods (never a verdict, never gate input)")
+    f.add_argument("--holding-days", default="1,7,14,30",
+                   help="comma-separated illustrative holding periods in days")
+    f.add_argument("--report", default=None,
+                   help="optional gate-report JSON to attach per-asset "
+                        "turnover-aware context (read-only)")
+    f.add_argument("--out", default=None,
+                   help="optional output path (default: stdout)")
+    f.set_defaults(func=cmd_fees)
+
+    v = sub.add_parser("verify", help="consistency/hash checks across all runs")
+    v.set_defaults(func=cmd_verify)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except GateDriftError as exc:
+        print(f"GATE-DRIFT REFUSAL: {exc}", file=sys.stderr)
+        return 3
+    except WindowAnchorError as exc:
+        print(f"WINDOW-ANCHOR REFUSAL: {exc}", file=sys.stderr)
+        return 4

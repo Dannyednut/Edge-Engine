@@ -36,6 +36,7 @@ try {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!m) continue;
     const [, k, v] = m;
+    if (k === 'EDGE_EXECUTION_AUTH') continue;
     if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
   }
 } catch { /* .env not present */ }
@@ -69,7 +70,7 @@ async function main() {
   lines.push('## Executive Summary');
   lines.push('');
 
-  const opportunities = await gatherOpportunities();
+  const { opportunities, monitoring: monitoringOnly } = await gatherOpportunities();
 
   if (opportunities.length === 0) {
     lines.push('No actionable opportunities found at this time.');
@@ -108,7 +109,7 @@ async function main() {
   lines.push('| 12 | Gold Arb (PAXG/XAUT) | gold_arb | ✅ Live |');
   lines.push('| 13 | Equity Perp Cross-Venue | equity_perp_cross_venue | ✅ Live |');
   lines.push('| 14 | LST Yield Comparison | lst_yield_comparison | ✅ Live |');
-  lines.push('| 15 | PT-kHYPE Yield Arb | pt_khype_yield_arb | ✅ Live |');
+  lines.push('| 15 | PT-kHYPE Yield Arb | pt_khype_yield_arb | 🔬 Research-only (fail-closed, EM-STRAT-014-B2) |');
   lines.push('| 16 | PT Yield Arb (cross-LST) | pt_yield_arb | ✅ Live |');
   lines.push('| 17 | Euler HL Lending Arb | euler_lending_arb | ✅ Live |');
   lines.push('| 18 | HL Spot Basis | hl_spot_basis | ✅ Live |');
@@ -255,17 +256,44 @@ async function main() {
   lines.push('- 256+ assets with prices in 0-1 range (potential HIP-4 prediction markets)');
   lines.push('');
 
+  // ── Monitoring-Only Section (EM-STRAT-004) ───────────────────────────
+  // Euler (and any future monitoring-only strategies) are reported here.
+  // Their spread/profit are explicitly UNAVAILABLE — never presented as
+  // verified-zero values, never included in the actionable opportunities
+  // table or the top-5 totals.
+  if (monitoringOnly.length > 0) {
+    lines.push('## Monitoring Only (not actionable)');
+    lines.push('');
+    lines.push('> These entries are observed for informational purposes only. Supply APY,');
+    lines.push('> spread, and profit cannot be independently verified — they are marked');
+    lines.push('> UNAVAILABLE and are NOT included in any actionable-opportunity total.');
+    lines.push('');
+    for (const m of monitoringOnly) {
+      lines.push(`### ${m.asset}`);
+      lines.push('');
+      lines.push(`- Deposit: ${m.deposit}`);
+      lines.push(`- Borrow:  ${m.borrow}`);
+      lines.push(`- Supply APY: ${m.supplyApy}`);
+      lines.push(`- Spread: ${m.spread}`);
+      lines.push(`- Profit: ${m.profit}`);
+      lines.push(`- Combined liquidity: ${m.tvl}`);
+      lines.push(`- Borrowable: ${m.borrowable}`);
+      lines.push('');
+    }
+  }
+
   // Write report
   const dataDir = resolve(REPO_ROOT, 'data');
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
   writeFileSync(reportPath, lines.join('\n'));
 
   console.log(`\n✓ Daily report written to: ${reportPath}`);
-  console.log(`  Total opportunities: ${opportunities.length}`);
+  console.log(`  Total actionable opportunities: ${opportunities.length}`);
+  console.log(`  Monitoring-only entries: ${monitoringOnly.length}`);
   console.log(`  Top 5 est. profit: $${opportunities.slice(0, 5).reduce((s, o) => s + o.estimatedProfitUsd, 0).toFixed(0)}/yr`);
 }
 
-async function gatherOpportunities(): Promise<Opportunity[]> {
+async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; monitoring: Array<{ asset: string; deposit: string; borrow: string; supplyApy: string; spread: string; profit: string; tvl: string; borrowable: boolean }> }> {
   const opportunities: Opportunity[] = [];
   let rank = 0;
 
@@ -273,6 +301,7 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
   try {
     const hlLstArb = new HlLstArbScanner({
       minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
     });
     const alerts = await hlLstArb.scan();
     for (const a of alerts) {
@@ -281,40 +310,41 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
         rank: ++rank,
         strategy: 'kHYPE LST carry arb',
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.discountPct,
+        spreadPct: a.grossDiscountPct,
         annualizedReturnPct: (annualProfit / 5000) * 100,
         estimatedProfitUsd: annualProfit,
         capitalRequired: 5000,
         details: [
-          `Discount: ${a.discountPct.toFixed(2)}% on HyperSwap V3`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
           `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
+          `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
-          `Execution: buy kHYPE → queue 7-day Kinetiq withdrawal → claim HYPE`,
+          `Execution: buy kHYPE → queue Kinetiq withdrawal → claim HYPE`,
         ],
       });
     }
   } catch (e: any) { console.log(`  ⚠ kHYPE scan failed: ${e.message}`); }
 
-  // 2. Euler HL lending arb
+  // 2. Euler HL lending arb — MONITORING ONLY
+  // EM-STRAT-004: spreadPct and estimatedProfitUsd are null. NEVER display as 0.
+  // These entries are NOT added to the actionable `opportunities` list — they
+  // are printed in a separate monitoring section below.
+  const eulerMonitoring: Array<{ asset: string; deposit: string; borrow: string; supplyApy: string; spread: string; profit: string; tvl: string; borrowable: boolean }> = [];
   try {
     const eulerArb = new EulerLendingArbScanner({
       minSpreadPct: 0.5, minLiquidityUsd: 10_000, maxSizeUsd: 5_000,
     });
     const alerts = await eulerArb.scan();
     for (const a of alerts) {
-      opportunities.push({
-        rank: ++rank,
-        strategy: 'Euler HL lending arb',
+      eulerMonitoring.push({
         asset: a.assetSymbol,
-        spreadPct: a.spreadPct,
-        annualizedReturnPct: a.spreadPct * 0.8,
-        estimatedProfitUsd: a.estimatedProfitUsd,
-        capitalRequired: 5000,
-        details: [
-          `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-          `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-          `Combined liquidity: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
-        ],
+        deposit: `${a.depositVault.name} @ borrow ${a.depositVault.borrowApyPct.toFixed(2)}%`,
+        borrow: `${a.borrowVault.name} @ borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%`,
+        supplyApy: 'UNAVAILABLE',
+        spread: a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%',
+        profit: a.estimatedProfitUsd === null ? 'UNAVAILABLE' : '$' + a.estimatedProfitUsd.toFixed(0),
+        tvl: a.totalLiquidityUsd === null ? 'UNAVAILABLE' : '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k',
+        borrowable: a.borrowable,
       });
     }
   } catch (e: any) { console.log(`  ⚠ Euler scan failed: ${e.message}`); }
@@ -358,7 +388,7 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
         asset: a.lst,
         spreadPct: a.vsKhypeSpreadPct,
         annualizedReturnPct: a.annualizedReturnPct,
-        estimatedProfitUsd: a.estimatedProfitUsd * (365 / a.daysToMaturity),
+        estimatedProfitUsd: (a.estimatedProfitUsd ?? 0) * (365 / a.daysToMaturity),
         capitalRequired: 5000,
         details: [
           `PT: ${a.lst}  Maturity: ${a.expiry} (${a.daysToMaturity.toFixed(0)}d)`,
@@ -448,11 +478,11 @@ async function gatherOpportunities(): Promise<Opportunity[]> {
   } catch (e: any) { console.log(`  ⚠ VOOI scan failed: ${e.message}`); }
 
   // Sort by estimated annual profit (highest first)
-  opportunities.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
+  opportunities.sort((a, b) => b.estimatedProfitUsd - (a.estimatedProfitUsd ?? 0));
   // Re-rank
   opportunities.forEach((o, i) => o.rank = i + 1);
 
-  return opportunities;
+  return { opportunities, monitoring: eulerMonitoring };
 }
 
 main().catch(err => {

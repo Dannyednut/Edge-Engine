@@ -194,6 +194,9 @@ importers:
       '@edge/config':
         specifier: workspace:*
         version: link:../packages/config
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../packages/risk
       '@edge/types':
         specifier: workspace:*
         version: link:../packages/types
@@ -225,6 +228,10 @@ importers:
         version: 5.9.3
 
   packages/backpack-client:
+    dependencies:
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../risk
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -259,6 +266,15 @@ importers:
         specifier: ^2.21.0
         version: 2.56.9(bufferutil@4.1.0)(typescript@5.9.3)
 
+  packages/e1-khype-event-study:
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   packages/enterprise:
     devDependencies:
       tsx:
@@ -273,6 +289,9 @@ importers:
       '@edge/config':
         specifier: workspace:*
         version: link:../config
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../risk
       '@edge/types':
         specifier: workspace:*
         version: link:../types
@@ -339,6 +358,9 @@ importers:
 
   packages/pumpapi-client:
     dependencies:
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../risk
       '@edge/types':
         specifier: workspace:*
         version: link:../types
@@ -424,6 +446,9 @@ importers:
 
   packages/vooi-client:
     dependencies:
+      '@edge/risk':
+        specifier: workspace:*
+        version: link:../risk
       '@edge/types':
         specifier: workspace:*
         version: link:../types

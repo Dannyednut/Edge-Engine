@@ -17,8 +17,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@edge/types": "workspace:*",
     "@edge/config": "workspace:*",
+    "@edge/risk": "workspace:*",
+    "@edge/types": "workspace:*",
     "ccxt": "^4.4.0",
     "viem": "^2.21.0"
   },

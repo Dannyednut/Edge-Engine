@@ -1,3 +1,5 @@
+import { assertExecutionAuthorized } from '@edge/risk';
+
 /**
  * @edge/backpack-client — TypeScript client for Backpack Exchange API.
  *
@@ -180,7 +182,23 @@ export class BackpackClient {
    * For now, this is a placeholder — we need Backpack API credentials to test.
    */
 
-  /** Place an order (spot or perp). Requires API credentials. */
+  /**
+   * Place an order (spot or perp). Requires API credentials.
+   *
+   * EM-STRAT-012-R2 (work order C): EVERY order requires the
+   * 'backpack-client:place-order' scope — including orders whose request
+   * sets reduceOnly: true. The previous exemption treated reduceOnly
+   * orders as risk-reducing based on venue semantics that have NO
+   * authoritative evidence in this repository (the same unproven
+   * venue-semantics finding as the VOOI close path, F-04). Aligned with
+   * the conservative VOOI standard: the guard fires unconditionally BEFORE
+   * any transport attempt, and a reduceOnly flag in the request does not
+   * weaken it. A Principal-approved, evidenced exemption may be
+   * reintroduced later; until then this sink fails closed.
+   *
+   * Dormant sink — no callers on current main; guarded so it cannot be
+   * silently adopted.
+   */
   async placeOrder(params: {
     symbol: string;
     side: 'Bid' | 'Ask';        // Backpack uses Bid/Ask not buy/sell
@@ -191,6 +209,9 @@ export class BackpackClient {
     postOnly?: boolean;
     reduceOnly?: boolean;
   }): Promise<BackpackOrder> {
+    // Unconditional fail-closed guard — reduceOnly does NOT exempt (R2
+    // work order C).
+    assertExecutionAuthorized('backpack-client:place-order');
     return this.privatePost<BackpackOrder>('/order', {
       symbol: params.symbol,
       side: params.side,

@@ -12,11 +12,16 @@
  * Usage: pnpm --filter @edge/contracts preflight --chain=base
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPublicClient, http, formatEther, type Chain as ViemChain } from 'viem';
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
+// EM-STRAT-012-R2: shared .env helper — EXCLUDES EDGE_EXECUTION_AUTH so a
+// descriptor persisted in .env can never arm the execution guard (same
+// containment standard as deploy.ts; this script is read-only but the
+// loader hygiene is enforced repo-wide).
+import { loadDotEnvIntoProcessEnv } from '@edge/risk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -36,17 +41,9 @@ function check(name: string, condition: boolean, detail?: string): { name: strin
 }
 
 async function main() {
-  // Load .env
-  const envPath = resolve(REPO_ROOT, '.env');
-  if (existsSync(envPath)) {
-    const env = readFileSync(envPath, 'utf8');
-    for (const line of env.split('\n')) {
-      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-      if (!m) continue;
-      const [, k, v] = m;
-      if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-    }
-  }
+  // Load .env via the shared helper (excludes EDGE_EXECUTION_AUTH — see
+  // packages/risk/src/dotenv-safety.ts). Missing file is a no-op.
+  loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
   const chainName = arg('chain') || 'base';
   const chain = CHAIN_MAP[chainName];

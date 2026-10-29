@@ -12,6 +12,11 @@
  * This is the ACTUAL Solidity code to deploy.
  */
 
+// NOT-A-SINK: this file embeds Solidity CONTRACT SOURCE in template strings. The
+// ICoreWriter.placeOrder / IERC20.transfer occurrences are Solidity interface
+// code, not JavaScript submission calls. Inventoried in the submission-sink census.
+
+
 const CONTRACT_CODE = `
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;

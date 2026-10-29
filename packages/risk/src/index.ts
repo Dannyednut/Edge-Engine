@@ -156,3 +156,34 @@ export class RiskGuard {
     }
   }
 }
+
+// ─── Execution authorization guard (EM-STRAT-012 Phase-0) ──────────────
+// Fail-closed gate checked before every risk-increasing submission,
+// signer construction, or bot start. See ./execution-guard.ts for the
+// design contract and packages/scanner/test/execution-sink-census.test.ts
+// for the enforced sink inventory.
+export {
+  EXECUTION_SCOPES,
+  EXECUTION_AUTH_ENV_VAR,
+  MAX_AUTH_LIFETIME_MS,
+  type ExecutionScope,
+  type ExecutionAuthorization,
+  ExecutionNotAuthorizedError,
+  assertExecutionAuthorized,
+  isExecutionAuthorized,
+  parseExecutionAuthorization,
+  setExecutionClockForTesting,
+  resetExecutionClockForTesting,
+  setExecutionAuditLoggerForTesting,
+  resetExecutionAuditLoggerForTesting,
+} from './execution-guard.js';
+
+// ─── .env loader safety (EM-STRAT-012 Phase-0 R1) ──────────────────────
+// Helpers that ensure `.env` files cannot arm the execution guard.
+// `EDGE_EXECUTION_AUTH` must be supplied through the parent-process
+// environment, not persisted in `.env`. See ./dotenv-safety.ts.
+export {
+  DOTENV_EXCLUDED_KEYS,
+  parseDotEnvContents,
+  loadDotEnvIntoProcessEnv,
+} from './dotenv-safety.js';

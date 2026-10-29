@@ -1,0 +1,7 @@
+# Runtime evidence stays local: observation data, raw payloads, derived
+# reports are operator-host artifacts (append-only, never committed). The
+# committed tree contains the tool, tests, fixtures and documentation only.
+data/
+__pycache__/
+*.pyc
+.pytest_cache/

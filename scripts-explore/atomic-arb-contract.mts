@@ -1,3 +1,8 @@
+
+// NOT-A-SINK: this file embeds Solidity CONTRACT SOURCE in template strings. The
+// ICoreWriter.placeOrder / IERC20.transfer occurrences are Solidity interface
+// code, not JavaScript submission calls. Inventoried in the submission-sink census.
+
 // Atomic Arb Smart Contract Design
 // Solidity contract for atomic arbitrage on HyperEVM
 //

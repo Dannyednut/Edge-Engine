@@ -29,6 +29,7 @@ try {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!m) continue;
     const [, k, v] = m;
+    if (k === 'EDGE_EXECUTION_AUTH') continue;
     if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
   }
 } catch {}
@@ -135,31 +136,37 @@ async function main() {
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }
 
   // ── 3. kHYPE LST Carry Arb ──
-  console.log('── 3. kHYPE LST CARRY ARB (7-day hold) ──\n');
+  console.log('── 3. kHYPE LST CARRY ARB (Kinetiq withdrawal hold) ──\n');
   try {
-    const hlLstArb = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 });
+    const hlLstArb = new HlLstArbScanner({
+      minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
+      minNetDiscountPct: 0.30,
+    });
     const alerts = await hlLstArb.scan();
+    if (alerts.length === 0) {
+      console.log('  No actionable kHYPE opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met).\n');
+    }
     for (const a of alerts) {
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
-      console.log(`  kHYPE/WHYPE: ${a.discountPct.toFixed(2)}% discount`);
-      console.log(`    Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`);
-      console.log(`    Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(0)}% APR)\n`);
-      totalAnnualUsd += annualProfit;
-      totalCapital += 5000;
+      console.log(`  kHYPE/WHYPE: ${a.grossDiscountPct.toFixed(2)}% gross  ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)})`);
+      console.log(`    Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
+      console.log(`    Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}\n`);
     }
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }
 
-  // ── 4. Euler HL Lending Arb ──
-  console.log('── 4. EULER HL LENDING ARB ──\n');
+  // ── 4. Euler HL Lending Arb (MONITORING ONLY) ──
+  // EM-STRAT-004: supply APY, spread, profit are all UNAVAILABLE.
+  // NEVER displayed as zero values. NOT included in summary totals.
+  console.log('── 4. EULER HL LENDING (MONITORING ONLY — not actionable) ──\n');
   try {
     const eulerArb = new EulerLendingArbScanner({ minSpreadPct: 2.0, minLiquidityUsd: 50_000, maxSizeUsd: 5_000 });
     const alerts = await eulerArb.scan();
+    if (alerts.length === 0) {
+      console.log('  No Euler vault data available.\n');
+    }
     for (const a of alerts.slice(0, 3)) {
-      console.log(`  ${a.assetSymbol}: ${a.spreadPct.toFixed(1)}% spread`);
-      console.log(`    Deposit: ${a.depositVault.apyPct.toFixed(2)}%  Borrow: ${a.borrowVault.apyPct.toFixed(2)}%`);
-      console.log(`    Profit: $${a.estimatedProfitUsd.toFixed(0)}/yr on $5k\n`);
-      totalAnnualUsd += a.estimatedProfitUsd;
-      totalCapital += 5000;
+      console.log(`  ${a.assetSymbol}: borrow ${a.depositVault.borrowApyPct.toFixed(2)}% - ${a.borrowVault.borrowApyPct.toFixed(2)}%`);
+      console.log(`    Supply APY: UNAVAILABLE | Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'} | Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE' : '$' + a.estimatedProfitUsd.toFixed(0)}`);
+      console.log(`    TVL: ${a.totalLiquidityUsd === null ? 'UNAVAILABLE' : '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k'} | Borrowable: ${a.borrowable} | Monitoring only — NOT an actionable opportunity\n`);
     }
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }
 

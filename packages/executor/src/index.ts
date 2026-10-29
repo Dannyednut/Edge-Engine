@@ -60,6 +60,7 @@ import { createWalletClient, createPublicClient, http, type WalletClient, type P
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { encodeFunctionData, encodeAbiParameters, type Abi } from 'viem';
+import { assertExecutionAuthorized } from '@edge/risk';
 
 // ─── HyperEVM chain definition (Hyperliquid L1 EVM, chain ID 999) ──────
 export const hyperEvm = defineChain({
@@ -240,9 +241,7 @@ export interface EvmExecutorOptions {
 export class EvmExecutor {
   readonly chainId: ChainId;
   readonly chain: ViemChain;
-  readonly walletClient: WalletClient;
   readonly publicClient: PublicClient;
-  readonly account: PrivateKeyAccount;
   readonly agentVaultAddress: `0x${string}`;
   readonly waitForReceipt: boolean;
   readonly receiptTimeoutMs: number;
@@ -250,13 +249,39 @@ export class EvmExecutor {
   readonly balancerVaultAddress: `0x${string}` | null;
   readonly aaveV3PoolAddress: `0x${string}` | null;
 
+  // ─── HARD-PRIVATE signer material (Phase-0.5, work order A) ────────────
+  //
+  // These were previously `readonly walletClient` / `readonly account` —
+  // PUBLIC properties. Any caller holding an executor instance could call
+  // `executor.walletClient.sendTransaction({ to: any, data: any })`
+  // directly, bypassing the per-submission 'evm-executor:send-transaction'
+  // guard after satisfying the constructor guard only once. TypeScript
+  // `private` would NOT fix this: it is compile-time only, and the compiled
+  // JS keeps the property as a normal runtime own-property reachable via
+  // untyped callers or reflection.
+  //
+  // ECMAScript `#` private fields are genuinely private at runtime: they
+  // are not own properties of the instance (Object.getOwnPropertyNames /
+  // JSON / reflection cannot see them) and are lexically unreachable from
+  // outside this class body. The raw viem WalletClient and the
+  // key-derived PrivateKeyAccount are therefore no longer obtainable from
+  // any caller; the ONLY way to submit is through the guarded methods
+  // below, each of which re-checks its scope (and expiry) per call.
+  #walletClient: WalletClient;
+  #account: PrivateKeyAccount;
+
   constructor(opts: EvmExecutorOptions) {
+    // EM-STRAT-012 Phase-0: fail-closed gate BEFORE any signer/key material
+    // is touched. Construction enables submission, so it requires the
+    // 'evm-executor:construct-signer' scope.
+    assertExecutionAuthorized('evm-executor:construct-signer');
+
     this.chainId = opts.chainId;
     const chain = CHAIN_MAP[opts.chainId];
     if (!chain) throw new Error(`EvmExecutor: unsupported chainId ${opts.chainId}`);
     this.chain = chain;
 
-    this.account = privateKeyToAccount(opts.agentPrivateKey);
+    this.#account = privateKeyToAccount(opts.agentPrivateKey);
     this.agentVaultAddress = opts.agentVaultAddress;
     this.waitForReceipt = opts.waitForReceipt ?? true;
     this.receiptTimeoutMs = opts.receiptTimeoutMs ?? 60_000;
@@ -264,8 +289,8 @@ export class EvmExecutor {
     this.balancerVaultAddress = BALANCER_VAULT_ADDRESS[opts.chainId];
     this.aaveV3PoolAddress    = AAVE_V3_POOL_ADDRESS[opts.chainId];
 
-    this.walletClient = createWalletClient({
-      account: this.account,
+    this.#walletClient = createWalletClient({
+      account: this.#account,
       chain,
       transport: http(opts.rpcUrl),
     });
@@ -289,6 +314,10 @@ export class EvmExecutor {
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
   }): Promise<ExecutionResult> {
+    // EM-STRAT-012 Phase-0: re-checked per submission so an existing instance
+    // cannot submit after authorization expires. Preserved from main — the
+    // per-submission guard is mandatory on EVERY submission path.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     // Encode the call to AgentVault.execute(target, data)
     const callData = encodeVaultFunctionCall('execute', [params.target, params.data]);
 
@@ -323,6 +352,9 @@ export class EvmExecutor {
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
   }): Promise<ExecutionResult> {
+    // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
+    // encoding, or transport work. Preserved from main.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.balancerVaultAddress) {
       throw new Error(`Balancer V2 not available on ${this.chainId}`);
     }
@@ -363,6 +395,9 @@ export class EvmExecutor {
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
   }): Promise<ExecutionResult> {
+    // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
+    // encoding, or transport work. Preserved from main.
+    assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.aaveV3PoolAddress) {
       throw new Error(`Aave V3 not available on ${this.chainId}`);
     }
@@ -426,10 +461,10 @@ export class EvmExecutor {
   }): Promise<ExecutionResult> {
     let txHash: `0x${string}`;
     try {
-      txHash = await this.walletClient.sendTransaction({
+      txHash = await this.#walletClient.sendTransaction({
         to: params.to,
         data: params.data,
-        account: this.account,
+        account: this.#account,
         chain: this.chain,
         gas: params.gas,
         maxFeePerGas: params.maxFeePerGas,
@@ -537,18 +572,27 @@ function sleep(ms: number): Promise<void> {
  * For bundle submission (atomic multi-tx), use the Flashbots bundle API
  * directly. This function is for single-tx Protect.
  *
- * NOTE: As of this commit, this function is standalone and is NOT wired into
- * EvmExecutor.execute() or the flashloan methods. Those methods use
- * walletClient.sendTransaction() which goes to the public mempool. Wiring
+ * NOTE (PR #2): as of this commit, this function is standalone and is NOT
+ * wired into EvmExecutor.execute() or the flashloan methods. Those methods
+ * submit via submitAndWait() which goes to the public mempool. Wiring
  * Flashbots into the executor requires a sign-then-submit flow:
  *   1. walletClient.signTransaction(...) to get a signed raw tx
  *   2. submitViaFlashbotsProtect(signedTx) to submit to the relay
  * This is left as a future task.
+ *
+ * EM-STRAT-012 Phase-0.5 (work order A/E, from main): this IS a submission
+ * sink — it broadcasts a real signed transaction (`eth_sendRawTransaction`).
+ * It was previously ungated: although the caller must supply an
+ * already-signed tx, broadcasting is the capital-moving step. It requires
+ * the same 'evm-executor:send-transaction' scope as every other EVM
+ * submission and is inventoried in the submission-sink census.
  */
 export async function submitViaFlashbotsProtect(
   signedTx: `0x${string}`,
   fetchImpl: typeof fetch = fetch
 ): Promise<{ txHash: `0x${string}` }> {
+  // Fail-closed BEFORE any network request.
+  assertExecutionAuthorized('evm-executor:send-transaction');
   const res = await fetchImpl('https://rpc.flashbots.net/fast', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

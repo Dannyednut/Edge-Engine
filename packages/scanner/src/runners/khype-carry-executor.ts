@@ -32,6 +32,10 @@ import { KinetiqClient, KHYPE_TOKEN, hyperEvm } from '@edge/executor';
 import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, encodeFunctionData, type Address, type Hash } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { HYPERSWAP_V3_POOLS, HYPERSWAP_V3_SWAP_ROUTER_02, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman } from '../lib/hyperliquid-defi.js';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:khype-carry-executor';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -128,8 +132,14 @@ export interface KhypeCarryExecutorOptions {
 export class KhypeCarryExecutor {
   private kinetiq: KinetiqClient;
   private state: KhypeCarryState;
-  private walletClient: WalletClient | null = null;
-  private publicClient: PublicClient | null = null;
+  // EM-STRAT-012 Phase-0.5 (work order A): the signer-capable clients are
+  // HARD-PRIVATE (`#`) fields, not TypeScript `private`. A TS-private field
+  // survives compilation as a normal runtime own-property — an untyped
+  // caller could do `(executor as any).walletClient.sendTransaction(...)`
+  // and bypass the per-call guard in sendTx(). ECMAScript `#` fields are
+  // not own properties and are lexically unreachable outside this class.
+  #walletClient: WalletClient | null = null;
+  #publicClient: PublicClient | null = null;
 
   constructor(private opts: KhypeCarryExecutorOptions) {
     this.kinetiq = new KinetiqClient({ rpcUrl: HYPEREVM_RPC });
@@ -137,13 +147,17 @@ export class KhypeCarryExecutor {
 
     // Initialize wallet client if private key is available
     if (process.env.AGENT_HYPE_PRIVKEY && !opts.dryRun) {
+      // EM-STRAT-012 Phase-0: signer construction enables submission — it
+      // requires the entrypoint scope (the sendTransaction sites re-check
+      // 'evm-executor:send-transaction' scopes via the shared guard).
+      assertExecutionAuthorized(ENTRYPOINT_SCOPE);
       const account = privateKeyToAccount(process.env.AGENT_HYPE_PRIVKEY as `0x${string}`);
-      this.walletClient = createWalletClient({
+      this.#walletClient = createWalletClient({
         account,
         chain: hyperEvm,
         transport: http(HYPEREVM_RPC),
       });
-      this.publicClient = createPublicClient({
+      this.#publicClient = createPublicClient({
         chain: hyperEvm,
         transport: http(HYPEREVM_RPC),
       });
@@ -153,15 +167,20 @@ export class KhypeCarryExecutor {
 
   /** Sign and submit a transaction, wait for confirmation. Returns tx hash. */
   private async sendTx(to: Address, data: `0x${string}`, value: bigint = 0n): Promise<Hash> {
-    if (!this.walletClient || !this.publicClient || !this.walletClient.account) {
+    if (!this.#walletClient || !this.#publicClient || !this.#walletClient.account) {
       throw new Error('Wallet not initialized — set AGENT_HYPE_PRIVKEY');
     }
-    const txHash = await this.walletClient.sendTransaction({
-      account: this.walletClient.account,
+    // EM-STRAT-012 Phase-0: raw EVM submission sink. Re-checked per call so an
+    // existing instance cannot submit after authorization expires. The
+    // 'evm-executor:send-transaction' scope names the capability (send an EVM
+    // transaction) regardless of which runner performs it.
+    assertExecutionAuthorized('evm-executor:send-transaction');
+    const txHash = await this.#walletClient.sendTransaction({
+      account: this.#walletClient.account,
       chain: hyperEvm,
       to, data, value,
     });
-    const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+    const receipt = await this.#publicClient.waitForTransactionReceipt({ hash: txHash });
     if (receipt.status !== 'success') {
       throw new Error(`Transaction reverted: ${txHash}`);
     }

@@ -9,22 +9,66 @@
  *   - Agent EVM wallet funded with native gas (ETH/BNB/MATIC)
  *   - .env contains AGENT_EVM_PRIVATE_KEY and PRINCIPAL_EVM_ADDRESS
  *   - pnpm --filter @edge/contracts compile  (run first)
+ *   - Workspace packages built (pnpm -r build) so @edge/risk resolves
  *
  * Output:
  *   - Prints the deployed contract address
  *   - Saves address to .env as AGENT_VAULT_ADDRESS_<CHAIN>
+ *
+ * EM-STRAT-012-R2 (work order A) — EXECUTION CONTAINMENT:
+ *   This script signs and broadcasts a real deployment transaction. It is
+ *   therefore a census-inventoried execution entrypoint guarded by the
+ *   narrow 'entrypoint:contracts-deploy' scope:
+ *
+ *   1. FAIL-CLOSED FIRST: main() asserts the execution guard as its FIRST
+ *      action — before loading .env, reading deployment bytecode,
+ *      constructing a signer/client, making a network request, or
+ *      signing/broadcasting. Without a valid, unexpired descriptor whose
+ *      scopes include 'entrypoint:contracts-deploy', the script throws
+ *      before doing anything.
+ *   2. .env CANNOT ARM THE GUARD: .env is loaded through the shared
+ *      loadDotEnvIntoProcessEnv helper (packages/risk/src/dotenv-safety.ts),
+ *      which excludes EDGE_EXECUTION_AUTH. A descriptor supplied only via
+ *      .env can never authorize deployment; it must come from the
+ *      parent-process environment (e.g.
+ *      `EDGE_EXECUTION_AUTH='...' pnpm --filter @edge/contracts deploy:base`).
+ *   3. IMPORT SAFETY: importing this module does NOT invoke main(), load
+ *      .env, mutate process.env, or deploy. main() runs only when the module
+ *      is the direct process entrypoint (isDirectEntrypointInvocation,
+ *      import.meta.url vs process.argv[1] with realpath resolution).
+ *   4. CENSUS: the deployment sinks (privateKeyToAccount, createWalletClient,
+ *      deployContract) are inventoried in
+ *      packages/scanner/test/execution-sink-census.test.ts under this scope;
+ *      a new or unguarded deployment sink fails CI.
+ *
+ * The guard is an accident-prevention control, not a proof of Principal
+ * identity. Actual permission to deploy requires a separate, explicit
+ * Principal decision.
  */
 
-import { readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, appendFileSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createWalletClient, http, parseEther, type Chain as ViemChain } from 'viem';
+import { createWalletClient, http, type Chain as ViemChain } from 'viem';
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
+import {
+  assertExecutionAuthorized,
+  loadDotEnvIntoProcessEnv,
+  type ExecutionScope,
+} from '@edge/risk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..');
+
+/**
+ * Narrow entrypoint scope for THIS script (census-inventoried; see
+ * EXECUTION_SCOPES in packages/risk/src/execution-guard.ts). An authorization
+ * for this scope enables ONLY the contracts deployment utility — no other
+ * entrypoint, client sink, or chain interaction.
+ */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:contracts-deploy';
 
 const CHAIN_MAP: Record<string, ViemChain> = {
   ethereum: mainnet, arbitrum, base, optimism, polygon, bsc, zksync,
@@ -52,29 +96,63 @@ const AAVE_V3_POOL_BY_CHAIN: Record<string, `0x${string}` | null> = {
   zksync:    null,
 };
 
-// Load .env
-function loadEnv() {
-  const envPath = resolve(REPO_ROOT, '.env');
-  if (!existsSync(envPath)) {
-    console.error('Error: .env not found. Run `cp .env.example .env` first.');
-    process.exit(1);
-  }
-  const env = readFileSync(envPath, 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-}
-
 function arg(name: string): string | undefined {
   const flag = process.argv.find(a => a.startsWith(`--${name}=`));
   return flag?.split('=', 2)[1];
 }
 
-async function main() {
-  loadEnv();
+/**
+ * True when this module is the process entrypoint (`tsx scripts/deploy.ts
+ * ...`), false when imported as a library (tests, tooling). Comparison is
+ * by resolved path and then by realpath (covers pnpm/tsx bin symlinks).
+ *
+ * EM-STRAT-012-R2 (work order A5): importing this module must not run
+ * main(), so importing deploy.ts can never load .env, mutate process.env,
+ * or reach a deployment sink.
+ */
+export function isDirectEntrypointInvocation(
+  importMetaUrl: string,
+  argv1: string | undefined,
+): boolean {
+  if (!argv1) return false;
+  let selfPath: string;
+  try {
+    selfPath = fileURLToPath(importMetaUrl);
+  } catch {
+    return false;
+  }
+  const entryPath = resolve(argv1);
+  if (entryPath === selfPath) return true;
+  try {
+    return realpathSync(entryPath) === realpathSync(selfPath);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deploy entrypoint.
+ *
+ * The guard assertion is deliberately the FIRST statement — the work order
+ * requires fail-closed denial before .env loading, bytecode read, signer
+ * construction, transport construction, or any network request.
+ *
+ * `opts` exists for offline deterministic tests only: tests inject a temp
+ * `.env` path so the real repository `.env` is never read by tests.
+ */
+export async function main(opts: { envPath?: string } = {}): Promise<void> {
+  // 1. Fail-closed execution guard — before anything else (work order A3).
+  assertExecutionAuthorized(ENTRYPOINT_SCOPE);
+
+  // 2. Load .env through the shared helper, which EXCLUDES
+  //    EDGE_EXECUTION_AUTH (work order A4): a descriptor persisted in .env
+  //    can never arm the guard that gates this script.
+  const envPath = opts.envPath ?? resolve(REPO_ROOT, '.env');
+  if (!existsSync(envPath)) {
+    console.error('Error: .env not found. Run `cp .env.example .env` first.');
+    process.exit(1);
+  }
+  loadDotEnvIntoProcessEnv(envPath);
 
   const chainName = arg('chain');
   if (!chainName) {
@@ -120,10 +198,10 @@ async function main() {
   }
   const { abi, bytecode } = JSON.parse(readFileSync(buildPath, 'utf8'));
 
-  // Setup wallet client
+  // Setup wallet client (census-inventoried signer-construction sinks)
   const account = privateKeyToAccount(agentPk);
   const rpcUrl = process.env[`${chainName.toUpperCase()}_RPC`] || chain.rpcUrls.default.http[0];
-  const walletClient = createWalletClient({
+  const deployerClient = createWalletClient({
     account,
     chain,
     transport: http(rpcUrl),
@@ -154,7 +232,7 @@ async function main() {
 
   // Deploy
   console.log('\nDeploying...');
-  const hash = await walletClient.deployContract({
+  const hash = await deployerClient.deployContract({
     abi,
     bytecode: bytecode as `0x${string}`,
     args: [
@@ -191,7 +269,6 @@ async function main() {
 
   // Save to .env
   const envVar = `AGENT_VAULT_ADDRESS_${chainName.toUpperCase()}`;
-  const envPath = resolve(REPO_ROOT, '.env');
   const env = readFileSync(envPath, 'utf8');
   const newEntry = `${envVar}=${vaultAddress}`;
   if (env.includes(`${envVar}=`)) {
@@ -218,4 +295,8 @@ async function main() {
   console.log(`  5. Agent can now call execute() and balancerFlashLoan()`);
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// EM-STRAT-012-R2 (work order A5): main() runs ONLY on direct invocation.
+// Importing this module (tests, tooling) performs no side effects.
+if (isDirectEntrypointInvocation(import.meta.url, process.argv[1])) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}

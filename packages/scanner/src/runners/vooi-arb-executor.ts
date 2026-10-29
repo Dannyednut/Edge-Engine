@@ -31,6 +31,10 @@
 
 import { VooiClient, type VooiArbitrageOrderRequest, type VooiBotRequest, type VooiBot, type VooiArbitrageOrder } from '@edge/vooi-client';
 import type { PerpFundingAlert } from '../strategies/perp-funding.js';
+import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:vooi-arb-executor';
 
 export interface VooiArbExecutorOptions {
   /** VOOI API token (from env) */
@@ -236,6 +240,9 @@ export class VooiArbExecutor {
   }
 
   /** Stop a running bot. */
+  // SAFETY-POSITIVE (risk-reducing): stopBot halts an autonomous bot and
+  // deliberately routes through the ungated client stopBot so emergency
+  // stops remain available without execution authorization (EM-STRAT-012).
   async stopBot(botId: string): Promise<{ success: boolean; error?: string }> {
     try {
       await this.vooi.stopBot(botId);
@@ -265,6 +272,14 @@ async function main() {
   if (!apiToken) {
     console.error('VOOI_API_TOKEN not set');
     process.exit(1);
+  }
+
+  // EM-STRAT-012 Phase-0: defense-in-depth entrypoint gate at the live
+  // transition. Dry-run mode remains usable without authorization; going
+  // live requires the entrypoint scope (plus the client sink scopes for
+  // whatever actions are actually invoked).
+  if (args.has('--live')) {
+    assertExecutionAuthorized(ENTRYPOINT_SCOPE);
   }
 
   const executor = new VooiArbExecutor({
