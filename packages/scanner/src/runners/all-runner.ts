@@ -1,12 +1,9 @@
 /**
- * Multi-strategy runner — runs ALL active strategies in parallel and
- * sends Telegram alerts for any opportunities found.
+ * Multi-strategy runner — evaluates configured scanners and dispatches alerts.
  *
- * Active strategies (as of Brief 03):
- *   1. PerpFundingStrategy — any-venue perp funding arb (Sharpe + VOOI)
- *   2. CexHlFundingArbStrategy — CEX spot + HL perp (9-11% APR carry)
- *   3. DexCexFlashloanStrategy — DEX-CEX spot arb (Balancer V2 0% flashloan)
- *   4. SolanaMultiAmmArbStrategy — Solana memecoin cross-AMM arb (PumpApi)
+ * Instantiation does NOT imply economic validation or execution readiness:
+ * incomplete strategy models are monitoring-only or research-only, and this
+ * file contains no live-order submission path.
  *
  * Usage: pnpm --filter @edge/scanner start:all
  */
@@ -33,7 +30,7 @@ import { CexLikeDexPriceArbStrategy, type PriceArbAlert } from '../strategies/ce
 import { HlAmmArbScanner, type HlAmmArbAlert } from '../strategies/hl-amm-arb-scanner.js';
 import { HlLstArbScanner, type HlLstArbAlert } from '../strategies/hl-lst-arb-scanner.js';
 import { GoldArbScanner, type GoldArbAlert } from '../strategies/gold-arb-scanner.js';
-import { EquityPerpCrossVenueScanner, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
+import { EquityPerpCrossVenueScanner, formatEquityPerpDegradation, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
 import { LstYieldComparisonScanner, type LstYieldAlert } from '../strategies/lst-yield-comparison.js';
 import { PtKhypeYieldArbScanner, type PtKhypeAlert } from '../strategies/pt-khype-yield-arb.js';
 import { PtYieldArbScanner, type PtYieldArbAlert } from '../strategies/pt-yield-arb-scanner.js';
@@ -46,11 +43,12 @@ import { RwaTreasuryScanner, type RwaYieldAlert } from '../strategies/rwa-treasu
 import { StablecoinDepegScanner, type DepegAlert } from '../strategies/stablecoin-depeg-scanner.js';
 import { LiquidationBackrunScanner, type LiquidationAlert } from '../strategies/liquidation-backrun-scanner.js';
 import { OrderbookImbalanceScanner, type OrderbookAlert } from '../strategies/orderbook-imbalance-scanner.js';
-import { FundingDivergenceScanner, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
+import { FundingDivergenceScanner, formatFundingDegradation, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
 import { AirdropFarmingScanner, type AirdropAlert } from '../strategies/airdrop-farming-scanner.js';
 import { LeverageLoopScanner, type LeverageLoopAlert } from '../strategies/leverage-loop-scanner.js';
 import { WhaleSignalScanner, type WhaleSignalAlert } from '../strategies/whale-signal-scanner.js';
 import { CexDexBridgeScanner, type CexDexBridgeAlert } from '../strategies/cex-dex-bridge-scanner.js';
+import { CrossDexArbScanner, type CrossDexArbAlert } from '../strategies/cross-dex-arb-scanner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -63,6 +61,7 @@ try {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!m) continue;
     const [, k, v] = m;
+    if (k === 'EDGE_EXECUTION_AUTH') continue;
     if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
   }
 } catch { /* .env not present */ }
@@ -167,8 +166,9 @@ async function main() {
   const leverageLoop = new LeverageLoopScanner(sc.leverageLoop);
   const whaleSignal = new WhaleSignalScanner(sc.whaleSignal);
   const cexDexBridge = new CexDexBridgeScanner(sc.cexDexBridge);
+  const crossDexArb = new CrossDexArbScanner(sc.crossDexArb);
 
-  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis, hlp_yield, defillama_yield, rwa_treasury, stablecoin_depeg, liquidation_backrun, orderbook_imbalance, funding_divergence, airdrop_farming, leverage_loop, whale_signal, cex_dex_bridge]`);
+  console.log(`  Strategies: [perp_funding, cex_hl_funding_arb, dex_cex_flashloan, solana_memecoin_arb, prediction_arb, sports_arb, pendle_boros, tokenized_equity, cexlike_dex_price_arb, hl_amm_arb, hl_lst_arb, gold_arb, equity_perp_xvenue, lst_yield, pt_khype_yield, pt_yield_arb, euler_lending_arb, hl_spot_basis, hlp_yield, defillama_yield, rwa_treasury, stablecoin_depeg, liquidation_backrun, orderbook_imbalance, funding_divergence, airdrop_farming, leverage_loop, whale_signal, cex_dex_bridge, cross_dex_arb]`);
   console.log(`  Scan interval: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log('═══════════════════════════════════════════════════');
 
@@ -191,7 +191,15 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
-      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts, defiLlamaAlerts, rwaAlerts, depegAlerts, liquidationAlerts, orderbookAlerts, fundingDivAlerts, airdropAlerts, leverageAlerts, whaleAlerts, bridgeAlerts] = await Promise.all([
+      // EM-STRAT-014-E11-Cluster3-R1: equity-perp degradation (fail-closed
+      // HIP-3 scope state) captured from scanWithDegradation() and logged
+      // below on every scan.
+      let equityPerpDegradation: import('../strategies/equity-perp-cross-venue.js').EquityPerpDegradation | null = null;
+      // EM-STRAT-014-E11-Cluster2-R1: funding-divergence degradation captured
+      // from scanWithDegradation() and logged below on every scan.
+      let fundingDivDegradation: import('../strategies/funding-divergence-scanner.js').FundingDegradation | null = null;
+
+      const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts, defiLlamaAlerts, rwaAlerts, depegAlerts, liquidationAlerts, orderbookAlerts, fundingDivAlerts, airdropAlerts, leverageAlerts, whaleAlerts, bridgeAlerts, crossDexAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
         cexHlArb.scan().catch(e => { console.warn(`cex_hl failed: ${e.message}`); return [] as CexHlFundingAlert[]; }),
         dexCexFlashloan.scan().catch(e => { console.warn(`dex_cex failed: ${e.message}`); return [] as DexCexArbAlert[]; }),
@@ -203,7 +211,12 @@ async function main() {
         hlAmmArb.scan().catch(e => { console.warn(`hl_amm failed: ${e.message}`); return [] as HlAmmArbAlert[]; }),
         hlLstArb.scan().catch(e => { console.warn(`hl_lst failed: ${e.message}`); return [] as HlLstArbAlert[]; }),
         goldArb.scan().catch(e => { console.warn(`gold failed: ${e.message}`); return [] as GoldArbAlert[]; }),
-        equityPerpCrossVenue.scan().catch(e => { console.warn(`equity_xv failed: ${e.message}`); return [] as EquityPerpArbAlert[]; }),
+        // EM-STRAT-014-E11-Cluster3-R1: scanWithDegradation() so the
+        // fail-closed HIP-3 scope state (roster unverified / query failures)
+        // is production-visible, never confusable with "no spread".
+        equityPerpCrossVenue.scanWithDegradation()
+          .then(r => { equityPerpDegradation = r.degradation; return r.alerts; })
+          .catch(e => { console.warn(`equity_xv failed: ${e.message}`); return [] as EquityPerpArbAlert[]; }),
         lstYield.scan().catch(e => { console.warn(`lst_yield failed: ${e.message}`); return [] as LstYieldAlert[]; }),
         ptKhypeArb.scan().catch(e => { console.warn(`pt_khype failed: ${e.message}`); return [] as PtKhypeAlert[]; }),
         ptYieldArb.scan().catch(e => { console.warn(`pt_yield failed: ${e.message}`); return [] as PtYieldArbAlert[]; }),
@@ -215,15 +228,35 @@ async function main() {
         stablecoinDepeg.scan().catch(e => { console.warn(`depeg failed: ${e.message}`); return [] as DepegAlert[]; }),
         liquidationBackrun.scan().catch(e => { console.warn(`liq failed: ${e.message}`); return [] as LiquidationAlert[]; }),
         orderbookImbalance.scan().catch(e => { console.warn(`orderbook failed: ${e.message}`); return [] as OrderbookAlert[]; }),
-        fundingDivergence.scan().catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
+        // EM-STRAT-014-E11-Cluster2-R1: the runner uses scanWithDegradation()
+        // (not the Strategy-interface scan(), which discards degradation) and
+        // logs the summary below on EVERY scan — including empty results — so
+        // partial API failure / skipped rows are production-visible and never
+        // confusable with "no opportunities".
+        fundingDivergence.scanWithDegradation()
+          .then(r => { fundingDivDegradation = r.degradation; return r.alerts; })
+          .catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
         airdropFarming.scan().catch(e => { console.warn(`airdrop failed: ${e.message}`); return [] as AirdropAlert[]; }),
         leverageLoop.scan().catch(e => { console.warn(`lev_loop failed: ${e.message}`); return [] as LeverageLoopAlert[]; }),
         whaleSignal.scan().catch(e => { console.warn(`whale failed: ${e.message}`); return [] as WhaleSignalAlert[]; }),
         cexDexBridge.scan().catch(e => { console.warn(`bridge failed: ${e.message}`); return [] as CexDexBridgeAlert[]; }),
+        crossDexArb.scan().catch(e => { console.warn(`cross_dex failed: ${e.message}`); return [] as CrossDexArbAlert[]; }),
       ]);
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
-      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} dfly=${defiLlamaAlerts.length} rwa=${rwaAlerts.length} depeg=${depegAlerts.length} liq=${liquidationAlerts.length} ob=${orderbookAlerts.length} fundiv=${fundingDivAlerts.length} airdrop=${airdropAlerts.length} levloop=${leverageAlerts.length} whale=${whaleAlerts.length} bridge=${bridgeAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} dfly=${defiLlamaAlerts.length} rwa=${rwaAlerts.length} depeg=${depegAlerts.length} liq=${liquidationAlerts.length} ob=${orderbookAlerts.length} fundiv=${fundingDivAlerts.length} airdrop=${airdropAlerts.length} levloop=${leverageAlerts.length} whale=${whaleAlerts.length} bridge=${bridgeAlerts.length} crossdex=${crossDexAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      // EM-STRAT-014-E11-Cluster3-R1: visible marker — most importantly the
+      // 'hip3_scope_roster_unverified' fail-closed state while no verified
+      // HIP-3 deployer roster is configured.
+      if (equityPerpDegradation) {
+        console.log(formatEquityPerpDegradation(equityPerpDegradation));
+      }
+      // EM-STRAT-014-E11-Cluster2-R1: production-visible degradation marker —
+      // logged on EVERY scan (even when alerts are empty) so partial API
+      // failure / skipped rows are never confusable with "no opportunities".
+      if (fundingDivDegradation) {
+        console.log(formatFundingDegradation(fundingDivDegradation));
+      }
 
       // Process perp alerts
       for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
@@ -242,26 +275,42 @@ async function main() {
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
             `Source: ${a.source} | VOOI: ${a.vooiExecutable ? 'YES' : 'NO'}`,
+            // EM-STRAT-014-E11-Cluster1-R1: Sharpe-source freshness must be
+            // explicit. 'unknown' means the server provided no asOf — the
+            // data is UNVERIFIED, not fresh. Never inferred from scan time.
+            `Sharpe freshness: ${a.freshness === 'server-asof' ? `server asOf ${new Date(a.sharpeAsOf as number).toISOString()}` : 'UNKNOWN (server provided no asOf — unverified)'}`,
           ].join('\n'),
           channels: ['telegram'],
         });
       }
 
-      // Process cex_hl alerts
-      for (const a of cexHlAlerts.filter(a => a.netSpreadApr >= 5).slice(0, 2)) {
+      // Process cex_hl alerts — EM-STRAT-005 §2: provenance model.
+      // Per-leg rates from Sharpe /funding/rates are third-party-sourced
+      // (same provider as cross-exchange). Until venue-native corroboration
+      // is wired, EVERY alert is non-actionable and MUST use 'info' severity.
+      // The alert body explicitly labels the provenance and reference nature.
+      for (const a of cexHlAlerts.slice(0, 2)) {
         const key = `cex_hl|${a.asset}|${a.cexVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
+        const fmtOrNull = (v: number | null, digits = 2) =>
+          v === null ? 'UNAVAILABLE' : v.toFixed(digits);
         await alerter.sendAlert({
           id: `cex_hl_${a.asset}_${a.cexVenue}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: a.actionable ? 'opportunity' : 'info',
           strategyId: 'cex_hl_funding_arb',
-          title: `[CEX-HL] ${a.asset} ${a.netSpreadApr.toFixed(1)}% APR · ${a.cexVenue}↔HL`,
+          title: a.actionable
+            ? `[CEX-HL] ${a.asset} ${a.netSpreadApr!.toFixed(1)}% APR · ${a.cexVenue}↔HL`
+            : `[CEX-HL-REF] ${a.asset} ${a.cexVenue}↔HL — third-party-sourced (not independently verified)`,
           body: [
-            `Long perp ${a.cexVenue} → Short perp Hyperliquid`,
-            `Net spread APR: ${a.netSpreadApr.toFixed(2)}%`,
-            `HL funding: ${a.hlFundingApr.toFixed(2)}% / CEX funding: ${a.cexFundingApr.toFixed(2)}%`,
+            `Long perp ${a.cexVenue} -> Short perp Hyperliquid`,
+            a.actionable
+              ? `Net spread APR: ${a.netSpreadApr!.toFixed(2)}% (independently corroborated)`
+              : `Net spread APR: ${fmtOrNull(a.netSpreadApr)} (third-party-sourced — REFERENCE ONLY)`,
+            `HL funding (raw, Sharpe): ${fmtOrNull(a.hlFundingApr)}% / CEX funding (raw, Sharpe): ${fmtOrNull(a.cexFundingApr)}%`,
+            `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
+            `Provenance: ${a.provenance}`,
             `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
             `VOOI atomic: ${a.vooiExecutable ? 'YES' : 'NO (need direct SDK)'}`,
           ].join('\n'),
@@ -406,7 +455,10 @@ async function main() {
         });
       }
 
-      // Process CexLikeDex price arb alerts
+      // Process CexLikeDex price arb alerts — convergence trades, not instant profit.
+      // EM-STRAT-005 §1: this strategy is monitoring-only. Every alert MUST
+      // use 'info' severity (never 'opportunity'). estimatedProfitUsd is
+      // always null. The observed spread is a SIGNAL, not a verified profit.
       for (const a of priceArbAlerts.slice(0, 3)) {
         const key = `pricearb|${a.asset}|${a.longVenue}|${a.shortVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -414,12 +466,17 @@ async function main() {
         await alerter.sendAlert({
           id: `pricearb_${a.asset}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info', // EM-STRAT-005 §1: always info (monitoring-only)
           strategyId: 'cexlike_dex_price_arb',
-          title: `[PRICE] ${a.asset} ${a.priceSpreadPct.toFixed(1)}% spread`,
+          title: `[PRICE-CONVERGENCE-MONITOR] ${a.asset} ${a.effectiveSpreadPct.toFixed(1)}% spread (monitoring only)`,
           body: [
-            `Long ${a.longVenue} $${a.longPrice} → Short ${a.shortVenue} $${a.shortPrice}`,
-            `Spread: ${a.priceSpreadPct.toFixed(2)}%  Profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+            `MONITORING ONLY — convergence-economics model not yet implemented`,
+            `CONVERGENCE TRADE: result depends on close-out, fees, funding, margin, time`,
+            `Long ${a.longVenue} $${a.longPrice} -> Short ${a.shortVenue} $${a.shortPrice}`,
+            `Headline: ${a.headlineSpreadPct.toFixed(2)}%  At-size: ${a.atSizeSpreadPct?.toFixed(2) ?? 'UNAVAILABLE'}%  Effective: ${a.effectiveSpreadPct.toFixed(2)}%`,
+            `Funding 1h (diagnostic): ${a.fundingSpread1h !== null ? a.fundingSpread1h.toFixed(4) + '%' : 'UNAVAILABLE'}`,
+            `Est. profit: UNAVAILABLE (convergence-economics model incomplete)`,
+            `Economics complete: ${a.economicsComplete}  Actionable: ${a.actionable}  Monitoring only: ${a.monitoringOnly}`,
             `Long OI: $${a.longOiUsd.toFixed(0)}  Short OI: $${a.shortOiUsd.toFixed(0)}`,
           ].join('\n'),
           channels: ['telegram'],
@@ -456,13 +513,16 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: 'hl_lst_arb',
-          title: `[HLLST] ${a.pair} ${a.discountPct.toFixed(2)}% discount`,
+          title: `[HLLST] ${a.pair} ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`,
           body: [
-            `kHYPE price: ${a.khypePrice.toFixed(6)} WHYPE  Discount: ${a.discountPct.toFixed(2)}%`,
-            `Net profit: ${a.estimatedProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)} on $5k`,
-            `Fee tier: ${a.feeTier/10000}%  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
+            `Market price: ${a.marketPrice.toFixed(6)} kHYPE/WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
+            `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+            `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
+            // EM-STRAT-004: fee tier is in hundredths of a bip (e.g., 100 → 0.01%).
+            // Display as pct directly using the corrected conversion (fee/10000).
+            `Fee tier: ${a.feeTier} (${a.ammFeePct.toFixed(4)}%)  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,
             `Liquidity: ${a.poolLiquidity.toString()}`,
-            `Carry arb: buy kHYPE, queue 7-9 day withdrawal, receive HYPE`,
+            `Carry arb: buy kHYPE, queue withdrawal, receive HYPE at anchor rate`,
           ].join('\n'),
           channels: ['telegram'],
         });
@@ -489,7 +549,13 @@ async function main() {
         });
       }
 
-      // Process equity perp cross-venue alerts
+      // Process equity_xv alerts — EM-STRAT-014-E11-Cluster3-R1:
+      // MONITORING-ONLY. The spread compares HL mark price vs Backpack last
+      // traded price (priceBasisMismatch: true) — its economic validity has
+      // NOT been reviewed. Alerts stay severity 'info' with an explicit
+      // monitor label until a separate economic-validity review approves
+      // stronger alert semantics. Additionally, no alerts can be produced
+      // at all while the HIP-3 deployer roster is unverified (fail-closed).
       for (const a of equityXvAlerts.slice(0, 2)) {
         const key = `eqxv|${a.asset}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -497,13 +563,14 @@ async function main() {
         await alerter.sendAlert({
           id: `eqxv_${a.asset}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'equity_perp_cross_venue',
-          title: `[EQXV] ${a.asset} ${a.spreadPct.toFixed(2)}% spread`,
+          title: `[EQXV-MONITOR] ${a.asset} ${a.spreadPct.toFixed(2)}% spread (mark-vs-last — unreviewed)`,
           body: [
-            `Backpack: $${a.backpackPrice.toFixed(2)}  HL: $${a.hlPrice.toFixed(2)}`,
+            `Backpack: $${a.backpackPrice.toFixed(2)} (last)  HL: $${a.hlPrice.toFixed(2)} (mark)`,
             `Direction: ${a.direction}`,
             `Est. profit: $${a.estimatedProfitUsd.toFixed(2)} on $${2000}`,
+            `BASIS MISMATCH: HL mark vs Backpack last — NOT a proven net-profit signal (monitoring only).`,
           ].join('\n'),
           channels: ['telegram'],
         });
@@ -530,21 +597,36 @@ async function main() {
         });
       }
 
-      // Process PT-kHYPE yield arb alerts
+      // ─── EM-STRAT-014-B2: PT-kHYPE alerts are RESEARCH-ONLY. ───────────
+      // ptKhypeAlerts carry `researchOnly: true` (see pt-khype-yield-arb.ts).
+      // The scanner fails closed: no validated PT price source is wired, so
+      // `ptKhypeAlerts` is empty in production and this loop never executes.
+      // Defense-in-depth: even if a future edit injects a price source and
+      // alerts flow through, they MUST be dispatched with severity 'info'
+      // (NOT 'opportunity') and a [PTKH-RESEARCH] prefix. A research-only
+      // alert must never be presented as an actionable economic opportunity.
+      // Regression: strategy-labeling.test.ts asserts this presenter block
+      // does not assign severity 'opportunity' to pt_khype alerts.
       for (const a of ptKhypeAlerts.slice(0, 2)) {
+        // Hard guard: only research-only alerts may pass. If a future edit
+        // emits researchOnly: false without re-validating the price source
+        // and updating this contract, suppress rather than risk an actionable
+        // presentation of an unverified signal.
+        if (a.researchOnly !== true) continue;
         const key = `ptkh|${a.ptToken}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
         await alerter.sendAlert({
           id: `ptkh_${a.ptToken}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'pt_khype_yield_arb',
-          title: `[PTKH] ${a.ptToken} ${a.impliedFixedYieldApr.toFixed(2)}% APR (spread ${a.yieldSpreadApr.toFixed(2)}%)`,
+          title: `[PTKH-RESEARCH] ${a.ptToken} ${a.impliedFixedYieldApr.toFixed(2)}% APR (spread ${a.yieldSpreadApr.toFixed(2)}%)`,
           body: [
+            `RESEARCH-ONLY — not an actionable opportunity. PT price source not validated for operational dispatch.`,
             `PT: ${a.ptToken}  Maturity: ${a.maturity} (${a.daysToMaturity.toFixed(0)}d)`,
-            `Implied fixed: ${a.impliedFixedYieldApr.toFixed(2)}%  kHYPE floating: ${a.khypeFloatingYieldApr.toFixed(2)}%`,
-            `Direction: ${a.direction}  Est. profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+            `PT price (kHYPE): ${a.ptPrice.toFixed(4)}  Implied fixed: ${a.impliedFixedYieldApr.toFixed(2)}%  kHYPE floating: ${a.khypeFloatingYieldApr.toFixed(2)}%`,
+            `Direction: ${a.direction}  Est. profit: $${a.estimatedProfitUsd.toFixed(2)} (illustrative, not executable)`,
             `Supply: ${a.ptTotalSupply.toFixed(0)} PT`,
           ].join('\n'),
           channels: ['telegram'],
@@ -573,6 +655,10 @@ async function main() {
       }
 
       // Process Euler lending arb alerts
+      // EM-STRAT-004: Euler alerts are monitoring-only — supply APY, spread,
+      // and profit are null (cannot be verified). NEVER display these as
+      // verified-zero values; use 'UNAVAILABLE' explicitly. Severity is
+      // 'info', NOT 'opportunity'.
       for (const a of eulerLendingArbAlerts.slice(0, 3)) {
         const key = `eulr|${a.assetSymbol}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -580,15 +666,19 @@ async function main() {
         await alerter.sendAlert({
           id: `eulr_${a.assetSymbol}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'euler_lending_arb',
-          title: `[EULR] ${a.assetSymbol} ${a.spreadPct.toFixed(2)}% spread (Euler HL)`,
+          title: `[EULR-MONITOR] ${a.assetSymbol} borrow ${a.depositVault.borrowApyPct.toFixed(2)}% - ${a.borrowVault.borrowApyPct.toFixed(2)}%`,
           body: [
-            `Deposit: ${a.depositVault.name} @ ${a.depositVault.apyPct.toFixed(2)}% APR`,
-            `Borrow:  ${a.borrowVault.name} @ ${a.borrowVault.apyPct.toFixed(2)}% APR`,
-            `Spread:  ${a.spreadPct.toFixed(2)}%  CF: ${a.collateralFactorPct}%`,
-            `Est. profit: $${a.estimatedProfitUsd.toFixed(2)}/yr on $${5000} collateral`,
-            `Combined liq: $${(a.totalLiquidityUsd / 1000).toFixed(0)}k`,
+            `MONITORING ONLY — supply APY unavailable, cannot compute spread`,
+            `Deposit vault: ${a.depositVault.name} (borrow ${a.depositVault.borrowApyPct.toFixed(2)}%)`,
+            `Borrow vault:  ${a.borrowVault.name} (borrow ${a.borrowVault.borrowApyPct.toFixed(2)}%)`,
+            `Supply APY (deposit): ${a.depositVault.supplyApyPct === null ? 'UNAVAILABLE' : a.depositVault.supplyApyPct.toFixed(2) + '%'}`,
+            `Supply APY (borrow):  ${a.borrowVault.supplyApyPct === null ? 'UNAVAILABLE' : a.borrowVault.supplyApyPct.toFixed(2) + '%'}`,
+            `Spread: ${a.spreadPct === null ? 'UNAVAILABLE' : a.spreadPct.toFixed(2) + '%'}`,
+            `Profit: ${a.estimatedProfitUsd === null ? 'UNAVAILABLE (cannot estimate)' : '$' + a.estimatedProfitUsd.toFixed(0)}`,
+            `Borrowable: ${a.borrowable}  CF: ${a.collateralFactorPct}% (assumed)`,
+            `Combined liq: ${a.totalLiquidityUsd !== null ? '$' + (a.totalLiquidityUsd / 1000).toFixed(0) + 'k' : 'UNAVAILABLE'}`,
           ].join('\n'),
           channels: ['telegram'],
         });
@@ -768,11 +858,66 @@ async function main() {
         });
       }
 
+      // Process cross-DEX price-divergence alerts (monitor-only).
+      // Public pool prices and reserves are discovery data, not executable quotes.
+      for (const a of crossDexAlerts.slice(0, 3)) {
+        const key = 'crossdex|' + a.pairKey + '|' + a.dex1PoolId + '|' + a.dex2PoolId;
+        if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
+        seenOpps.set(key, Date.now());
+        await alerter.sendAlert({
+          id: 'crossdex_' + a.pairKey + '_' + Date.now(),
+          ts: Date.now(),
+          severity: 'info',
+          strategyId: 'cross_dex_arb',
+          title: '[CROSS-DEX-MONITOR] ' + a.pair + ' ' + a.spreadPct.toFixed(2) + '% gross reference divergence',
+          body: [
+            'MONITORING ONLY — not a verified arbitrage or executable route',
+            a.dex1Name + ': ' + a.dex1Price.toPrecision(8) + ' ' + a.priceBasis + ' (reserve $' + a.reserve1Usd.toFixed(0) + ')',
+            a.dex2Name + ': ' + a.dex2Price.toPrecision(8) + ' ' + a.priceBasis + ' (reserve $' + a.reserve2Usd.toFixed(0) + ')',
+            'Gross reference-price divergence: ' + a.spreadPct.toFixed(3) + '%',
+            'Net profit: UNAVAILABLE; pool-specific fees, trade-size slippage, gas and route execution are not modeled.',
+            'Token IDs: ' + a.token0Id + ' | ' + a.token1Id,
+          ].join('\n'),
+          channels: ['telegram'],
+        });
+      }
+
       // Clean dedup map
       const cutoff = Date.now() - DEDUP_WINDOW_MS;
       for (const [k, ts] of seenOpps.entries()) {
         if (ts < cutoff) seenOpps.delete(k);
       }
+
+      // ─── EM-STRAT-004 / EM-STRAT-005 / EM-STRAT-014-B2: Non-actionable strategy enforcement ─
+      // airdropAlerts and leverageAlerts carry `researchOnly: true` — they
+      // are based on static campaign/rate tables, NOT live market data.
+      // eulerLendingArbAlerts carry `monitoringOnly: true` — supply APY
+      // cannot be verified, so no actionable spread/profit can be computed.
+      // priceArbAlerts (CexLikeDex) carry `monitoringOnly: true` (EM-STRAT-005 §1)
+      // — the convergence-economics model is incomplete; no verified profit
+      // estimate is produced.
+      // ptKhypeAlerts carry `researchOnly: true` (EM-STRAT-014-B2) — no
+      // validated PT price source is wired and all discovered instruments are
+      // expired; the scanner fails closed. Any emitted alert is research-only.
+      //
+      // Policy: NONE of these alerts may be sent through `alerter.sendAlert()`
+      // with `severity: 'opportunity'` (or 'critical'). They are dispatched
+      // above with 'info' severity only. The per-scan log line records their
+      // counts for observability.
+      //
+      // Regression tests in `strategy-labeling.test.ts` verify:
+      //   1. airdropAlerts[i].researchOnly === true
+      //   2. leverageAlerts[i].researchOnly === true
+      //   3. eulerLendingArbAlerts[i].monitoringOnly === true
+      //   4. priceArbAlerts[i].monitoringOnly === true (EM-STRAT-005 §1)
+      //   5. ptKhypeAlerts[i].researchOnly === true (EM-STRAT-014-B2)
+      //   6. This file does not call alerter.sendAlert() with severity
+      //      'opportunity' for any of those five alert types.
+      void airdropAlerts;       // observed but never alerted as opportunity
+      void leverageAlerts;      // observed but never alerted as opportunity
+      void eulerLendingArbAlerts; // monitoring-only: handled above with 'info' severity
+      // priceArbAlerts are dispatched above with 'info' severity (monitoring-only)
+      // ptKhypeAlerts are dispatched above with 'info' severity (research-only, EM-STRAT-014-B2)
     } catch (err) {
       console.error(`[scan ${scanCount}] failed:`, err);
     }

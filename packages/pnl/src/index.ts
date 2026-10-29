@@ -31,6 +31,12 @@ export class PnlDb {
     this.migrate();
   }
 
+  // NOT-A-SINK: this.migrate() is a SQLite schema migration (CREATE TABLE /
+  // CREATE INDEX DDL), not a trading action. The submission-sink census
+  // flags `.migrate(` because PumpApiClient also has a `migrate()` method
+  // that submits a Solana transaction; this PnlDb method is a false
+  // positive of that regex and is explicitly inventoried as not-a-sink in
+  // packages/scanner/test/execution-sink-census.test.ts. (EM-STRAT-012 R1.)
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pnl_entries (

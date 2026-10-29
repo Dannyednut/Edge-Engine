@@ -26,6 +26,11 @@ jobs:
         # @edge/config, etc. emit dist/ with .d.ts files. Without this,
         # tsc in @edge/scanner cannot resolve @edge/* imports.
         name: Build all workspace packages
+      # EM-STRAT-012-R2 (work order D): repository-wide typecheck gate.
+      # Every workspace package with a typecheck script must pass — not
+      # just @edge/scanner — so type errors anywhere fail CI deterministically.
+      - run: pnpm -r typecheck
+        name: Typecheck all workspace packages
       - run: pnpm --filter @edge/scanner typecheck
       - run: pnpm --filter @edge/scanner build
       - run: npx vitest run

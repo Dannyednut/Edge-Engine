@@ -27,6 +27,9 @@ export interface AirdropAlert {
   riskScore: number;
   capitalRequired: number;
   lockupDays: number;
+  /** RESEARCH-ONLY: This alert is based on static campaign tables, not live market data.
+   *  Must NOT be sent as an actionable opportunity alert. */
+  researchOnly: boolean;
   ts: number;
 }
 
@@ -87,6 +90,7 @@ export class AirdropFarmingScanner implements Strategy {
         riskScore: c.riskScore,
         capitalRequired: c.capitalRequired,
         lockupDays: c.lockupDays,
+        researchOnly: true, // Static table — NOT live market data
         ts: Date.now(),
       });
     }

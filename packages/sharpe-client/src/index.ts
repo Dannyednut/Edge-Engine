@@ -51,7 +51,12 @@ export interface ArbitrageResponse {
   data: ArbitrageRow[];
   cursor?: string;
   meta?: {
-    asOf?: number;
+    /**
+     * Server-provided observation timestamp (epoch ms). null when the server
+     * did not provide one — EM-STRAT-014-E11 item 1: NEVER fabricated with
+     * Date.now(). The caller must not infer freshness from a null asOf.
+     */
+    asOf?: number | null;
     freshnessSlaSeconds?: number;
     dataSource?: string;
   };
@@ -70,7 +75,8 @@ export interface FundingRateRow {
 export interface FundingRateResponse {
   data: FundingRateRow[];
   meta?: {
-    asOf?: number;
+    /** EM-STRAT-014-E11 item 1: server-provided; null when absent. */
+    asOf?: number | null;
     dataSource?: string;
   };
 }
@@ -89,6 +95,7 @@ export class SharpeClient {
     this.base = usePublic ? SHARPE_BASE_PUBLIC : SHARPE_BASE_V1;
   }
 
+  // NOT-A-SINK: read-only market-data transport (GET endpoints only); inventoried in the submission-sink census.
   private async request<T>(path: string, params?: Record<string, string | number | boolean | string[] | undefined>): Promise<T> {
     const url = new URL(`${this.base}${path}`);
     if (params) {
@@ -140,8 +147,15 @@ export class SharpeClient {
     }
     const json: unknown = await res.json();
     // Public mirror returns array directly; authenticated v1 returns {data: [...]}
+    // EM-STRAT-014-E11 item 1: preserve the server-provided meta.asOf if
+    // present; absent → null. NEVER fabricate with Date.now().
+    const serverMetaXe = (json as { meta?: { asOf?: number } } | null)?.meta;
+    const serverAsOfXe: number | null =
+      (serverMetaXe && typeof serverMetaXe.asOf === 'number' && isFinite(serverMetaXe.asOf))
+        ? serverMetaXe.asOf
+        : null;
     const rows = Array.isArray(json) ? json : ((json as { data?: ArbitrageRow[] }).data ?? []);
-    return { data: rows as ArbitrageRow[], meta: { asOf: Date.now() } };
+    return { data: rows as ArbitrageRow[], meta: { asOf: serverAsOfXe } };
   }
 
   /** Spot-perp funding capture. direction=short captures positive funding. */
@@ -212,7 +226,16 @@ export class SharpeClient {
     } else if ((json as { data?: { rows?: ArbitrageRow[] } }).data?.rows) {
       rows = (json as { data: { rows: ArbitrageRow[] } }).data.rows;
     }
-    return { data: rows, meta: { asOf: Date.now() } };
+    // EM-STRAT-014-E11 item 1: preserve server-provided meta.asOf; absent → null.
+    // cex-spot-transfer response shapes: {meta:{asOf}}, {data:{scannerMeta:{asOf}}}, or bare array.
+    const cstMeta = json as { meta?: { asOf?: number } } | { data?: { scannerMeta?: { asOf?: number } } } | null;
+    const cstAsOfCandidates = [
+      (cstMeta as { meta?: { asOf?: number } })?.meta?.asOf,
+      (cstMeta as { data?: { scannerMeta?: { asOf?: number } } })?.data?.scannerMeta?.asOf,
+    ];
+    const cstServerAsOf: number | null =
+      cstAsOfCandidates.find(v => typeof v === 'number' && isFinite(v)) ?? null;
+    return { data: rows, meta: { asOf: cstServerAsOf } };
   }
 
   /** DEX-vs-CEX or DEX-vs-DEX gross spread. Returns GROSS (not net). */

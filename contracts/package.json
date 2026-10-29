@@ -10,11 +10,13 @@
     "deploy:base":     "tsx scripts/deploy.ts --chain base",
     "deploy:arbitrum": "tsx scripts/deploy.ts --chain arbitrum",
     "deploy:bsc":      "tsx scripts/deploy.ts --chain bsc",
-    "verify":          "tsx scripts/verify.ts"
+    "verify":          "tsx scripts/verify.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@edge/types": "workspace:*",
-    "@edge/config": "workspace:*"
+    "@edge/config": "workspace:*",
+    "@edge/risk": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

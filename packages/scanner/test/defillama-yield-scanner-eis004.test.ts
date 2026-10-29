@@ -8,9 +8,14 @@
  *   4. kinetiq-khype (legitimate) pool still passes
  *
  * Evidence: EIS004_RESEARCH_REPORT.md §6.3, table T5
+ *
+ * EM-STRAT-007 §2: refactored to use the `mockFetch` API instead of
+ * overwriting `globalThis.fetch` directly. This keeps the offline guard
+ * in place and prevents any risk of leaving the guard in a broken state.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DefiLlamaYieldScanner } from '../src/strategies/defillama-yield-scanner.js';
+import { mockFetch } from './_setup/offline-mocks.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────
 
@@ -91,177 +96,128 @@ const REWARD_FARM_POOL = {
   poolMeta: null,
 };
 
+/** Helper: register a mock response for the DeFiLlama yields API returning
+ *  the given fixture pools. Uses the mockFetch API so the offline guard
+ *  remains in place. */
+function mockDefiLlamaPools(pools: any[]) {
+  mockFetch.clear();
+  mockFetch.register('yields.llama.fi', {
+    status: 200,
+    json: async () => ({ data: pools }),
+  });
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 describe('DefiLlamaYieldScanner — EI-S004 data-quality filters', () => {
-  // We need to test the filtering logic without making a real API call.
-  // The scanner's scan() method fetches from the API. We test the filter
-  // logic by mocking the fetch and providing fixture data.
+  // EM-STRAT-007 §2: use mockFetch.clear() in afterEach to ensure mocks
+  // don't leak across test boundaries. The offline-mocks helper already
+  // registers default mocks in beforeEach, but we override them per-test
+  // via mockDefiLlamaPools().
+  afterEach(() => {
+    mockFetch.clear();
+  });
 
   it('growihf "Hyperliquid Vault" pool is excluded', async () => {
-    // Mock fetch to return only the growihf pool
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [GROWIHF_POOL] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 1_000_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      expect(results.length).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([GROWIHF_POOL]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 1_000_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    expect(results.length).toBe(0);
   });
 
   it('kinetiq-khype (legitimate) pool passes all filters', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [KHYPE_POOL] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      expect(results.length).toBe(1);
-      expect(results[0].project).toBe('kinetiq-khype');
-      expect(results[0].symbol).toBe('KHYPE');
-      expect(results[0].apy).toBeCloseTo(1.92, 2);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([KHYPE_POOL]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    expect(results.length).toBe(1);
+    expect(results[0].project).toBe('kinetiq-khype');
+    expect(results[0].symbol).toBe('KHYPE');
+    expect(results[0].apy).toBeCloseTo(1.92, 2);
   });
 
   it('outlier=true pool is excluded even without poolMeta="Vault"', async () => {
     const outlierPool = { ...KHYPE_POOL, outlier: true, pool: 'outlier-test' };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [outlierPool] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      expect(results.length).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([outlierPool]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    expect(results.length).toBe(0);
   });
 
   it('apyBase=null pool is excluded (even if not a vault/outlier)', async () => {
     const noBasePool = { ...KHYPE_POOL, apyBase: null, pool: 'no-base-test' };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [noBasePool] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      expect(results.length).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([noBasePool]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    expect(results.length).toBe(0);
   });
 
   it('legitimate lending pool with apyBase>0 passes', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [LENDING_POOL] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: true,
-        noIlRiskOnly: true,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      expect(results.length).toBe(1);
-      expect(results[0].project).toBe('aave-v3');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([LENDING_POOL]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: true,
+      noIlRiskOnly: true,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    expect(results.length).toBe(1);
+    expect(results[0].project).toBe('aave-v3');
   });
 
   it('reward-token farm with apyBase=null is excluded (documented trade-off)', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [REWARD_FARM_POOL] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      // Excluded because apyBase=null — documented in the scanner source
-      expect(results.length).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([REWARD_FARM_POOL]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    // Excluded because apyBase=null — documented in the scanner source
+    expect(results.length).toBe(0);
   });
 
   it('mixed fixture: growihf excluded, khype and lending pass', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ data: [GROWIHF_POOL, KHYPE_POOL, LENDING_POOL] }),
-    })) as any;
-
-    try {
-      const scanner = new DefiLlamaYieldScanner({
-        minApyPct: 1.0,
-        minTvlUsd: 100_000,
-        stablecoinOnly: false,
-        noIlRiskOnly: false,
-        maxResults: 50,
-      });
-      const results = await scanner.scan();
-      // growihf excluded (vault+outlier+apyBase=null), khype and lending pass
-      expect(results.length).toBe(2);
-      const projects = results.map(r => r.project);
-      expect(projects).toContain('kinetiq-khype');
-      expect(projects).toContain('aave-v3');
-      expect(projects).not.toContain('growihf');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    mockDefiLlamaPools([GROWIHF_POOL, KHYPE_POOL, LENDING_POOL]);
+    const scanner = new DefiLlamaYieldScanner({
+      minApyPct: 1.0,
+      minTvlUsd: 100_000,
+      stablecoinOnly: false,
+      noIlRiskOnly: false,
+      maxResults: 50,
+    });
+    const results = await scanner.scan();
+    // growihf excluded (vault+outlier+apyBase=null), khype and lending pass
+    expect(results.length).toBe(2);
+    const projects = results.map(r => r.project);
+    expect(projects).toContain('kinetiq-khype');
+    expect(projects).toContain('aave-v3');
+    expect(projects).not.toContain('growihf');
   });
 });

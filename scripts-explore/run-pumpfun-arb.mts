@@ -2,24 +2,16 @@
 // Uses a watchlist of popular memecoins + queries PumpApi for prices
 // Alerts when cross-AMM spread > 0.8% (after 0.5% fees = 0.3% net profit)
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { PumpApiClient } from '../edge-engine/packages/pumpapi-client/src/index.ts';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..');
 
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 // Popular memecoin mints on Solana (verified)
 const WATCHLIST = [
@@ -80,6 +72,7 @@ async function main() {
   console.log('  This is a 1-week build.');
   console.log('');
   console.log('ALTERNATIVE: Use PumpApi atomicTwoLegArb() directly');
+  // NOT-A-SINK: instructional console.log text — no atomicTwoLegArb call expression exists in this file.
   console.log('  - Provide buyMint + sellMint');
   console.log('  - PumpApi finds best execution across all AMMs');
   console.log('  - Atomic execution = no inventory risk');

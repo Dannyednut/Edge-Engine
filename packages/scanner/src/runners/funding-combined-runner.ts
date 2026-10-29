@@ -13,11 +13,15 @@
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
 import { loadConfig } from '@edge/config';
 import { TelegramAlerter } from '@edge/alerts';
 import { PnlDb } from '@edge/pnl';
-import { RiskGuard } from '@edge/risk';
+import {
+  RiskGuard,
+  assertExecutionAuthorized,
+  loadDotEnvIntoProcessEnv,
+  type ExecutionScope,
+} from '@edge/risk';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient } from '@edge/vooi-client';
 import { PerpFundingStrategy, type PerpFundingAlert } from '../strategies/perp-funding.js';
@@ -28,23 +32,36 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..', '..');
 
-// Load .env
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch { /* .env not present */ }
+/** Entrypoint scope for this script (defense-in-depth layer). */
+export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:funding-combined-runner';
 
-const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
-const MIN_APR_FOR_ALERT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
-const AUTO_EXECUTE = process.env.AUTO_EXECUTE === 'true';
-const DRY_RUN = process.env.DRY_RUN !== 'false';   // default true — safe
-
+// EM-STRAT-012 Phase-0 R1: .env loading moved out of module-import scope into
+// an explicitly-invoked function so importing this module does not mutate
+// process.env. The shared helper (loadDotEnvIntoProcessEnv from @edge/risk)
+// additionally EXCLUDES EDGE_EXECUTION_AUTH — the execution-authorization
+// descriptor must be supplied through the parent-process environment, never
+// persisted in .env. Called from main() only.
 async function main() {
+  // EM-STRAT-012 Phase-0: .env loading is explicitly invoked here (entrypoint
+  // code), not at module import time.
+  loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
+
+  // Env-derived run configuration is read inside main() (not at module scope)
+  // so importing this module has no env-dependent side effects.
+  const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
+  const MIN_APR_FOR_ALERT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
+  const AUTO_EXECUTE = process.env.AUTO_EXECUTE === 'true';
+  const DRY_RUN = process.env.DRY_RUN !== 'false';   // default true — safe
+
+  // EM-STRAT-012 Phase-0: defense-in-depth entrypoint gate at the live
+  // transition. Alert-only scanning (AUTO_EXECUTE=false, DRY_RUN=true) remains
+  // usable without authorization; any configuration that can submit orders
+  // requires the entrypoint scope (the VooiExecutor.executeArb and client
+  // sink scopes are checked additionally at their own layers).
+  if (AUTO_EXECUTE || !DRY_RUN) {
+    assertExecutionAuthorized(ENTRYPOINT_SCOPE);
+  }
+
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / Combined Perp-Funding Scanner');
   console.log('═══════════════════════════════════════════════════');
@@ -137,7 +154,12 @@ async function main() {
       ]);
 
       const filteredPerp = perpAlerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
-      const filteredCexHl = cexHlAlerts.filter(a => a.netSpreadApr >= MIN_APR_FOR_ALERT);
+      // EM-STRAT-005 §2: CEX-HL alerts are non-actionable until venue-native
+      // corroboration is wired (provenance = 'independently-corroborated').
+      // Until then, the actionable flag is always false, so filteredCexHl
+      // is always empty. We keep the filter expression so that future
+      // corroboration work only needs to flip the provenance field.
+      const filteredCexHl = cexHlAlerts.filter(a => a.actionable && (a.netSpreadApr ?? -Infinity) >= MIN_APR_FOR_ALERT);
 
       console.log(`[scan ${scanCount}] perp_funding: ${filteredPerp.length} opps | cex_hl: ${filteredCexHl.length} opps | ${Date.now() - start}ms`);
 
@@ -208,23 +230,30 @@ async function main() {
           }
         } else {
           const a = alert as CexHlFundingAlert;
+          // EM-STRAT-005 §2: only alerts with provenance = 'independently-corroborated'
+          // AND actionable=true reach this branch. Current implementation always
+          // sets provenance = 'third-party-sourced', so this branch is unreachable
+          // until venue-native corroboration is wired. Display raw rates with
+          // 'UNAVAILABLE' fallback when null.
+          const fmtOrNull = (v: number | null, digits = 2) =>
+            v === null ? 'UNAVAILABLE' : v.toFixed(digits);
           await alerter.sendAlert({
             id: `cex_hl_${a.asset}_${a.cexVenue}_${Date.now()}`,
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'cex_hl_funding_arb',
-            title: `[CEX-HL] ${a.asset} ${a.netSpreadApr.toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
+            title: `[CEX-HL] ${a.asset} ${(a.netSpreadApr ?? 0).toFixed(1)}% APR · ${a.cexVenue}↔Hyperliquid`,
             body: [
               `*Long perp* ${a.cexVenue}  →  *Short perp* Hyperliquid`,
-              `Net spread APR: *${a.netSpreadApr.toFixed(2)}%*`,
-              `HL funding: ${a.hlFundingApr.toFixed(2)}% APR`,
-              `CEX funding: ${a.cexFundingApr.toFixed(2)}% APR`,
+              `Net spread APR: *${(a.netSpreadApr ?? 0).toFixed(2)}%* (independently corroborated)`,
+              `HL funding (raw): ${fmtOrNull(a.hlFundingApr)}% APR`,
+              `CEX funding (raw): ${fmtOrNull(a.cexFundingApr)}% APR`,
+              `Sharpe netApr (third-party reference): ${fmtOrNull(a.sharpeNetApr)}%`,
+              `Provenance: ${a.provenance}`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `CEX OI: $${(a.cexOiUsd / 1e6).toFixed(2)}M / HL OI: $${(a.hlOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,
               `VOOI atomic exec: ${a.vooiExecutable ? '✅' : '❌ (need direct ccxt+HL SDK)'}`,
-              '',
-              `_Higher APR than CEX-only spot-perp basis (~0%). HL funding floor = 10.95% APR; CEX funding compressed to ~0%._`,
             ].join('\n'),
             channels: ['telegram'],
           });
@@ -257,7 +286,12 @@ async function main() {
   });
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+// EM-STRAT-012 Phase-0: import.meta.url main guard — importing this module
+// no longer runs main() or starts the scan loop. This is hygiene; the
+// authorization gates above are the containment barrier.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
+}

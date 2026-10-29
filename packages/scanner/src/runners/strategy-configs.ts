@@ -48,9 +48,11 @@
  *     maxSizeUsd param (lst_yield, hlp_yield, tokenized_equity): the
  *     value is parsed but not consumed. See docs/CONFIG_AUDIT.md.
  *
- *   - dex_dex, mev_backrun, cross_dex_arb, precompile_flashloan_arb:
- *     sections exist in TOML but no strategy is instantiated in
- *     all-runner.ts. Not in scope for this sprint.
+ *   - cross_dex_arb is wired to a discovery-only scanner with monitoringOnly
+ *     alerts; it cannot calculate verified net profit or executable routes.
+ *   - dex_dex was a duplicate, unwired placeholder and has been removed.
+ *   - mev_backrun and precompile_flashloan_arb remain intentionally unwired
+ *     placeholders pending a valid data/execution model.
  */
 
 import type { AppConfig } from '@edge/types';
@@ -169,6 +171,12 @@ export interface HlLstConfig {
   minDiscountPct: number;
   maxSizeUsd: number;
   preferredFeeTier: number;
+  /**
+   * Required minimum net discount % AFTER costs (AMM + flashloan fee).
+   * EM-STRAT-004: an alert is only emitted when netProfitPct >= this.
+   * Default 0.30 (0.30%) provides a conservative execution margin.
+   */
+  minNetDiscountPct?: number;
 }
 export interface GoldArbConfig {
   minSpreadPct: number;
@@ -255,6 +263,11 @@ export interface CexDexBridgeConfig {
   minSpreadPct: number;
   coins: string[];
 }
+export interface CrossDexArbConfig {
+  minSpreadPct: number;
+  minReserveUsd: number;
+  maxSizeUsd: number;
+}
 
 export interface StrategyConfigs {
   perpFunding: PerpFundingConfig;
@@ -286,6 +299,7 @@ export interface StrategyConfigs {
   leverageLoop: LeverageLoopConfig;
   whaleSignal: WhaleSignalConfig;
   cexDexBridge: CexDexBridgeConfig;
+  crossDexArb: CrossDexArbConfig;
 }
 
 // ─── The builder ────────────────────────────────────────────────────
@@ -443,6 +457,8 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
         minDiscountPct: num(s, 'min_spread_pct', 0.1),
         maxSizeUsd: num(s, 'max_position_usd', 5000),
         preferredFeeTier: 100,
+        // EM-STRAT-004: required minimum net discount after costs.
+        minNetDiscountPct: num(s, 'min_net_discount_pct', 0.30),
       };
     })(),
 
@@ -456,11 +472,16 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
     })(),
 
     // ── 13. Equity perp cross-venue ───────────────────────────────
+    // EM-STRAT-014-E11-Cluster3-R1: dex_scopes carries the VERIFIED HIP-3
+    // deployer roster (EI on-chain census). Default [] = fail-closed: the
+    // scanner issues NO HL query and reports
+    // 'hip3_scope_roster_unverified' until a verified roster is configured.
     equityPerpCrossVenue: (() => {
       const s = section(cfg, 'equity_perp_cross_venue');
       return {
         minSpreadPct: num(s, 'min_spread_pct', 0.5),
         maxSizeUsd: num(s, 'max_position_usd', 2_000),
+        dexScopes: strArr(s, 'dex_scopes', []),
       };
     })(),
 
@@ -624,6 +645,16 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
       return {
         minSpreadPct: num(s, 'min_spread_pct', 0.05),
         coins: strArr(s, 'coins', ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'AVAX', 'LINK', 'UNI', 'AAVE', 'CRV']),
+      };
+    })(),
+
+    // ── 30. Cross-DEX reference-price divergence (monitoring only) ────
+    crossDexArb: (() => {
+      const s = section(cfg, 'cross_dex_arb');
+      return {
+        minSpreadPct: num(s, 'min_gross_spread_bps', 15) / 100,
+        minReserveUsd: num(s, 'min_reserve_usd', 50_000),
+        maxSizeUsd: num(s, 'max_position_usd', 8_000),
       };
     })(),
   };

@@ -55,11 +55,17 @@ describe('buildStrategyConfigs — empty config (all defaults)', () => {
   const cfg = makeEmptyConfig();
   const sc = buildStrategyConfigs(cfg);
 
-  it('returns all 29 strategy config objects', () => {
+  it('returns all 30 strategy config objects', () => {
     const keys = Object.keys(sc);
-    expect(keys.length).toBe(29);
+    expect(keys.length).toBe(30);
     expect(keys).toContain('perpFunding');
     expect(keys).toContain('cexDexBridge');
+  });
+
+  it('crossDexArb defaults to a 15 bps gross screen and reserve floor', () => {
+    expect(sc.crossDexArb.minSpreadPct).toBe(0.15);
+    expect(sc.crossDexArb.minReserveUsd).toBe(50_000);
+    expect(sc.crossDexArb.maxSizeUsd).toBe(8_000);
   });
 
   it('perpFunding uses fallback minSpreadApr=0.08', () => {
@@ -128,6 +134,15 @@ describe('buildStrategyConfigs — TOML values flow through', () => {
     }));
     expect(sc.perpFunding.longVenues).toEqual(['binance']);
     expect(sc.perpFunding.shortVenues).toEqual(['hyperliquid']);
+  });
+
+  it('cross_dex_arb converts min_gross_spread_bps from bps to percent', () => {
+    const sc = buildStrategyConfigs(makeConfigWith({
+      cross_dex_arb: { min_gross_spread_bps: 25, min_reserve_usd: 75_000, max_position_usd: 6_000 },
+    }));
+    expect(sc.crossDexArb.minSpreadPct).toBe(0.25);
+    expect(sc.crossDexArb.minReserveUsd).toBe(75_000);
+    expect(sc.crossDexArb.maxSizeUsd).toBe(6_000);
   });
 
   it('cex_hl_funding_arb reads max_position_usd into maxNotionalUsd', () => {
@@ -379,9 +394,9 @@ describe('buildStrategyConfigs — malformed input handling', () => {
     expect(sc.perpFunding.longVenues).toContain('pacifica');  // fallback array
   });
 
-  it('empty strategies object produces all 29 configs with defaults', () => {
+  it('empty strategies object produces all 30 configs with defaults', () => {
     const sc = buildStrategyConfigs(makeEmptyConfig());
-    expect(Object.keys(sc).length).toBe(29);
+    expect(Object.keys(sc).length).toBe(30);
     // Spot-check that defaults are sensible
     expect(sc.goldArb.minSpreadPct).toBe(0.3);
     expect(sc.fundingDivergence.extremeFundingThreshold).toBe(50);

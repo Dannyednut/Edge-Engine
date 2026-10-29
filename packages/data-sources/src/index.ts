@@ -34,8 +34,28 @@ export class EvmAdapter {
   readonly chainId: ChainId;
   readonly chain: ViemChain;
   readonly publicClient: PublicClient;
-  readonly walletClient?: WalletClient;
   readonly signerAddress?: string;
+
+  // EM-STRAT-012 Phase-0.5 (work order A): the signer-capable wallet client
+  // is HARD-PRIVATE (`#walletClient`). It was previously a public `readonly`
+  // property, so any caller holding the adapter could invoke
+  // `adapter.walletClient.sendTransaction(...)` directly with no execution
+  // guard. EvmAdapter itself exposes only read-only RPC helpers, so the
+  // raw client must not be obtainable. `signerAddress` stays public — it is
+  // a plain address (public-key derived), not signer-capable material.
+  //
+  // Note: the signing capability in this data-source adapter is currently
+  // VESTIGIAL — no in-repo caller passes `signerPrivateKey` and the class
+  // has no submission methods. The hidden client is therefore unobtainable
+  // AND unused; if an executor-mode adapter is ever needed, it must be a
+  // separately-guarded design (per work order A), not a re-exposure of this
+  // field.
+  #walletClient?: WalletClient;
+
+  /** True if this adapter was constructed with signing capability. */
+  get canSign(): boolean {
+    return this.#walletClient !== undefined;
+  }
 
   constructor(opts: EvmAdapterOptions) {
     this.chainId = opts.chainId;
@@ -54,7 +74,7 @@ export class EvmAdapter {
     if (opts.signerPrivateKey) {
       const account = privateKeyToAccount(opts.signerPrivateKey);
       this.signerAddress = account.address;
-      this.walletClient = createWalletClient({
+      this.#walletClient = createWalletClient({
         account,
         chain: viemChain,
         transport: http(opts.config.rpcHttp),

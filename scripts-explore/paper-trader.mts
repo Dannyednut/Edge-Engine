@@ -18,21 +18,15 @@ import {
   getSummary,
 } from '../packages/scanner/src/lib/paper-trader-accounting.js';
 import { runScan, createV2InitialState } from '../packages/scanner/src/lib/paper-trader-engine.ts';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..', '..', '..');
 
-// Load .env (for PAPER_HLP_APR / PAPER_KHYPE_APR config vars)
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+// Load .env (for PAPER_HLP_APR / PAPER_KHYPE_APR config vars) — via the shared
+// fail-closed dotenv-safety helper (EM-STRAT-014-C loader-census approved form).
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 // ─── V2 state/log paths (configurable for testing) ────────────────────
 const V1_STATE = '/home/z/my-project/download/paper-trading-state.json';

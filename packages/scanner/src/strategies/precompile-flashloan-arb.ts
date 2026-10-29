@@ -30,9 +30,15 @@ import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 const RPC = 'https://rpc.hyperliquid.xyz/evm';
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const PRECOMPILE_PERP_PRICE = '0x0000000000000000000000000000000000000807';
-const HYPERLEND_FLASHLOAN_FEE = 0.0004; // 0.04%
-const HYPERSWAP_V2_FEE = 0.003; // 0.3%
-const HL_PERP_FEE = 0.00035; // 0.035% (taker fee)
+// EM-STRAT-012 Phase-0 (task D): fee constants used only by the removed
+// fabricated-alert calculation. Kept as documentation of the assumed fee
+// schedule for the future real implementation; noUnusedLocals is satisfied
+// via the export below so the values remain inspectable.
+export const QUARANTINED_PROTOTYPE_FEE_ASSUMPTIONS = {
+  hyperlendFlashloanFee: 0.0004, // 0.04%
+  hyperswapV2Fee: 0.003,         // 0.3%
+  hlPerpTakerFee: 0.00035,       // 0.035%
+} as const;
 
 export interface PrecompileArbParams {
   /** Min spread % to alert (default 1% — needs to cover flashloan + AMM + HL fees) */
@@ -78,6 +84,20 @@ export class PrecompileFlashloanArbScanner implements Strategy {
   }
 
   async scan(): Promise<PrecompileArbAlert[]> {
+    // EM-STRAT-012 Phase-0 (task D): QUARANTINED — this unwired prototype
+    // previously pushed a fabricated BTC divergence alert with hardcoded
+    // prices that were not derived from any market data. Alert-integrity
+    // hygiene: the scanner must not emit fabricated opportunities that
+    // could flow into operational alerts. scan() now returns no
+    // opportunities. The prototype is NOT wired in all-runner.ts and
+    // remains unimplemented (CoreWriter interface required before this
+    // concept can be built). Do not re-enable without real HyperSwap
+    // price reads and explicit Instructor authorization.
+    return [];
+  }
+
+  /** Quarantined prototype body (unreachable). Preserved for reference. */
+  async quarantinedPrototypeScan(): Promise<PrecompileArbAlert[]> {
     const alerts: PrecompileArbAlert[] = [];
 
     // 1. Get HL perp meta
@@ -127,23 +147,11 @@ export class PrecompileFlashloanArbScanner implements Strategy {
     // TODO: Build the HyperSwap price reader + compare
     // For now, mark as "needs CoreWriter" since we can't execute HL perp trades from HyperEVM yet
 
-    alerts.push({
-      asset: 'BTC',
-      perpIndex: 0,
-      hlPerpPrice: 82501,
-      hyperswapPrice: 82500, // placeholder
-      spreadPct: 0.001,
-      direction: 'buy_hyperswap_sell_perp',
-      estimatedProfitUsd: 0,
-      flashloanFeeUsd: this.params.maxFlashloanUsd * HYPERLEND_FLASHLOAN_FEE,
-      ammFeeUsd: this.params.maxFlashloanUsd * HYPERSWAP_V2_FEE,
-      hlFeeUsd: this.params.maxFlashloanUsd * HL_PERP_FEE,
-      netProfitUsd: 0,
-      executable: false,
-      blocker: 'CoreWriter at 0x3333 — needs Solidity interface — cannot execute HL perp trades from HyperEVM yet',
-      ts: Date.now(),
-    });
-
+    // EM-STRAT-012 Phase-0 (task D): the fabricated alert that was pushed
+    // here (hardcoded BTC hlPerpPrice / hyperswapPrice literals) has been
+    // REMOVED, not just unreachable — the fake values must not exist in any
+    // code path that could be re-attached to scan(). The reference prototype
+    // logic above (read-only precompile-vs-mark logging) is preserved.
     return alerts;
   }
 }

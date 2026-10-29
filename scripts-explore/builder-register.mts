@@ -15,23 +15,15 @@
 //
 // This allows the builder to charge up to 10 bps on trades routed via their code
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..');
 
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 async function main() {
   console.log('═══════════════════════════════════════════════════');
@@ -52,6 +44,7 @@ async function main() {
   console.log('');
   console.log('  Step 2: Register builder code via HL API');
   console.log('    POST https://api.hyperliquid.xyz/exchange');
+  // NOT-A-SINK: instructional console.log text — this script performs no fetch to /exchange.
   console.log('    Body:');
   console.log('    {');
   console.log('      "chain": "1",');
