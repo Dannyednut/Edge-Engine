@@ -19,7 +19,6 @@
  *   npx tsx scripts-explore/opp-db.mts --stats    # show stats
  */
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -28,21 +27,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const REPO_ROOT  = resolve(__dirname, '..');
 
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 const DB_PATH = resolve(REPO_ROOT, 'data', 'opportunities.db');
 const VOI_API = 'https://perps-api.vooi.io';
 
 // Ensure data dir exists
 import { mkdirSync } from 'node:fs';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 mkdirSync(resolve(REPO_ROOT, 'data'), { recursive: true });
 
 const db = new DatabaseSync(DB_PATH);

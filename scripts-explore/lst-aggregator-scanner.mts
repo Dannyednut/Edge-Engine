@@ -11,21 +11,13 @@
  * Finds LST-LST arbitrage opportunities
  */
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { HYPERSWAP_V3_POOLS, HL_TOKEN_DECIMALS, v3PriceToHuman } from '../packages/scanner/src/lib/hyperliquid-defi.ts';
+import { loadDotEnvIntoProcessEnv } from '../packages/risk/src/dotenv-safety.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-try {
-  const env = readFileSync(resolve(REPO_ROOT, '.env'), 'utf8');
-  for (const line of env.split('\n')) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    if (!process.env[k]) process.env[k] = v.replace(/^["']|["']$/g, '');
-  }
-} catch {}
+loadDotEnvIntoProcessEnv(resolve(REPO_ROOT, '.env'));
 
 const RPC = 'https://rpc.hyperliquid.xyz/evm';
 

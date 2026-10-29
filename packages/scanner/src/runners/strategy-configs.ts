@@ -472,11 +472,16 @@ export function buildStrategyConfigs(cfg: AppConfig): StrategyConfigs {
     })(),
 
     // ── 13. Equity perp cross-venue ───────────────────────────────
+    // EM-STRAT-014-E11-Cluster3-R1: dex_scopes carries the VERIFIED HIP-3
+    // deployer roster (EI on-chain census). Default [] = fail-closed: the
+    // scanner issues NO HL query and reports
+    // 'hip3_scope_roster_unverified' until a verified roster is configured.
     equityPerpCrossVenue: (() => {
       const s = section(cfg, 'equity_perp_cross_venue');
       return {
         minSpreadPct: num(s, 'min_spread_pct', 0.5),
         maxSizeUsd: num(s, 'max_position_usd', 2_000),
+        dexScopes: strArr(s, 'dex_scopes', []),
       };
     })(),
 
