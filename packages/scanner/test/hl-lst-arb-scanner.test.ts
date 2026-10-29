@@ -608,3 +608,98 @@ describe('HlLstArbScanner — EM-STRAT-004 signal-integrity regressions', () => 
     });
   });
 });
+
+// ─── EM-STRAT-014-X3-F1: withdrawalDelay() selector integrity ───────────
+//
+// EI's X3 evidence review (EI_STRAT014_E10_X3_ONCHAIN_READS_2026-10-27
+// §1/§9) verified that the StakingManager implementation's ABI contains
+// withdrawalDelay() with selector 0xa7ab6961 and NO function with the
+// previously coded 0x5e8a8c20. The wrong selector made every eth_call
+// revert; fetchWithdrawalDelay() failed closed (null) and the
+// withdrawal-delay input silently suppressed hl_lst_arb signals.
+//
+// These tests pin (a) the EXACT eth_call request the scanner issues
+// (target address, calldata selector, block tag), (b) the canonical
+// signature→selector relation recomputed INDEPENDENTLY from the production
+// constant via viem's keccak256 (an existing repo dependency — no new
+// dependency added), and (c) the fail-closed behavior on empty/malformed/
+// failed responses.
+
+import { toFunctionSelector, keccak256, stringToBytes } from 'viem';
+
+describe('withdrawalDelay selector integrity (EM-STRAT-014-X3-F1)', () => {
+  const STAKING_MANAGER_CHECKSUMMED = '0x393D0B87Ed38fc779FD9611144aE649BA6082109';
+  const VERIFIED_SELECTOR = '0xa7ab6961'; // from EI's verified-ABI one-off read (604800 at block 49,592,218)
+
+  it('canonical signature withdrawalDelay() hashes to the EI-verified selector 0xa7ab6961 (independent keccak)', () => {
+    // Recompute the selector from the CANONICAL signature — independent of
+    // whatever the production constant says.
+    expect(toFunctionSelector('withdrawalDelay()')).toBe(VERIFIED_SELECTOR);
+    // Full keccak for the record: first 4 bytes = the selector.
+    const full = keccak256(stringToBytes('withdrawalDelay()'));
+    expect(full.slice(0, 10)).toBe(VERIFIED_SELECTOR);
+    // And it is NOT the old (nonexistent-on-ABI) selector.
+    expect(VERIFIED_SELECTOR).not.toBe('0x5e8a8c20');
+  });
+
+  it('fetchWithdrawalDelay issues eth_call to the StakingManager with data 0xa7ab6961 and the latest block tag, decoding 604800', async () => {
+    const calls: Array<{ method: string; params: unknown[] }> = [];
+    const deps: HlLstArbDeps = {
+      rpcCall: async (method, params) => {
+        calls.push({ method, params });
+        // Real eth_call wire format: a LEFT-padded 32-byte word (the
+        // shared makeDeps mock pads right; no existing test asserts the
+        // decoded value, this one does).
+        return { result: '0x' + (604800).toString(16).padStart(64, '0') };
+      },
+      now: () => DEFAULT_NOW,
+    };
+    const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
+    const delay = await scanner.fetchWithdrawalDelay();
+    expect(delay).toBe(604800);
+
+    expect(calls.length).toBe(1);
+    const { method, params } = calls[0]!;
+    expect(method).toBe('eth_call');
+    const [callObj, blockTag] = params as [{ to: string; data: string }, string];
+    expect(callObj.to).toBe(STAKING_MANAGER_CHECKSUMMED);
+    expect(callObj.data).toBe(VERIFIED_SELECTOR); // request capture: exact selector on the wire
+    expect(blockTag).toBe('latest');
+    // The production constant must be the verified one (source-of-truth pin
+    // at the request level; the signature relation is pinned separately).
+    expect(toFunctionSelector('withdrawalDelay()')).toBe(callObj.data);
+  });
+
+  it('fail-closed: empty result (0x) → null', async () => {
+    const deps: HlLstArbDeps = { rpcCall: async () => ({ result: '0x' }), now: () => DEFAULT_NOW };
+    const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
+    expect(await scanner.fetchWithdrawalDelay()).toBeNull();
+  });
+
+  it('fail-closed: missing result key → null', async () => {
+    const deps: HlLstArbDeps = { rpcCall: async () => ({}), now: () => DEFAULT_NOW };
+    const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
+    expect(await scanner.fetchWithdrawalDelay()).toBeNull();
+  });
+
+  it('fail-closed: malformed/short result (reverted selector shape) → null', async () => {
+    // A contract with no withdrawalDelay() function reverts → RPC returns
+    // '0x' or a short blob; both must yield null, never a fabricated delay.
+    for (const bad of ['0x', '0x1234', '0x' + 'ab'.repeat(10)]) {
+      const deps: HlLstArbDeps = { rpcCall: async () => ({ result: bad }), now: () => DEFAULT_NOW };
+      const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
+      expect(await scanner.fetchWithdrawalDelay(), `case ${bad}`).toBeNull();
+    }
+  });
+
+  it('fail-closed: rpcCall throws (network/RPC error) → null, no crash', async () => {
+    const deps: HlLstArbDeps = {
+      rpcCall: async () => {
+        throw new Error('connection refused (mock)');
+      },
+      now: () => DEFAULT_NOW,
+    };
+    const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
+    expect(await scanner.fetchWithdrawalDelay()).toBeNull();
+  });
+});
