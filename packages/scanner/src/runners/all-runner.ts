@@ -30,7 +30,7 @@ import { CexLikeDexPriceArbStrategy, type PriceArbAlert } from '../strategies/ce
 import { HlAmmArbScanner, type HlAmmArbAlert } from '../strategies/hl-amm-arb-scanner.js';
 import { HlLstArbScanner, type HlLstArbAlert } from '../strategies/hl-lst-arb-scanner.js';
 import { GoldArbScanner, type GoldArbAlert } from '../strategies/gold-arb-scanner.js';
-import { EquityPerpCrossVenueScanner, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
+import { EquityPerpCrossVenueScanner, formatEquityPerpDegradation, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
 import { LstYieldComparisonScanner, type LstYieldAlert } from '../strategies/lst-yield-comparison.js';
 import { PtKhypeYieldArbScanner, type PtKhypeAlert } from '../strategies/pt-khype-yield-arb.js';
 import { PtYieldArbScanner, type PtYieldArbAlert } from '../strategies/pt-yield-arb-scanner.js';
@@ -191,6 +191,10 @@ async function main() {
         : [];
       if (shouldScanSports) lastSportsScan = scanCount;
 
+      // EM-STRAT-014-E11-Cluster3-R1: equity-perp degradation (fail-closed
+      // HIP-3 scope state) captured from scanWithDegradation() and logged
+      // below on every scan.
+      let equityPerpDegradation: import('../strategies/equity-perp-cross-venue.js').EquityPerpDegradation | null = null;
       // EM-STRAT-014-E11-Cluster2-R1: funding-divergence degradation captured
       // from scanWithDegradation() and logged below on every scan.
       let fundingDivDegradation: import('../strategies/funding-divergence-scanner.js').FundingDegradation | null = null;
@@ -207,7 +211,12 @@ async function main() {
         hlAmmArb.scan().catch(e => { console.warn(`hl_amm failed: ${e.message}`); return [] as HlAmmArbAlert[]; }),
         hlLstArb.scan().catch(e => { console.warn(`hl_lst failed: ${e.message}`); return [] as HlLstArbAlert[]; }),
         goldArb.scan().catch(e => { console.warn(`gold failed: ${e.message}`); return [] as GoldArbAlert[]; }),
-        equityPerpCrossVenue.scan().catch(e => { console.warn(`equity_xv failed: ${e.message}`); return [] as EquityPerpArbAlert[]; }),
+        // EM-STRAT-014-E11-Cluster3-R1: scanWithDegradation() so the
+        // fail-closed HIP-3 scope state (roster unverified / query failures)
+        // is production-visible, never confusable with "no spread".
+        equityPerpCrossVenue.scanWithDegradation()
+          .then(r => { equityPerpDegradation = r.degradation; return r.alerts; })
+          .catch(e => { console.warn(`equity_xv failed: ${e.message}`); return [] as EquityPerpArbAlert[]; }),
         lstYield.scan().catch(e => { console.warn(`lst_yield failed: ${e.message}`); return [] as LstYieldAlert[]; }),
         ptKhypeArb.scan().catch(e => { console.warn(`pt_khype failed: ${e.message}`); return [] as PtKhypeAlert[]; }),
         ptYieldArb.scan().catch(e => { console.warn(`pt_yield failed: ${e.message}`); return [] as PtYieldArbAlert[]; }),
@@ -236,6 +245,12 @@ async function main() {
 
       const sportsStr = shouldScanSports ? `=${sportsAlerts.length}` : '=skip';
       console.log(`[scan ${scanCount}] perp=${perpAlerts.length} cex_hl=${cexHlAlerts.length} dex_cex=${dexCexAlerts.length} solana=${solanaAlerts.length} pred=${predictionAlerts.length} boros=${borosAlerts.length} equity=${equityAlerts.length} price=${priceArbAlerts.length} hlamm=${hlAmmAlerts.length} hllst=${hlLstAlerts.length} gold=${goldAlerts.length} eqxv=${equityXvAlerts.length} lsty=${lstYieldAlerts.length} ptkh=${ptKhypeAlerts.length} ptya=${ptYieldArbAlerts.length} eulr=${eulerLendingArbAlerts.length} hlsp=${hlSpotBasisAlerts.length} hlp=${hlpYieldAlerts.length} dfly=${defiLlamaAlerts.length} rwa=${rwaAlerts.length} depeg=${depegAlerts.length} liq=${liquidationAlerts.length} ob=${orderbookAlerts.length} fundiv=${fundingDivAlerts.length} airdrop=${airdropAlerts.length} levloop=${leverageAlerts.length} whale=${whaleAlerts.length} bridge=${bridgeAlerts.length} crossdex=${crossDexAlerts.length} sports${sportsStr} | ${Date.now() - start}ms`);
+      // EM-STRAT-014-E11-Cluster3-R1: visible marker — most importantly the
+      // 'hip3_scope_roster_unverified' fail-closed state while no verified
+      // HIP-3 deployer roster is configured.
+      if (equityPerpDegradation) {
+        console.log(formatEquityPerpDegradation(equityPerpDegradation));
+      }
       // EM-STRAT-014-E11-Cluster2-R1: production-visible degradation marker —
       // logged on EVERY scan (even when alerts are empty) so partial API
       // failure / skipped rows are never confusable with "no opportunities".
@@ -534,7 +549,13 @@ async function main() {
         });
       }
 
-      // Process equity perp cross-venue alerts
+      // Process equity_xv alerts — EM-STRAT-014-E11-Cluster3-R1:
+      // MONITORING-ONLY. The spread compares HL mark price vs Backpack last
+      // traded price (priceBasisMismatch: true) — its economic validity has
+      // NOT been reviewed. Alerts stay severity 'info' with an explicit
+      // monitor label until a separate economic-validity review approves
+      // stronger alert semantics. Additionally, no alerts can be produced
+      // at all while the HIP-3 deployer roster is unverified (fail-closed).
       for (const a of equityXvAlerts.slice(0, 2)) {
         const key = `eqxv|${a.asset}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
@@ -542,13 +563,14 @@ async function main() {
         await alerter.sendAlert({
           id: `eqxv_${a.asset}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'equity_perp_cross_venue',
-          title: `[EQXV] ${a.asset} ${a.spreadPct.toFixed(2)}% spread`,
+          title: `[EQXV-MONITOR] ${a.asset} ${a.spreadPct.toFixed(2)}% spread (mark-vs-last — unreviewed)`,
           body: [
-            `Backpack: $${a.backpackPrice.toFixed(2)}  HL: $${a.hlPrice.toFixed(2)}`,
+            `Backpack: $${a.backpackPrice.toFixed(2)} (last)  HL: $${a.hlPrice.toFixed(2)} (mark)`,
             `Direction: ${a.direction}`,
             `Est. profit: $${a.estimatedProfitUsd.toFixed(2)} on $${2000}`,
+            `BASIS MISMATCH: HL mark vs Backpack last — NOT a proven net-profit signal (monitoring only).`,
           ].join('\n'),
           channels: ['telegram'],
         });
