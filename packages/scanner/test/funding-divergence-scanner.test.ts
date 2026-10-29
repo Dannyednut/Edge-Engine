@@ -407,3 +407,114 @@ describe('Cluster2-R1: degradation reaches production observability', () => {
     expect(src).toContain('formatFundingDegradation(fundingDivDegradation)');
   });
 });
+
+// ─── E-12 (Issue #17) — interval-aware annualization + gross/net honesty ──
+
+import { annualizeFundingRate, ASSUMED_FUNDING_INTERVAL_HOURS } from '../src/strategies/funding-divergence-scanner.js';
+
+describe('E-12 — annualizeFundingRate (interval-aware, fail-closed)', () => {
+  it('1h interval: 0.0001/h → 0.876 decimal APR (87.6%/yr)', () => {
+    expect(annualizeFundingRate(0.0001, 1)).toBeCloseTo(0.876, 12);
+  });
+
+  it('8h interval: 0.0008/8h → 0.876 decimal APR (same annual, different interval)', () => {
+    expect(annualizeFundingRate(0.0008, 8)).toBeCloseTo(0.876, 12);
+  });
+
+  it('1h and 8h representations of the SAME economics annualize identically', () => {
+    // 0.01%/h ≡ 0.08%/8h — interval-aware normalization must not confuse them
+    expect(annualizeFundingRate(0.0008, 8)).toBeCloseTo(annualizeFundingRate(0.0001, 1), 12);
+  });
+
+  it('24h interval: 0.01/day → 3.65 decimal APR (365%/yr — daily rate × 365)', () => {
+    expect(annualizeFundingRate(0.01, 24)).toBeCloseTo(3.65, 12);
+  });
+
+  it('negative rates annualize sign-preserving (short-harvest detection depends on it)', () => {
+    expect(annualizeFundingRate(-0.0001, 1)).toBeCloseTo(-0.876, 12);
+  });
+
+  it('fails closed on malformed rates (NaN / Infinity / non-number)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '0.01' as unknown as number, null as unknown as number]) {
+      expect(() => annualizeFundingRate(bad, 1), `rate ${String(bad)}`).toThrow(/ratePerInterval/);
+    }
+  });
+
+  it('fails closed on missing/invalid intervals (0, negative, NaN, Infinity) — never silently annualizes as hourly', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '8' as unknown as number]) {
+      expect(() => annualizeFundingRate(0.0001, bad), `interval ${String(bad)}`).toThrow(/intervalHours/);
+    }
+  });
+
+  it('ASSUMED_FUNDING_INTERVAL_HOURS is the documented 1h basis', () => {
+    expect(ASSUMED_FUNDING_INTERVAL_HOURS).toBe(1);
+  });
+});
+
+describe('E-12 — funding_divergence alerts are gross-indicative, never net', () => {
+  it('DIVERGENCE alert carries dailyGrossIndicativeOn5k = deprecated dailyProfitOn5k = gross value; netEconomics unavailable; 1h-assumed', async () => {
+    // HL PEPE 30%/yr gross, VOOI 1000PEPE 60%/yr gross → divergence 30 pct-points/yr
+    const hl = makeHlResponse([
+      { name: 'PEPE', funding: '0.0034247', openInterest: '0', markPx: '0' },
+    ]);
+    const vooi = {
+      items: [{
+        asset: '1000PEPE',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: 0.0068493 },
+          short: { exchange: 'HL', fundingRate: 0 },
+        }],
+      }],
+    };
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi }),
+      now: () => FIXED_NOW,
+    });
+    const { alerts } = await scanner.scanWithDegradation();
+    const div = alerts.find(a => a.type === 'DIVERGENCE');
+    expect(div).toBeDefined();
+    // Gross daily figure: 5000 × 30/100 / 365 ≈ $4.11 — INDICATIVE ONLY
+    expect(div!.dailyGrossIndicativeOn5k).toBeCloseTo(5000 * div!.divergence / 100 / 365, 10);
+    // The deprecated alias carries the SAME value and nothing more
+    expect(div!.dailyProfitOn5k).toBe(div!.dailyGrossIndicativeOn5k);
+    // Net economics are explicitly UNAVAILABLE (no fee/holding/basis model)
+    expect(div!.netEconomics).toBe('unavailable');
+    expect(div!.fundingIntervalAssumption).toBe('1h-assumed');
+  });
+
+  it('EXTREME_FUNDING alert is equally labeled gross-indicative with net unavailable', async () => {
+    const hl = makeHlResponse([
+      { name: 'BTC', funding: '0.02', openInterest: '100', markPx: '50000' },
+    ]);
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi: { items: [] } }),
+      now: () => FIXED_NOW,
+    });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.dailyGrossIndicativeOn5k).toBeCloseTo(5000 * extreme!.divergence / 100 / 365, 10);
+    expect(extreme!.dailyProfitOn5k).toBe(extreme!.dailyGrossIndicativeOn5k);
+    expect(extreme!.netEconomics).toBe('unavailable');
+    expect(extreme!.fundingIntervalAssumption).toBe('1h-assumed');
+  });
+
+  it('malformed VOOI fundingRate strings are skipped with vooiSkipped degradation (failure behavior)', async () => {
+    const hl = makeHlResponse([]);
+    const vooi = {
+      items: [{
+        asset: 'BTC',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: 'not-a-number' },
+          short: { exchange: 'HL', fundingRate: 0.001 },
+        }],
+      }],
+    };
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi }),
+      now: () => FIXED_NOW,
+    });
+    const { degradation } = await scanner.scanWithDegradation();
+    expect(degradation.vooiSkipped).toBeGreaterThanOrEqual(1);
+  });
+});

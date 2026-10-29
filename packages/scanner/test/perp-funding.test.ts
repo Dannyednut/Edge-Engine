@@ -23,7 +23,10 @@ const FIXED_NOW = 1_700_000_000_000;
 const SERVER_ASOF = 1_699_999_500_000; // server observation time (≠ scan time)
 
 const PARAMS: PerpFundingParams = {
-  minSpreadApr: 8,
+  // E-12: canonical unit is DECIMAL-FRACTION APR — 0.08 = 8%/yr (matches
+  // the production min_spread_apr default). The former test value (8) was
+  // calibrated against the VOOI branch's ×100-inflated pct-points output.
+  minSpreadApr: 0.08,
   longVenues: ['hyperliquid'],
   shortVenues: ['binance'],
   useVooiExecutor: false,
@@ -83,7 +86,7 @@ const SHARPE_ROW: SharpeRowLike = {
   coin: 'BTC',
   longExchange: 'hyperliquid',
   shortExchange: 'binance',
-  netApr: 12,
+  netApr: 0.12, // E-12 decimal-fraction APR = 12%/yr
   longOiUsd: 5_000_000,
   shortOiUsd: 5_000_000,
 };
@@ -249,7 +252,7 @@ describe('EM-STRAT-014-E11-Cluster2-R1 — perp_funding join normalized on BOTH 
   });
 
   it('approved asset alias: Sharpe "1000PEPE" vs VOOI "PEPE" → cross-validation matches; unlisted alias never matches', async () => {
-    const pepeRow: SharpeRowLike = { coin: '1000PEPE', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
+    const pepeRow: SharpeRowLike = { coin: '1000PEPE', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 0.12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
     const pepePair = makeVooiPair({ asset: 'PEPE' } as Partial<VooiArbitragePair>);
     const strat = new PerpFundingStrategy(
       makeSharpeClient([pepeRow], { asOf: SERVER_ASOF }),
@@ -263,7 +266,7 @@ describe('EM-STRAT-014-E11-Cluster2-R1 — perp_funding join normalized on BOTH 
     expect(alerts.find(x => x.source === 'sharpe+vooi' && x.asset === '1000PEPE')).toBeDefined();
 
     // Unlisted alias ('WIFCOIN' vs 'WIF') must NOT join.
-    const wifRow: SharpeRowLike = { coin: 'WIFCOIN', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
+    const wifRow: SharpeRowLike = { coin: 'WIFCOIN', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 0.12, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 };
     const wifPair = makeVooiPair({ asset: 'WIF' } as Partial<VooiArbitragePair>);
     const strat2 = new PerpFundingStrategy(
       makeSharpeClient([wifRow], { asOf: SERVER_ASOF }),
@@ -272,5 +275,203 @@ describe('EM-STRAT-014-E11-Cluster2-R1 — perp_funding join normalized on BOTH 
     );
     const alerts2 = await strat2.scan();
     expect(alerts2.find(x => x.source === 'sharpe+vooi')).toBeUndefined();
+  });
+});
+
+// ─── E-12 (Issue #17) — APR unit + gross/net integrity ─────────────────
+
+describe('E-12 — perp_funding canonical APR unit and gross/net separation', () => {
+  // VOOI hourly spread that annualizes to exactly 8%/yr: 0.08 / (24×365)
+  const SPREAD_FOR_8PCT_APR = 0.08 / (24 * 365); // ≈ 9.1324e-6
+
+  it('netApr present → carried as VERIFIED net (basis sharpe-net), never conflated with gross', async () => {
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([SHARPE_ROW], { asOf: SERVER_ASOF }),
+      makeVooiClient([]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const a = alerts.find(x => x.source === 'sharpe');
+    expect(a).toBeDefined();
+    expect(a!.netApr).toBe(0.12);
+    expect(a!.netAprBasis).toBe('sharpe-net');
+    expect(a!.spreadApr).toBe(0.12);
+    expect(a!.annualizationBasis).toBe('sharpe-row');
+  });
+
+  it('absent netApr but grossApr present → netApr stays NULL (gross is NOT labeled net), row still alerted as indicative', async () => {
+    const row = { ...SHARPE_ROW, netApr: undefined, grossApr: 0.10 };
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([row], { asOf: null }),
+      makeVooiClient([]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const a = alerts.find(x => x.asset === 'BTC');
+    expect(a).toBeDefined();
+    expect(a!.netApr).toBeNull();
+    expect(a!.netAprBasis).toBe('unavailable');
+    expect(a!.spreadApr).toBe(0.10); // gross drives only the indicative pre-filter
+  });
+
+  it('malformed rates fail closed: NaN net/gross → spread 0 → row below threshold → skipped (no NaN propagation)', async () => {
+    for (const bad of [{ netApr: Number.NaN }, { netApr: 'x' as unknown as number }, { netApr: null as unknown as number }, { netApr: Number.POSITIVE_INFINITY }]) {
+      const row = { ...SHARPE_ROW, ...bad, grossApr: undefined };
+      const strat = new PerpFundingStrategy(
+        makeSharpeClient([row], { asOf: null }),
+        makeVooiClient([]),
+        PARAMS,
+      );
+      const alerts = await strat.scan();
+      expect(alerts.find(x => x.asset === 'BTC'), `case ${JSON.stringify(bad)}`).toBeUndefined();
+    }
+  });
+
+  it('malformed netApr with valid grossApr → falls back to GROSS-INDICATIVE labeling (never net)', async () => {
+    const row = { ...SHARPE_ROW, netApr: Number.NaN, grossApr: 0.30 };
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([row], { asOf: null }),
+      makeVooiClient([]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const a = alerts.find(x => x.asset === 'BTC');
+    expect(a).toBeDefined();
+    expect(a!.netApr).toBeNull();
+    expect(a!.netAprBasis).toBe('unavailable');
+    expect(a!.spreadApr).toBe(0.30);
+  });
+
+  it('threshold boundary at 8% APR (decimal 0.08): 0.08 included, 0.0799 excluded', async () => {
+    const atBoundary = new PerpFundingStrategy(
+      makeSharpeClient([{ ...SHARPE_ROW, netApr: 0.08 }], { asOf: null }),
+      makeVooiClient([]),
+      PARAMS,
+    );
+    expect((await atBoundary.scan()).find(x => x.asset === 'BTC')).toBeDefined();
+
+    const belowBoundary = new PerpFundingStrategy(
+      makeSharpeClient([{ ...SHARPE_ROW, netApr: 0.0799 }], { asOf: null }),
+      makeVooiClient([]),
+      PARAMS,
+    );
+    expect((await belowBoundary.scan()).find(x => x.asset === 'BTC')).toBeUndefined();
+  });
+
+  it('VOOI-only rows use the SAME decimal unit: fundingSpread1h annualizes to spreadApr/8760 scale (no ×100)', async () => {
+    // 0.0003/h → 0.0003 × 24 × 365 = 2.628 decimal-fraction APR (262.8%/yr)
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([makeVooiPair()]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const vooiOnly = alerts.find(x => x.source === 'vooi');
+    expect(vooiOnly).toBeDefined();
+    expect(vooiOnly!.spreadApr).toBeCloseTo(0.0003 * 24 * 365, 10);
+    expect(vooiOnly!.spreadApr).toBeLessThan(3); // would be ~262.8 under the old ×100 bug
+    // Leg APRs share the same decimal unit
+    expect(vooiOnly!.longFundingApr).toBeCloseTo(Number('-0.00010') * 24 * 365, 10);
+    expect(vooiOnly!.shortFundingApr).toBeCloseTo(Number('0.00020') * 24 * 365, 10);
+  });
+
+  it('VOOI threshold boundary: spread annualizing to exactly 0.08 included; just below excluded', async () => {
+    const at = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([makeVooiPair({ fundingSpread1h: SPREAD_FOR_8PCT_APR } as Partial<VooiArbitragePair>)]),
+      PARAMS,
+    );
+    expect((await at.scan()).find(x => x.source === 'vooi')).toBeDefined();
+
+    const below = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([makeVooiPair({ fundingSpread1h: SPREAD_FOR_8PCT_APR * 0.999 } as Partial<VooiArbitragePair>)]),
+      PARAMS,
+    );
+    expect((await below.scan()).find(x => x.source === 'vooi')).toBeUndefined();
+  });
+
+  it('equivalent VOOI and Sharpe rates are represented in the SAME units (scale parity)', async () => {
+    // Sharpe row with verified net 2.628 (decimal); VOOI spread 0.0003/h →
+    // identical annualized decimal value — they must be directly comparable.
+    const targetApr = 0.0003 * 24 * 365;
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([
+        { coin: 'ETH', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: targetApr, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 },
+      ], { asOf: null }),
+      makeVooiClient([makeVooiPair()]), // BTC VOOI-only row (ETH in Sharpe set)
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const sharpeRow = alerts.find(x => x.asset === 'ETH');
+    const vooiRow = alerts.find(x => x.source === 'vooi');
+    expect(sharpeRow).toBeDefined();
+    expect(vooiRow).toBeDefined();
+    expect(sharpeRow!.spreadApr).toBeCloseTo(vooiRow!.spreadApr, 10);
+  });
+
+  it('VOOI-only rows are GROSS-INDICATIVE: netApr null, basis unavailable, annualization 1h-assumed', async () => {
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([makeVooiPair()]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const vooiOnly = alerts.find(x => x.source === 'vooi');
+    expect(vooiOnly).toBeDefined();
+    expect(vooiOnly!.netApr).toBeNull();
+    expect(vooiOnly!.netAprBasis).toBe('unavailable');
+    expect(vooiOnly!.annualizationBasis).toBe('1h-assumed');
+  });
+
+  it('sorting: a net-VERIFIED row sorts before a gross-only row even when the gross spread is larger', async () => {
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([
+        { coin: 'AAA', longExchange: 'hyperliquid', shortExchange: 'binance', netApr: 0.10, longOiUsd: 5_000_000, shortOiUsd: 5_000_000 },
+      ], { asOf: null }),
+      makeVooiClient([makeVooiPair()]), // gross-only VOOI row: spreadApr ≈ 2.628 ≫ 0.10
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts.length).toBeGreaterThanOrEqual(2);
+    // Net-verified AAA (0.10 net) must rank BEFORE the gross-only VOOI row
+    // (2.628 indicative) — net economics drive the ordering, gross never does.
+    expect(alerts[0].asset).toBe('AAA');
+    expect(alerts[0].netAprBasis).toBe('sharpe-net');
+    expect(alerts[1].netAprBasis).toBe('unavailable');
+  });
+
+  it('output never advertises gross as net: basis and netApr are consistent on every alert', async () => {
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([
+        SHARPE_ROW,
+        { ...SHARPE_ROW, coin: 'GG', netApr: undefined, grossApr: 0.44 },
+      ], { asOf: SERVER_ASOF }),
+      makeVooiClient([makeVooiPair()]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts.length).toBeGreaterThanOrEqual(2);
+    for (const a of alerts) {
+      if (a.netAprBasis === 'sharpe-net') {
+        expect(typeof a.netApr).toBe('number');
+      } else {
+        expect(a.netApr).toBeNull();
+      }
+      if (a.source === 'vooi') {
+        expect(a.netApr).toBeNull(); // VOOI has no fee model — never net
+      }
+    }
+  });
+
+  it('malformed VOOI funding fields are skipped fail-closed (no NaN in output)', async () => {
+    const badPair = makeVooiPair({ fundingSpread1h: Number.NaN } as Partial<VooiArbitragePair>);
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([badPair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts).toEqual([]);
   });
 });

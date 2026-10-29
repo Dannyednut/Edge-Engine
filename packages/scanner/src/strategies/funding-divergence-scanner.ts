@@ -45,6 +45,52 @@ const VOI_API = 'https://perps-api.vooi.io';
  */
 const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
+// ─── E-12 (Issue #17): funding interval + gross/net integrity ──────────
+//
+// Annualization interval: the raw provider rates are PER-INTERVAL rates.
+// Hyperliquid's `funding` is an HOURLY rate (Hyperliquid API docs);
+// VOOI's `fundingRate` is HOURLY by VOOI's own derivation rule — the
+// vooi-client schema documents `fundingRate8h = Number(fundingRate) × 3`
+// (8h = 3 × 1h). NEITHER API publishes the underlying VENUE-SPECIFIC
+// funding interval, so every annualization below rests on an EXPLICIT
+// '1h-assumed' basis, recorded on every alert. If a future payload ever
+// carries a per-row interval, it must flow through annualizeFundingRate()
+// instead of the fixed-basis path.
+//
+// Gross vs net: divergence math is a RAW rate difference. No fees, no
+// holding/persistence, no basis assumptions are modeled here — net
+// economics are UNAVAILABLE and every alert says so explicitly. The old
+// `dailyProfitOn5k` was a GROSS annualized divergence converted to a
+// daily dollar figure, not realized/net profit; it is retained only as a
+// @deprecated gross-documented alias of `dailyGrossIndicativeOn5k`.
+
+/** The annualization-interval assumption used by this scanner (hours). */
+export const ASSUMED_FUNDING_INTERVAL_HOURS = 1;
+
+/**
+ * Annualize a per-interval funding rate into a decimal-fraction APR
+ * (1.0 = 100%/yr), pure and fail-closed.
+ *
+ *   apr = rate_per_interval × (24 / interval_hours) × 365
+ *
+ * Examples (fixtures in funding-divergence-scanner.test.ts):
+ *   annualizeFundingRate(0.0001, 1)  → 0.876   (0.01%/h ≈ 87.6%/yr)
+ *   annualizeFundingRate(0.0008, 8)  → 0.876   (0.08%/8h ≈ same annual)
+ *   annualizeFundingRate(0.01, 24)   → 0.152   (1%/day ≈ 15.2%/yr)
+ *
+ * Throws on a non-finite rate or a non-finite/≤0 interval — a missing or
+ * malformed interval must FAIL, never silently annualize as if hourly.
+ */
+export function annualizeFundingRate(ratePerInterval: number, intervalHours: number): number {
+  if (typeof ratePerInterval !== 'number' || !Number.isFinite(ratePerInterval)) {
+    throw new Error(`annualizeFundingRate: ratePerInterval must be a finite number, got ${String(ratePerInterval)}`);
+  }
+  if (typeof intervalHours !== 'number' || !Number.isFinite(intervalHours) || intervalHours <= 0) {
+    throw new Error(`annualizeFundingRate: intervalHours must be a finite positive number of hours, got ${String(intervalHours)}`);
+  }
+  return ratePerInterval * (24 / intervalHours) * 365;
+}
+
 export interface FundingDivergenceParams {
   /** Min divergence (spread) to alert (default 20%/yr) */
   minDivergencePct: number;
@@ -58,10 +104,30 @@ export interface FundingDivergenceAlert {
   asset: string;
   longVenue: string;
   shortVenue: string;
+  /** Gross annualized funding, %/yr (pct-points), 1h-assumed basis — indicative only. */
   longFunding: number;
+  /** Gross annualized funding, %/yr (pct-points), 1h-assumed basis — indicative only. */
   shortFunding: number;
+  /** Gross annualized divergence between the two legs, %/yr (pct-points) — indicative only. */
   divergence: number;
+  /**
+   * E-12: GROSS-INDICATIVE daily dollar figure on $5k notional —
+   * `5000 × divergence%/yr / 100 / 365`. It is the raw annualized
+   * divergence amortized linearly to one day; it is NOT realized/net
+   * profit: no fees, no holding-period persistence, no basis modeling.
+   */
+  dailyGrossIndicativeOn5k: number;
+  /**
+   * @deprecated GROSS-INDICATIVE ONLY — identical value to
+   * `dailyGrossIndicativeOn5k`. Retained solely as a compatibility alias
+   * for existing consumers; never interpret it as realized or net profit.
+   */
+  /** @deprecated Use dailyGrossIndicativeOn5k (gross-indicative, same value). */
   dailyProfitOn5k: number;
+  /** E-12: net economics are UNAVAILABLE for this scanner (no fee/holding/basis model). */
+  netEconomics: 'unavailable';
+  /** E-12: the annualization rests on an explicit 1h-interval assumption. */
+  fundingIntervalAssumption: '1h-assumed';
   type: 'DIVERGENCE' | 'EXTREME_FUNDING';
   direction: 'SHORT_HARVEST' | 'LONG_HARVEST' | 'DIVERGENCE';
   /** EM-STRAT-014-E11 item 5: null when OI is missing/unverifiable. */
@@ -293,6 +359,10 @@ export class FundingDivergenceScanner implements Strategy {
 
       const divergence = highest.fundingAnnual - lowest.fundingAnnual;
       if (divergence >= this.params.minDivergencePct) {
+        // E-12: gross-indicative daily figure — divergence is a raw rate
+        // difference (pct-points/yr, 1h-assumed annualization). This is
+        // NOT realized/net profit; netEconomics is explicitly 'unavailable'.
+        const dailyGross = 5000 * divergence / 100 / 365;
         alerts.push({
           asset,
           longVenue: lowest.venue,
@@ -300,7 +370,10 @@ export class FundingDivergenceScanner implements Strategy {
           longFunding: lowest.fundingAnnual,
           shortFunding: highest.fundingAnnual,
           divergence,
-          dailyProfitOn5k: 5000 * divergence / 100 / 365,
+          dailyGrossIndicativeOn5k: dailyGross,
+          dailyProfitOn5k: dailyGross, // @deprecated gross alias — same value, documented
+          netEconomics: 'unavailable',
+          fundingIntervalAssumption: '1h-assumed',
           type: 'DIVERGENCE',
           direction: 'DIVERGENCE',
           oi: highest.oi, // may be null
@@ -318,6 +391,8 @@ export class FundingDivergenceScanner implements Strategy {
           // Item 5: null OI excluded from EXTREME_FUNDING
           if (v.oi === null) continue;
           if (v.oi < this.params.minExtremeOiUsd) continue;
+          // E-12: gross-indicative daily figure (see DIVERGENCE note above).
+          const dailyGross = 5000 * Math.abs(v.fundingAnnual) / 100 / 365;
           alerts.push({
             asset,
             longVenue: v.fundingAnnual < 0 ? v.venue : '',
@@ -325,7 +400,10 @@ export class FundingDivergenceScanner implements Strategy {
             longFunding: v.fundingAnnual < 0 ? v.fundingAnnual : 0,
             shortFunding: v.fundingAnnual > 0 ? v.fundingAnnual : 0,
             divergence: Math.abs(v.fundingAnnual),
-            dailyProfitOn5k: 5000 * Math.abs(v.fundingAnnual) / 100 / 365,
+            dailyGrossIndicativeOn5k: dailyGross,
+            dailyProfitOn5k: dailyGross, // @deprecated gross alias — same value, documented
+            netEconomics: 'unavailable',
+            fundingIntervalAssumption: '1h-assumed',
             type: 'EXTREME_FUNDING',
             direction: v.fundingAnnual > 0 ? 'SHORT_HARVEST' : 'LONG_HARVEST',
             oi: v.oi,
