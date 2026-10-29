@@ -597,21 +597,36 @@ async function main() {
         });
       }
 
-      // Process PT-kHYPE yield arb alerts
+      // ─── EM-STRAT-014-B2: PT-kHYPE alerts are RESEARCH-ONLY. ───────────
+      // ptKhypeAlerts carry `researchOnly: true` (see pt-khype-yield-arb.ts).
+      // The scanner fails closed: no validated PT price source is wired, so
+      // `ptKhypeAlerts` is empty in production and this loop never executes.
+      // Defense-in-depth: even if a future edit injects a price source and
+      // alerts flow through, they MUST be dispatched with severity 'info'
+      // (NOT 'opportunity') and a [PTKH-RESEARCH] prefix. A research-only
+      // alert must never be presented as an actionable economic opportunity.
+      // Regression: strategy-labeling.test.ts asserts this presenter block
+      // does not assign severity 'opportunity' to pt_khype alerts.
       for (const a of ptKhypeAlerts.slice(0, 2)) {
+        // Hard guard: only research-only alerts may pass. If a future edit
+        // emits researchOnly: false without re-validating the price source
+        // and updating this contract, suppress rather than risk an actionable
+        // presentation of an unverified signal.
+        if (a.researchOnly !== true) continue;
         const key = `ptkh|${a.ptToken}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
         await alerter.sendAlert({
           id: `ptkh_${a.ptToken}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info',
           strategyId: 'pt_khype_yield_arb',
-          title: `[PTKH] ${a.ptToken} ${a.impliedFixedYieldApr.toFixed(2)}% APR (spread ${a.yieldSpreadApr.toFixed(2)}%)`,
+          title: `[PTKH-RESEARCH] ${a.ptToken} ${a.impliedFixedYieldApr.toFixed(2)}% APR (spread ${a.yieldSpreadApr.toFixed(2)}%)`,
           body: [
+            `RESEARCH-ONLY — not an actionable opportunity. PT price source not validated for operational dispatch.`,
             `PT: ${a.ptToken}  Maturity: ${a.maturity} (${a.daysToMaturity.toFixed(0)}d)`,
-            `Implied fixed: ${a.impliedFixedYieldApr.toFixed(2)}%  kHYPE floating: ${a.khypeFloatingYieldApr.toFixed(2)}%`,
-            `Direction: ${a.direction}  Est. profit: $${a.estimatedProfitUsd.toFixed(2)}`,
+            `PT price (kHYPE): ${a.ptPrice.toFixed(4)}  Implied fixed: ${a.impliedFixedYieldApr.toFixed(2)}%  kHYPE floating: ${a.khypeFloatingYieldApr.toFixed(2)}%`,
+            `Direction: ${a.direction}  Est. profit: $${a.estimatedProfitUsd.toFixed(2)} (illustrative, not executable)`,
             `Supply: ${a.ptTotalSupply.toFixed(0)} PT`,
           ].join('\n'),
           channels: ['telegram'],
@@ -873,7 +888,7 @@ async function main() {
         if (ts < cutoff) seenOpps.delete(k);
       }
 
-      // ─── EM-STRAT-004 / EM-STRAT-005: Non-actionable strategy enforcement ─
+      // ─── EM-STRAT-004 / EM-STRAT-005 / EM-STRAT-014-B2: Non-actionable strategy enforcement ─
       // airdropAlerts and leverageAlerts carry `researchOnly: true` — they
       // are based on static campaign/rate tables, NOT live market data.
       // eulerLendingArbAlerts carry `monitoringOnly: true` — supply APY
@@ -881,6 +896,9 @@ async function main() {
       // priceArbAlerts (CexLikeDex) carry `monitoringOnly: true` (EM-STRAT-005 §1)
       // — the convergence-economics model is incomplete; no verified profit
       // estimate is produced.
+      // ptKhypeAlerts carry `researchOnly: true` (EM-STRAT-014-B2) — no
+      // validated PT price source is wired and all discovered instruments are
+      // expired; the scanner fails closed. Any emitted alert is research-only.
       //
       // Policy: NONE of these alerts may be sent through `alerter.sendAlert()`
       // with `severity: 'opportunity'` (or 'critical'). They are dispatched
@@ -892,12 +910,14 @@ async function main() {
       //   2. leverageAlerts[i].researchOnly === true
       //   3. eulerLendingArbAlerts[i].monitoringOnly === true
       //   4. priceArbAlerts[i].monitoringOnly === true (EM-STRAT-005 §1)
-      //   5. This file does not call alerter.sendAlert() with severity
-      //      'opportunity' for any of those four alert types.
+      //   5. ptKhypeAlerts[i].researchOnly === true (EM-STRAT-014-B2)
+      //   6. This file does not call alerter.sendAlert() with severity
+      //      'opportunity' for any of those five alert types.
       void airdropAlerts;       // observed but never alerted as opportunity
       void leverageAlerts;      // observed but never alerted as opportunity
       void eulerLendingArbAlerts; // monitoring-only: handled above with 'info' severity
       // priceArbAlerts are dispatched above with 'info' severity (monitoring-only)
+      // ptKhypeAlerts are dispatched above with 'info' severity (research-only, EM-STRAT-014-B2)
     } catch (err) {
       console.error(`[scan ${scanCount}] failed:`, err);
     }
