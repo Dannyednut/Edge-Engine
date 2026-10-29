@@ -72,6 +72,11 @@ export interface BorosArbAlert {
   annualizedReturnPct: number; // spread / maxSizeUsd × 365 / daysToMaturity
 }
 
+/** Injectable dependencies for deterministic offline testing. */
+export interface PendleBorosDeps {
+  fetchImpl?: typeof fetch;
+}
+
 export class PendleBorosScanner implements Strategy {
   readonly id = 'pendle_boros';
   readonly landscape = 'F_perps_funding' as const;
@@ -80,7 +85,7 @@ export class PendleBorosScanner implements Strategy {
   private spreadHistory = new Map<number, number[]>();
   private static readonly HISTORY_SIZE = 5;
 
-  constructor(private params: PendleBorosParams) {}
+  constructor(private params: PendleBorosParams, private deps: PendleBorosDeps = {}) {}
 
   subscribesTo(): string[] { return []; }
   evaluate(_data: DataPoint): TradeOrder[] | null { return null; }
@@ -158,11 +163,12 @@ export class PendleBorosScanner implements Strategy {
     const markets: BorosMarket[] = [];
     let skip = 0;
     const limit = 50;
+    const fetchFn = this.deps.fetchImpl ?? fetch;
 
     // Paginate through all markets
     for (let page = 0; page < 5; page++) {  // max 5 pages = 250 markets
       const url = `${BOROS_API}/markets?limit=${limit}&skip=${skip}`;
-      const res = await fetch(url);
+      const res = await fetchFn(url);
       if (!res.ok) {
         console.warn(`[pendle_boros] API ${res.status}: ${await res.text().catch(() => '')}`);
         break;
@@ -185,6 +191,21 @@ export class PendleBorosScanner implements Strategy {
   }
 
   private parseMarket(m: any): BorosMarket {
+    // EM-STRAT-014-E11 item 2: reject absent / null / non-numeric /
+    // non-finite / non-positive markApr. Do NOT default to 0 — a fabricated
+    // zero APR manufactures a false spread and a false direction. The caller
+    // (fetchMarkets) catches the throw and skips the market.
+    const rawMarkApr = m.data?.markApr;
+    if (typeof rawMarkApr !== 'number' || !isFinite(rawMarkApr) || rawMarkApr <= 0) {
+      throw new Error(`pendle_boros: market ${m.marketId} has invalid markApr (${JSON.stringify(rawMarkApr)}) — rejected`);
+    }
+    // EM-STRAT-014-E11 item 2: floatingApr is required for the spread
+    // calculation (spread = floatingApr - markApr). Reject if invalid rather
+    // than defaulting to 0 (which would fabricate a false spread direction).
+    const rawFloatingApr = m.data?.floatingApr;
+    if (typeof rawFloatingApr !== 'number' || !isFinite(rawFloatingApr)) {
+      throw new Error(`pendle_boros: market ${m.marketId} has invalid floatingApr (${JSON.stringify(rawFloatingApr)}) — rejected`);
+    }
     return {
       marketId: m.marketId,
       address: m.address,
@@ -193,10 +214,13 @@ export class PendleBorosScanner implements Strategy {
       platform: m.platform?.name || 'unknown',
       underlying: m.metadata?.underlyingSymbol || '',
       maturity: (m.imData?.maturity || 0) * 1000,  // sec → ms
-      markApr: m.data?.markApr || 0,
-      floatingApr: m.data?.floatingApr || 0,
-      lastTradedApr: m.data?.lastTradedApr || 0,
-      midApr: m.data?.midApr || 0,
+      markApr: rawMarkApr,
+      floatingApr: rawFloatingApr,
+      // EM-STRAT-014-E11 item 2: informational APR fields default to 0 only
+      // when absent (they are NOT used in the spread/profit calculation).
+      // Non-finite values are also coerced to 0 for display purposes.
+      lastTradedApr: typeof m.data?.lastTradedApr === 'number' && isFinite(m.data.lastTradedApr) ? m.data.lastTradedApr : 0,
+      midApr: typeof m.data?.midApr === 'number' && isFinite(m.data.midApr) ? m.data.midApr : 0,
       bestBid: m.data?.bestBid,
       bestAsk: m.data?.bestAsk,
       volume24h: m.data?.volume24h || 0,

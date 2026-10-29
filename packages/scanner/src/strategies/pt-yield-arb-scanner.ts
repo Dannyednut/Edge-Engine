@@ -59,14 +59,22 @@ export interface PtYieldArbAlert {
   ts: number;
 }
 
+/** Injectable dependencies for deterministic offline testing. */
+export interface PtYieldArbDeps {
+  /** Injectable PendleClient (for tests with a mock fetchImpl). */
+  pendle?: PendleClient;
+  /** Injectable fetchImpl used when no pendle client is provided. */
+  fetchImpl?: typeof fetch;
+}
+
 export class PtYieldArbScanner implements Strategy {
   readonly id = 'pt_yield_arb';
   readonly landscape = 'F_perps_funding' as const;
 
   private pendle: PendleClient;
 
-  constructor(private params: PtYieldArbParams) {
-    this.pendle = new PendleClient();
+  constructor(private params: PtYieldArbParams, deps: PtYieldArbDeps = {}) {
+    this.pendle = deps.pendle ?? new PendleClient({ fetchImpl: deps.fetchImpl });
   }
 
   subscribesTo(): string[] { return []; }
@@ -91,7 +99,17 @@ export class PtYieldArbScanner implements Strategy {
       const tvl = m.details.totalTvl;
       if (tvl < this.params.minTvlUsd) continue;
 
-      const underlying = m.details.underlyingApy * 100;
+      // EM-STRAT-014-E11 item 3: reject missing / non-finite / non-positive
+      // underlyingApy. The previous implementation used
+      // `m.details.underlyingApy * 100` with no validation — a stale -1
+      // sentinel, null, undefined, or NaN would produce a fabricated spread
+      // and a fabricated direction. Do NOT default to 0.
+      const rawUnderlyingApy = m.details.underlyingApy;
+      if (typeof rawUnderlyingApy !== 'number' || !isFinite(rawUnderlyingApy) || rawUnderlyingApy <= 0) {
+        continue; // reject — do not invent a spread from invalid underlying yield
+      }
+      const underlying = rawUnderlyingApy * 100;
+
       // Filter out suspicious: -1 (stale) and >100%
       if (m.details.impliedApy <= 0 || m.details.impliedApy > this.params.maxImpliedApyPct / 100) continue;
       const implied = m.details.impliedApy * 100;
@@ -103,8 +121,14 @@ export class PtYieldArbScanner implements Strategy {
       if (yieldSpread < this.params.minYieldSpreadPct) continue;
       if (vsKhypeSpread < this.params.minYieldSpreadPct) continue;
 
-      // Compute days to maturity
-      const maturityDate = m.expiry ? new Date(m.expiry).getTime() : Date.now() + 90 * 86400000;
+      // EM-STRAT-014-E11 item 3: do NOT invent payload age. The previous
+      // implementation fell back to `Date.now() + 90 * 86400000` when
+      // `m.expiry` was missing — fabricating a 90-day maturity that could
+      // manufacture a false annualized-return figure. If the market has no
+      // expiry, skip it (honest fail-closed).
+      if (!m.expiry) continue;
+      const maturityDate = new Date(m.expiry).getTime();
+      if (!isFinite(maturityDate)) continue; // malformed expiry string
       const daysToMaturity = (maturityDate - Date.now()) / (24 * 60 * 60 * 1000);
       // Skip expired markets (daysToMaturity <= 0)
       if (daysToMaturity <= 0) continue;

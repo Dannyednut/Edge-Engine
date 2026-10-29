@@ -43,7 +43,7 @@ import { RwaTreasuryScanner, type RwaYieldAlert } from '../strategies/rwa-treasu
 import { StablecoinDepegScanner, type DepegAlert } from '../strategies/stablecoin-depeg-scanner.js';
 import { LiquidationBackrunScanner, type LiquidationAlert } from '../strategies/liquidation-backrun-scanner.js';
 import { OrderbookImbalanceScanner, type OrderbookAlert } from '../strategies/orderbook-imbalance-scanner.js';
-import { FundingDivergenceScanner, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
+import { FundingDivergenceScanner, formatFundingDegradation, type FundingDivergenceAlert } from '../strategies/funding-divergence-scanner.js';
 import { AirdropFarmingScanner, type AirdropAlert } from '../strategies/airdrop-farming-scanner.js';
 import { LeverageLoopScanner, type LeverageLoopAlert } from '../strategies/leverage-loop-scanner.js';
 import { WhaleSignalScanner, type WhaleSignalAlert } from '../strategies/whale-signal-scanner.js';
@@ -195,6 +195,9 @@ async function main() {
       // HIP-3 scope state) captured from scanWithDegradation() and logged
       // below on every scan.
       let equityPerpDegradation: import('../strategies/equity-perp-cross-venue.js').EquityPerpDegradation | null = null;
+      // EM-STRAT-014-E11-Cluster2-R1: funding-divergence degradation captured
+      // from scanWithDegradation() and logged below on every scan.
+      let fundingDivDegradation: import('../strategies/funding-divergence-scanner.js').FundingDegradation | null = null;
 
       const [perpAlerts, cexHlAlerts, dexCexAlerts, solanaAlerts, predictionAlerts, borosAlerts, equityAlerts, priceArbAlerts, hlAmmAlerts, hlLstAlerts, goldAlerts, equityXvAlerts, lstYieldAlerts, ptKhypeAlerts, ptYieldArbAlerts, eulerLendingArbAlerts, hlSpotBasisAlerts, hlpYieldAlerts, defiLlamaAlerts, rwaAlerts, depegAlerts, liquidationAlerts, orderbookAlerts, fundingDivAlerts, airdropAlerts, leverageAlerts, whaleAlerts, bridgeAlerts, crossDexAlerts] = await Promise.all([
         perpFunding.scan().catch(e => { console.warn(`perp_funding failed: ${e.message}`); return [] as PerpFundingAlert[]; }),
@@ -225,7 +228,14 @@ async function main() {
         stablecoinDepeg.scan().catch(e => { console.warn(`depeg failed: ${e.message}`); return [] as DepegAlert[]; }),
         liquidationBackrun.scan().catch(e => { console.warn(`liq failed: ${e.message}`); return [] as LiquidationAlert[]; }),
         orderbookImbalance.scan().catch(e => { console.warn(`orderbook failed: ${e.message}`); return [] as OrderbookAlert[]; }),
-        fundingDivergence.scan().catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
+        // EM-STRAT-014-E11-Cluster2-R1: the runner uses scanWithDegradation()
+        // (not the Strategy-interface scan(), which discards degradation) and
+        // logs the summary below on EVERY scan — including empty results — so
+        // partial API failure / skipped rows are production-visible and never
+        // confusable with "no opportunities".
+        fundingDivergence.scanWithDegradation()
+          .then(r => { fundingDivDegradation = r.degradation; return r.alerts; })
+          .catch(e => { console.warn(`fund_div failed: ${e.message}`); return [] as FundingDivergenceAlert[]; }),
         airdropFarming.scan().catch(e => { console.warn(`airdrop failed: ${e.message}`); return [] as AirdropAlert[]; }),
         leverageLoop.scan().catch(e => { console.warn(`lev_loop failed: ${e.message}`); return [] as LeverageLoopAlert[]; }),
         whaleSignal.scan().catch(e => { console.warn(`whale failed: ${e.message}`); return [] as WhaleSignalAlert[]; }),
@@ -240,6 +250,12 @@ async function main() {
       // HIP-3 deployer roster is configured.
       if (equityPerpDegradation) {
         console.log(formatEquityPerpDegradation(equityPerpDegradation));
+      }
+      // EM-STRAT-014-E11-Cluster2-R1: production-visible degradation marker —
+      // logged on EVERY scan (even when alerts are empty) so partial API
+      // failure / skipped rows are never confusable with "no opportunities".
+      if (fundingDivDegradation) {
+        console.log(formatFundingDegradation(fundingDivDegradation));
       }
 
       // Process perp alerts
@@ -259,6 +275,10 @@ async function main() {
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
             `Source: ${a.source} | VOOI: ${a.vooiExecutable ? 'YES' : 'NO'}`,
+            // EM-STRAT-014-E11-Cluster1-R1: Sharpe-source freshness must be
+            // explicit. 'unknown' means the server provided no asOf — the
+            // data is UNVERIFIED, not fresh. Never inferred from scan time.
+            `Sharpe freshness: ${a.freshness === 'server-asof' ? `server asOf ${new Date(a.sharpeAsOf as number).toISOString()}` : 'UNKNOWN (server provided no asOf — unverified)'}`,
           ].join('\n'),
           channels: ['telegram'],
         });
