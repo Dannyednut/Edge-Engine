@@ -274,8 +274,10 @@ export class PerpFundingStrategy implements Strategy {
         longFundingApr: 0,    // not directly from Sharpe row
         shortFundingApr: 0,
         spreadApr,
-        // E-12: netApr is ONLY the Sharpe netApr field (verified, fee-adjusted,
-        // decimal fraction). When it is absent the row is gross/indicative —
+        // E-12: netApr is ONLY the Sharpe netApr field (provider-sourced,
+        // fee-adjusted, decimal fraction; a provider claim — NOT
+        // independently verified, never the NET-VERIFIED classification).
+        // When it is absent the row is gross/indicative —
         // netApr stays null and the basis says so. Gross is never labeled net.
         netApr,
         netAprBasis: netApr === null ? 'unavailable' : 'sharpe-net',

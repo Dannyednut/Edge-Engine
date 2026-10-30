@@ -196,7 +196,7 @@ async function main() {
             title: `[PERP] ${a.asset} ${netAprPct.toFixed(1)}% net APR${a.vooiExecutable ? ' · VOOI-exec' : ''}`,
             body: [
               `*Long* ${a.longVenue}  →  *Short* ${a.shortVenue}`,
-              `Net APR: *${netAprPct.toFixed(2)}%* (Sharpe-verified net)`,
+              `Net APR: *${netAprPct.toFixed(2)}%* (Sharpe-reported fee-adjusted net APR, provider-sourced; not independently verified)`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,

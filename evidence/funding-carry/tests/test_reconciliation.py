@@ -133,9 +133,11 @@ def test_malformed_alert_figures_are_blocked_never_reconciled():
 def _provenanced_net_cost_evidence():
     """A SCHEMA-CONFORMING net_cost_evidence block (net_cost_evidence/v1).
 
-    SYNTHETIC FIXTURE — proves the validator's logic only. The values are
-    invented for the test; nothing in this repository produces such a
-    block today, and no venue API was called to obtain any of it.
+    SYNTHETIC FIXTURE — proves the validator's SHAPE logic only (E-12-R3:
+    the validator is retained for future evidence ingestion). The values
+    are invented for the test; nothing in this repository produces such a
+    block today, no venue API was called to obtain any of it, and the
+    block can NEVER award the NET-VERIFIED classification.
     """
     return {
         "schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
@@ -161,17 +163,20 @@ def _provenanced_net_cost_evidence():
     }
 
 
-def test_net_verified_requires_provenanced_evidence_not_text_labels():
+def test_net_verified_not_awarded_by_text_labels_or_arbitrary_dicts():
     # A verified-basis net figure (Sharpe-sourced) alone must NOT award
-    # NET-VERIFIED — venue costs AND interval semantics are required.
+    # NET-VERIFIED. E-12-R3: NOTHING awards NET-VERIFIED in this work
+    # item — the class is reserved; these cases stay DATA-CORRECTNESS at
+    # most (the provider-claim path).
     a = _alert(netApr=0.12, netAprBasis="sharpe-net")
     rec = reconciliation.reconcile_alerts([a],
                                           _corroborating_observations())["candidates"][0]
     assert rec["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec["net_cost_evidence_shape_ok"] is None  # no block supplied
 
     # E-12-R2 regression: arbitrary / non-provenance dictionaries — the
     # exact text-label form the old gate accepted — must NOT flip the
-    # class. The gate now demands the net_cost_evidence/v1 schema.
+    # class. The shape validator rejects them (shape_ok is False).
     arbitrary_dicts = [
         {"venue_costs": "verified", "interval": "verified"},   # supervisor's example
         {"ok": True},
@@ -200,17 +205,57 @@ def test_net_verified_requires_provenanced_evidence_not_text_labels():
                                                 _corroborating_observations())["candidates"][0]
         assert rec_b["classification"] == reconciliation.CLS_DATA_CORRECTNESS, bad
         assert rec_b["classification"] != reconciliation.CLS_NET_VERIFIED, bad
+        assert rec_b["net_cost_evidence_shape_ok"] is False, bad
 
-    # A FULLY schema-conforming (synthetic, clearly non-venue-sourced)
-    # block is the ONLY form that reaches the reserved class — proving the
-    # gate is concrete and satisfiable strictly through the schema, not by
-    # prose labels. Scanner output carries no such block, so production
-    # reachability remains nil.
-    c = _alert(netApr=0.12, netAprBasis="sharpe-net",
-               net_cost_evidence=_provenanced_net_cost_evidence())
+
+def test_synthetic_provenance_cannot_award_net_verified():
+    """E-12-R3 regression (PR #18 supervisor review).
+
+    A fully schema-conforming SYNTHETIC block must NOT promote any
+    candidate to NET-VERIFIED. Shape conformance proves the schema can
+    be satisfied — not that the economics are verified. Synthetic
+    fixtures remain DATA-CORRECTNESS, GROSS-INDICATIVE or BLOCKED; the
+    NET-VERIFIED class is unreachable in this offline work item.
+    """
+    block = _provenanced_net_cost_evidence()
+
+    # 1) Verified-basis (provider-claim) alert + synthetic evidence:
+    #    stays DATA-CORRECTNESS — the provider-claim path — with the
+    #    shape result and reservation note recorded for transparency.
+    c = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=block)
     rec_c = reconciliation.reconcile_alerts([c],
                                             _corroborating_observations())["candidates"][0]
-    assert rec_c["classification"] == reconciliation.CLS_NET_VERIFIED
+    assert rec_c["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec_c["classification"] != reconciliation.CLS_NET_VERIFIED
+    assert rec_c["net_cost_evidence_shape_ok"] is True   # shape ran, passed
+    assert "RESERVED" in rec_c["net_cost_evidence_note"]
+
+    # 2) Gross alert (no net figure) + synthetic evidence: stays
+    #    GROSS-INDICATIVE — synthetic provenance cannot conjure net.
+    g = _alert(net_cost_evidence=block)
+    rec_g = reconciliation.reconcile_alerts([g],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_g["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_g["classification"] != reconciliation.CLS_NET_VERIFIED
+    assert rec_g["net_cost_evidence_shape_ok"] is True
+
+    # 3) Venue names in the evidence deliberately DO NOT match the
+    #    alert's legs (the shape validator does not — and must not be
+    #    assumed to — cross-check leg identity): classification is
+    #    still unaffected and never NET-VERIFIED.
+    mismatched = {**block,
+                  "long_venue_costs": {**block["long_venue_costs"], "venue": "venue-a"},
+                  "short_venue_costs": {**block["short_venue_costs"], "venue": "venue-b"}}
+    m = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=mismatched)
+    rec_m = reconciliation.reconcile_alerts([m],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_m["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec_m["classification"] != reconciliation.CLS_NET_VERIFIED
+
+    # 4) Batch-level: no input shape can make the reserved count non-zero.
+    report = reconciliation.reconcile_alerts([c, g, m], _corroborating_observations())
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+    assert report["classification_counts"][reconciliation.CLS_BLOCKED] == 0
 
 
 def test_net_cost_evidence_validator_is_total_never_throws():

@@ -26,21 +26,24 @@ Candidate classification (E-12 acceptance):
   DATA-CORRECTNESS  raw rates corroborate the alert figures AND the
                     alert declares a verified net-APR basis whose value
                     is carried verbatim (Sharpe ``netApr`` field) — the
-                    unit/labeling defect class is closed for it
+                    unit/labeling defect class is closed for it. The net
+                    value remains a PROVIDER CLAIM, not independent
+                    verification.
   GROSS-INDICATIVE  raw rates corroborate the alert, but net economics
                     are unavailable (no fee/holding/basis model): the
                     profit figure is gross/indicative ONLY
-  NET-VERIFIED      RESERVED — requires evidence backing BOTH venue
-                    costs AND funding-interval semantics, supplied as a
-                    PROVENANCE-BEARING ``net_cost_evidence`` block that
-                    conforms to the strict ``net_cost_evidence/v1``
-                    schema (see ``net_cost_evidence_is_provenanced``).
-                    E-12-R2: an arbitrary non-empty dict — e.g. text
-                    labels like ``{"venue_costs": "verified"}`` — can
-                    NO LONGER trigger this class; nothing in this
-                    repository produces a conforming block today, so the
-                    class remains unreachable from scanner output by
-                    construction
+  NET-VERIFIED      RESERVED — UNREACHABLE in this work item (E-12-R3:
+                    PR #18 supervisor review). It requires evidence
+                    backing BOTH venue costs AND funding-interval
+                    semantics reviewed as authoritative in a SEPARATELY
+                    AUTHORIZED work item. The strict
+                    ``net_cost_evidence/v1`` schema validator
+                    (``net_cost_evidence_is_provenanced``) is retained
+                    as a SHAPE check for future evidence ingestion, but
+                    shape conformance — including a synthetic,
+                    test-fabricated block — does NOT award this
+                    classification. No classification path in this
+                    module returns it.
   BLOCKED           evidence missing/mismatched/malformed: the alert
                     cannot be reconciled (gap recorded with reason)
 
@@ -82,6 +85,11 @@ def _venue_key(venue: Any) -> str:
 # E-12-R2 (Issue #17 supervisor review): the NET-VERIFIED gate accepts
 # only a concrete, provenance-bearing evidence schema. Text-label dicts
 # ("verified") and other arbitrary mappings are NOT evidence.
+# E-12-R3 (PR #18 supervisor review): the validator is a SCHEMA-SHAPE
+# check for future evidence ingestion only. Even a fully conforming
+# block — synthetic or otherwise — does NOT award the NET-VERIFIED
+# classification: no authoritative venue evidence was collected or
+# reviewed in this offline work item, so the class stays unreachable.
 NET_COST_EVIDENCE_SCHEMA = "net_cost_evidence/v1"
 
 
@@ -137,8 +145,15 @@ def net_cost_evidence_is_provenanced(block: Any) -> bool:
     Returns False on ANY violation (never throws). This is deliberately
     strict: an arbitrary non-empty dictionary — the previous gate — could
     be satisfied by text labels alone and falsely award NET-VERIFIED.
-    Nothing in this repository produces a conforming block today; scanner
-    output can therefore never reach NET-VERIFIED by construction.
+
+    E-12-R3 (PR #18 supervisor review): this is a SCHEMA-SHAPE validator
+    for FUTURE evidence ingestion only. Conformance proves the block is
+    well-formed — nothing more. It does NOT establish that the source is
+    an actual reviewable citation, that the two venue names match the
+    alert legs, that the fee figures carry validated units/semantics, or
+    that the interval evidence corresponds to the legs being reconciled.
+    It therefore NEVER awards the NET-VERIFIED classification; see
+    ``reconcile_alert`` (the class is reserved and unreachable here).
     """
     if not isinstance(block, dict):
         return False
@@ -327,27 +342,37 @@ def reconcile_alert(alert: dict, observations: list[dict],
         record["classification"] = CLS_BLOCKED
         return record
 
-    # Evidence corroborates both legs. Classify the ECONOMICS honestly:
-    # NET-VERIFIED requires a PROVENANCE-BEARING net-cost evidence block
-    # (both venues' cost schedules AND interval semantics AND units —
-    # validated by net_cost_evidence_is_provenanced, E-12-R2). Scanner
-    # output never carries such a block, so it stays unreachable from this
-    # path by construction; arbitrary/text-label dicts no longer trigger it.
-    has_net_cost_evidence = net_cost_evidence_is_provenanced(
-        _f(alert, "net_cost_evidence"))
+    # Evidence corroborates both legs. Classify the ECONOMICS honestly.
+    # E-12-R3 (PR #18 supervisor review): NET-VERIFIED is RESERVED and
+    # UNREACHABLE in this offline work item — no authoritative venue
+    # evidence was collected or reviewed. The net_cost_evidence/v1
+    # validator is retained as a SHAPE check for future evidence
+    # ingestion; its result is recorded for transparency but NEVER
+    # awards the classification (a synthetic or unreviewed block can
+    # never promote a candidate out of the classes below).
+    evidence_block = _f(alert, "net_cost_evidence")
+    # Three states: None = no block supplied; False = block supplied but
+    # shape-invalid; True = shape-conforming (shape ONLY — never means
+    # the economics are verified).
+    record["net_cost_evidence_shape_ok"] = (
+        None if evidence_block is None
+        else net_cost_evidence_is_provenanced(evidence_block)
+    )
     verified_net = (isinstance(net_apr, (int, float)) and math.isfinite(net_apr)
                     and net_basis in ("sharpe-net", "sharpe_net"))
-    if has_net_cost_evidence:
-        # Reserved branch — requires a schema-conforming, provenance-bearing
-        # evidence block that this repo does not yet have.
-        record["classification"] = CLS_NET_VERIFIED
-    elif verified_net:
+    if verified_net:
         # A third-party net figure carried verbatim with its basis named:
         # the DATA-CORRECTNESS class (unit/labeling defects closed; the
         # net value remains a provider claim, labeled as such).
         record["classification"] = CLS_DATA_CORRECTNESS
     else:
         record["classification"] = CLS_GROSS_INDICATIVE
+    if record["net_cost_evidence_shape_ok"]:
+        record["net_cost_evidence_note"] = (
+            "net_cost_evidence/v1 shape-conforming block present; "
+            "NET-VERIFIED remains RESERVED and unreachable in this "
+            "work item — shape conformance is not economic verification"
+        )
     return record
 
 
@@ -372,9 +397,12 @@ def reconcile_alerts(alerts: list[dict], observations: list[dict],
         "classification_counts": counts,
         "coverage_statement": (
             "every candidate is classified DATA-CORRECTNESS, "
-            "GROSS-INDICATIVE, NET-VERIFIED (reserved; requires venue-cost "
-            "AND interval evidence) or BLOCKED; missingness is explicit "
-            "and values are never fabricated"
+            "GROSS-INDICATIVE or BLOCKED; NET-VERIFIED is RESERVED and "
+            "unreachable in this work item (E-12-R3: no authoritative "
+            "venue evidence was collected or reviewed; the "
+            "net_cost_evidence/v1 validator is shape-only and does not "
+            "award the class); missingness is explicit and values are "
+            "never fabricated"
         ),
     }
 
@@ -393,7 +421,8 @@ def classify_candidates() -> list[dict]:
         design gate unsatisfied) → BLOCKED.
       - equity_perp_cross_venue: dex_scopes absent; scanner fails closed;
         no HIP-3 census authorized → BLOCKED.
-    None is NET-VERIFIED; all live approvals remain 0.
+    None is NET-VERIFIED (the class is reserved and unreachable in this
+    work item); all live approvals remain 0.
     """
     return [
         {
