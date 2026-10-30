@@ -136,10 +136,10 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: strategy.id,
-          title: `${a.asset} funding arb · ${(a.netApr * 100).toFixed(1)}% net APR (verified Sharpe)${a.vooiExecutable ? ' · VOOI-executable' : ''}`,
+          title: `${a.asset} funding arb · ${(a.netApr * 100).toFixed(1)}% net APR (Sharpe-reported, provider-sourced; not independently verified)${a.vooiExecutable ? ' · VOOI-executable' : ''}`,
           body: [
             `*Long* ${a.longVenue}  →  *Short* ${a.shortVenue}`,
-            `Net APR (verified Sharpe): *${(a.netApr * 100).toFixed(2)}%*`,
+            `Net APR (Sharpe-reported, provider-sourced; not independently verified): *${(a.netApr * 100).toFixed(2)}%*`,
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M`,
             `Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,

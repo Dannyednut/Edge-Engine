@@ -185,6 +185,35 @@ def net_cost_evidence_is_provenanced(block: Any) -> bool:
     return True
 
 
+def _attach_net_cost_evidence_fields(record: dict, alert: dict) -> None:
+    """Attach the net_cost_evidence shape tri-state + reservation note.
+
+    E-12-R4 (PR #18 supervisor review): called ONCE during ``record``
+    construction, BEFORE any early-return branch, so EVERY candidate —
+    including BLOCKED ones from malformed alert figures or missing/
+    mismatched observations — carries the field for observability
+    consistency. Shape validity NEVER affects classification.
+
+    Tri-state:
+      - ``None``  — no ``net_cost_evidence`` block supplied,
+      - ``False`` — block supplied but shape-invalid,
+      - ``True``  — block supplied AND shape-conforming (shape ONLY:
+        never means the economics are verified; the reservation note is
+        attached in this case to make that explicit).
+    """
+    block = _f(alert, "net_cost_evidence")
+    record["net_cost_evidence_shape_ok"] = (
+        None if block is None
+        else net_cost_evidence_is_provenanced(block)
+    )
+    if record["net_cost_evidence_shape_ok"]:
+        record["net_cost_evidence_note"] = (
+            "net_cost_evidence/v1 shape-conforming block present; "
+            "NET-VERIFIED remains RESERVED and unreachable in this "
+            "work item — shape conformance is not economic verification"
+        )
+
+
 def _funding_obs_index(observations: list[dict]) -> dict:
     """(asset, source) → complete funding observation (first wins)."""
     idx: dict[tuple[str, str], dict] = {}
@@ -308,6 +337,13 @@ def reconcile_alert(alert: dict, observations: list[dict],
         "fee_sensitivity_sidecar": fees.sensitivity_table(),
     }
 
+    # E-12-R4 (PR #18 supervisor review): the net_cost_evidence shape
+    # tri-state is attached HERE — before any early-return branch — so
+    # EVERY candidate (including BLOCKED ones from malformed figures or
+    # missing/mismatched observations) carries the field for observability
+    # consistency. Shape validity NEVER affects classification.
+    _attach_net_cost_evidence_fields(record, alert)
+
     malformed = False
     for v in (divergence, spread_apr):
         if v is not None and (not isinstance(v, (int, float)) or not math.isfinite(v)):
@@ -350,14 +386,10 @@ def reconcile_alert(alert: dict, observations: list[dict],
     # ingestion; its result is recorded for transparency but NEVER
     # awards the classification (a synthetic or unreviewed block can
     # never promote a candidate out of the classes below).
-    evidence_block = _f(alert, "net_cost_evidence")
-    # Three states: None = no block supplied; False = block supplied but
-    # shape-invalid; True = shape-conforming (shape ONLY — never means
-    # the economics are verified).
-    record["net_cost_evidence_shape_ok"] = (
-        None if evidence_block is None
-        else net_cost_evidence_is_provenanced(evidence_block)
-    )
+    # E-12-R4: the shape tri-state is attached UPSTREAM in
+    # ``_attach_net_cost_evidence_fields`` so it is present on EVERY
+    # candidate (including BLOCKED ones); no recomputation is needed
+    # here and shape validity never affects the classification below.
     verified_net = (isinstance(net_apr, (int, float)) and math.isfinite(net_apr)
                     and net_basis in ("sharpe-net", "sharpe_net"))
     if verified_net:
@@ -367,12 +399,6 @@ def reconcile_alert(alert: dict, observations: list[dict],
         record["classification"] = CLS_DATA_CORRECTNESS
     else:
         record["classification"] = CLS_GROSS_INDICATIVE
-    if record["net_cost_evidence_shape_ok"]:
-        record["net_cost_evidence_note"] = (
-            "net_cost_evidence/v1 shape-conforming block present; "
-            "NET-VERIFIED remains RESERVED and unreachable in this "
-            "work item — shape conformance is not economic verification"
-        )
     return record
 
 

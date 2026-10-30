@@ -264,6 +264,54 @@ def test_net_cost_evidence_validator_is_total_never_throws():
         assert reconciliation.net_cost_evidence_is_provenanced(bad) is False, bad
 
 
+def test_shape_status_present_on_every_candidate_including_blocked():
+    """E-12-R4 regression (PR #18 supervisor review, comment 6526021277).
+
+    ``net_cost_evidence_shape_ok`` must be attached BEFORE the early-return
+    branches so EVERY candidate — including BLOCKED ones — carries the
+    tri-state field. Shape validity NEVER affects the classification.
+    """
+    block = _provenanced_net_cost_evidence()
+
+    # 1) BLOCKED via missing venue observation + a schema-conforming
+    #    synthetic block: stays BLOCKED AND carries shape_ok == True
+    #    (the supervisor's exact example).
+    obs = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False)]  # no binance
+    a = _alert(net_cost_evidence=block)
+    rec = reconciliation.reconcile_alerts([a], obs)["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_BLOCKED
+    assert "missing_observation" in rec["gap_reasons"]
+    assert rec["net_cost_evidence_shape_ok"] is True
+    assert "RESERVED" in rec["net_cost_evidence_note"]
+
+    # 2) BLOCKED via malformed alert figures + no block: shape_ok is None
+    #    (no block supplied) on the early-return candidate.
+    m = _alert(divergence=float("nan"))
+    rec_m = reconciliation.reconcile_alerts([m],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_m["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_m["gap_reasons"]
+    assert rec_m["net_cost_evidence_shape_ok"] is None
+    assert "net_cost_evidence_note" not in rec_m
+
+    # 3) BLOCKED via malformed alert figures + a MALFORMED shape block:
+    #    shape_ok is False on the early-return candidate.
+    bad_block = {"venue_costs": "verified"}  # text-label form
+    m2 = _alert(divergence=float("nan"), net_cost_evidence=bad_block)
+    rec_m2 = reconciliation.reconcile_alerts([m2],
+                                             _corroborating_observations())["candidates"][0]
+    assert rec_m2["classification"] == reconciliation.CLS_BLOCKED
+    assert rec_m2["net_cost_evidence_shape_ok"] is False
+    assert "net_cost_evidence_note" not in rec_m2
+
+    # 4) Sanity: the non-blocked paths still carry the field.
+    g = _alert()
+    rec_g = reconciliation.reconcile_alerts([g],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_g["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_g["net_cost_evidence_shape_ok"] is None
+
+
 def test_fee_sensitivity_sidecar_attached_read_only_and_labeled():
     rec = reconciliation.reconcile_alerts([_alert()],
                                           _corroborating_observations())["candidates"][0]

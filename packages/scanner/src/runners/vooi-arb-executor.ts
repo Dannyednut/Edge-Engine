@@ -151,7 +151,7 @@ export class VooiArbExecutor {
       console.log(`  Hedge:   SELL ${opp.alert.shortVenue} (funding -)`);
       console.log(`  Notional: $${opp.notionalUsd}`);
       console.log(`  Est. daily profit: $${opp.estimatedDailyProfitUsd.toFixed(2)}`);
-      console.log(`  Net APR: ${opp.alert.netApr === null ? 'n/a (unverified)' : (opp.alert.netApr * 100).toFixed(1) + '% (verified Sharpe)'}`);
+      console.log(`  Net APR: ${opp.alert.netApr === null ? 'n/a (unverified)' : (opp.alert.netApr * 100).toFixed(1) + '% (Sharpe-reported, provider-sourced; not independently verified)'}`);
       return { success: false, error: 'dry-run mode' };
     }
 
