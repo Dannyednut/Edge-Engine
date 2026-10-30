@@ -11,18 +11,65 @@
  *   2. Aave V3     — 0.05% fee, single-token, fallback
  *
  * Anti-MEV:
- *   - EVM atomic arbs are submitted via Flashbots Protect (not public mempool)
- *   - This prevents sandwich attacks on our swap legs
+ *   - A standalone submitViaFlashbotsProtect() helper exists for submitting
+ *     signed transactions to the Flashbots Protect relay.
+ *   - As of this commit, the Flashbots Protect path is NOT wired into
+ *     EvmExecutor.execute() or the flashloan methods. All execution methods
+ *     use walletClient.sendTransaction() which submits to the PUBLIC MEMPOOL.
+ *     There is no `useFlashbots` option — if Flashbots is needed, the caller
+ *     must use the sign-then-submit flow explicitly. See the "Remaining
+ *     limitations" section in PR #2 for details.
  *
  * Gas:
  *   - All EVM txs use EIP-1559 (maxFeePerGas + maxPriorityFeePerGas)
  *   - Gas price cap enforced in RiskGuard: refuse to submit if >3× chain median
+ *
+ * Fail-closed semantics:
+ *   - execute() and flashloan methods return an ExecutionResult whose `status`
+ *     field is the AUTHORITATIVE indicator of outcome. A tx hash alone is
+ *     NEVER reported as success.
+ *
+ *   Status semantics (exhaustive):
+ *     - 'submitted':  sendTransaction returned a tx hash, but the receipt is
+ *                     NOT yet available. This happens when:
+ *                       (a) waitForReceipt=false (caller chose not to wait), OR
+ *                       (b) waitForReceipt=true but the receipt did not arrive
+ *                           within receiptTimeoutMs (timeout).
+ *                     In both cases the tx MAY still be mined, revert, or be
+ *                     dropped. The caller CANNOT assume success. To confirm,
+ *                     the caller must separately fetch the receipt.
+ *     - 'confirmed':  receipt fetched, status=1. The tx was mined and did NOT
+ *                     revert. This is the ONLY status that means "success".
+ *     - 'reverted':   receipt fetched, status=0. The tx was mined but reverted.
+ *                     gasUsed and blockNumber are populated; reason contains
+ *                     a generic "transaction reverted" message (the EVM does
+ *                     not return the revert reason in the receipt itself;
+ *                     decoding it requires a separate eth_call trace).
+ *     - 'ambiguous':  sendTransaction itself failed (RPC error, timeout,
+ *                     connection dropped mid-request, insufficient funds,
+ *                     nonce too low, ...). No tx hash was returned to the
+ *                     caller — but a rejected send does NOT prove the node
+ *                     never accepted the transaction (e.g. the request may
+ *                     have been broadcast before the connection failed).
+ *                     This outcome is therefore AMBIGUOUS: it is NOT proof
+ *                     of non-submission, and automatic retry is UNSAFE
+ *                     (it could double-submit). Resolution requires an
+ *                     external check (e.g. receipt lookup by caller-side
+ *                     nonce) by the caller; this executor performs no
+ *                     automatic retry.
+ *
+ *   IMPORTANT: status='submitted' does NOT mean 'confirmed'. It means
+ *   "submitted but unconfirmed". A timeout is NOT an error — it is a
+ *   'submitted' result with a reason explaining the timeout. An RPC failure
+ *   during sendTransaction is 'ambiguous', not 'submitted' — and likewise
+ *   NOT proof that nothing was submitted.
  */
 
 import type { ChainId } from '@edge/types';
 import { createWalletClient, createPublicClient, http, type WalletClient, type PublicClient, type Chain as ViemChain, defineChain } from 'viem';
 import { arbitrum, base, optimism, polygon, bsc, zksync, mainnet } from 'viem/chains';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { encodeFunctionData, encodeAbiParameters, type Abi } from 'viem';
 import { assertExecutionAuthorized } from '@edge/risk';
 
 // ─── HyperEVM chain definition (Hyperliquid L1 EVM, chain ID 999) ──────
@@ -54,17 +101,25 @@ export const BALANCER_VAULT_ADDRESS: Record<ChainId, `0x${string}` | null> = {
 };
 
 // ─── Aave V3 Pool addresses ────────────────────────────────────────────
+// Source: bgd-labs/aave-address-book (canonical Aave governance registry)
+// https://github.com/bgd-labs/aave-address-book
+//
+// NOTE: This map is an AVAILABILITY GATE, not a transaction destination.
+// The executor checks `aaveV3PoolAddress !== null` to decide whether the
+// Aave flashloan path is available on a given chain. The AgentVault
+// contract stores its own `aaveV3Pool` immutable address set at deploy
+// time; the executor does NOT send transactions to this address directly.
 
 export const AAVE_V3_POOL_ADDRESS: Record<ChainId, `0x${string}` | null> = {
-  ethereum:  '0x87870Bca3F3f6D5b4017c7e233794f7d7e233794f7',  // mainnet
-  arbitrum:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // Arbitrum
-  base:      '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // Base (same as Arbitrum — Aave V3 is deployed cross-chain with same address)
-  optimism:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-  polygon:   '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-  bsc:       null,  // Aave V3 not on BSC (Aave V3 only on Ethereum L1 + L2s)
-  zksync:    null,
-  solana:    null,
-  hyperevm:  null,  // Aave V3 not on HyperEVM (use HyperLend instead)
+  ethereum:  '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',  // AaveV3Ethereum.sol
+  arbitrum:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Arbitrum.sol
+  base:      '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',  // AaveV3Base.sol (NOT same as Arbitrum)
+  optimism:  '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Optimism.sol
+  polygon:   '0x794a61358D6845594F94dc1DB02A252b5b4814aD',  // AaveV3Polygon.sol
+  bsc:       '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',  // AaveV3BNB.sol
+  zksync:    '0x78e30497a3c7527d953c6B1E3541b021A98Ac43c',  // AaveV3ZkSync.sol
+  solana:    null,   // not an EVM chain
+  hyperevm:  null,   // Aave V3 not on HyperEVM (use HyperLend instead)
 };
 
 // ─── AgentVault ABI (subset — the functions the executor calls) ────────
@@ -135,10 +190,50 @@ export const AGENT_VAULT_ABI = [
   },
 ] as const;
 
+// ─── Fail-closed execution result ──────────────────────────────────────
+
+/**
+ * Result of an executor transaction. The `status` field is the authoritative
+ * indicator of outcome — a tx hash alone is NEVER sufficient.
+ *
+ * - 'submitted':  tx hash obtained from sendTransaction, but receipt not yet
+ *                 available. The tx may still revert, be dropped, or be
+ *                 replaced. Treat as pending.
+ * - 'confirmed':  receipt fetched, status=1 (success). The tx was mined and
+ *                 did not revert.
+ * - 'reverted':   receipt fetched, status=0. The tx was mined but reverted.
+ * - 'ambiguous':  sendTransaction failed. The tx MAY or MAY NOT have been
+ *                 accepted by the node — this is NOT proof of non-submission.
+ *                 Do NOT automatically retry (double-submission risk).
+ */
+export type ExecutionStatus = 'submitted' | 'confirmed' | 'reverted' | 'ambiguous';
+
+export interface ExecutionResult {
+  /** Tx hash (always populated when status is submitted/confirmed/reverted). */
+  txHash: `0x${string}` | null;
+  /** Authoritative outcome. Never rely on txHash alone. */
+  status: ExecutionStatus;
+  /** Gas used (only when status is confirmed/reverted). */
+  gasUsed?: bigint;
+  /** Revert reason or error message (only when status is reverted/error). */
+  reason?: string;
+  /** Block number the tx was included in (only when status is confirmed/reverted). */
+  blockNumber?: bigint;
+  /** Raw error object if status is 'error'. */
+  error?: unknown;
+}
+
 // ─── EvmExecutor ───────────────────────────────────────────────────────
 
 const CHAIN_MAP: Record<string, ViemChain> = {
-  ethereum: mainnet, arbitrum, base, optimism, polygon, bsc, zksync, hyperEvm,
+  ethereum: mainnet,
+  arbitrum,
+  base,
+  optimism,
+  polygon,
+  bsc,
+  zksync,
+  hyperevm: hyperEvm,
 };
 
 export interface EvmExecutorOptions {
@@ -146,15 +241,22 @@ export interface EvmExecutorOptions {
   agentPrivateKey: `0x${string}`;
   agentVaultAddress: `0x${string}`;
   rpcUrl: string;
-  /** Submit via Flashbots Protect (default: true). */
-  useFlashbots?: boolean;
+  /** Whether to block until the tx receipt is available (default: true). */
+  waitForReceipt?: boolean;
+  /** Receipt fetch timeout in ms (default: 60000 = 60s). */
+  receiptTimeoutMs?: number;
+  /** Polling interval for receipt fetch in ms (default: 2000). */
+  receiptPollMs?: number;
 }
 
 export class EvmExecutor {
   readonly chainId: ChainId;
   readonly chain: ViemChain;
+  readonly publicClient: PublicClient;
   readonly agentVaultAddress: `0x${string}`;
-  readonly useFlashbots: boolean;
+  readonly waitForReceipt: boolean;
+  readonly receiptTimeoutMs: number;
+  readonly receiptPollMs: number;
   readonly balancerVaultAddress: `0x${string}` | null;
   readonly aaveV3PoolAddress: `0x${string}` | null;
 
@@ -192,12 +294,18 @@ export class EvmExecutor {
 
     this.#account = privateKeyToAccount(opts.agentPrivateKey);
     this.agentVaultAddress = opts.agentVaultAddress;
-    this.useFlashbots = opts.useFlashbots ?? true;
+    this.waitForReceipt = opts.waitForReceipt ?? true;
+    this.receiptTimeoutMs = opts.receiptTimeoutMs ?? 60_000;
+    this.receiptPollMs = opts.receiptPollMs ?? 2_000;
     this.balancerVaultAddress = BALANCER_VAULT_ADDRESS[opts.chainId];
     this.aaveV3PoolAddress    = AAVE_V3_POOL_ADDRESS[opts.chainId];
 
     this.#walletClient = createWalletClient({
       account: this.#account,
+      chain,
+      transport: http(opts.rpcUrl),
+    });
+    this.publicClient = createPublicClient({
       chain,
       transport: http(opts.rpcUrl),
     });
@@ -207,6 +315,8 @@ export class EvmExecutor {
    * Execute a single swap (or any whitelisted target call) via the AgentVault.
    * Use for non-atomic strategies where the operator wants to call a single
    * contract method (e.g. close a perp position on a DEX).
+   *
+   * Fail-closed: returns status='confirmed' only if the receipt shows status=1.
    */
   async execute(params: {
     target: `0x${string}`;
@@ -214,24 +324,21 @@ export class EvmExecutor {
     gasLimit?: bigint;
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
-  }): Promise<{ txHash: `0x${string}`; success: boolean }> {
+  }): Promise<ExecutionResult> {
     // EM-STRAT-012 Phase-0: re-checked per submission so an existing instance
-    // cannot submit after authorization expires.
+    // cannot submit after authorization expires. Preserved from main — the
+    // per-submission guard is mandatory on EVERY submission path.
     assertExecutionAuthorized('evm-executor:send-transaction');
     // Encode the call to AgentVault.execute(target, data)
-    const callData = encodeFunctionCall('execute', [params.target, params.data]);
+    const callData = encodeVaultFunctionCall('execute', [params.target, params.data]);
 
-    const txHash = await this.#walletClient.sendTransaction({
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.#account,
-      chain: this.chain,
       gas: params.gasLimit,
       maxFeePerGas: params.maxFeePerGas,
       maxPriorityFeePerGas: params.maxPriorityFeePerGas,
     });
-
-    return { txHash, success: true };
   }
 
   /**
@@ -255,9 +362,9 @@ export class EvmExecutor {
     swapTargets: `0x${string}`[];
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
-  }): Promise<{ txHash: `0x${string}` }> {
+  }): Promise<ExecutionResult> {
     // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
-    // encoding, or transport work.
+    // encoding, or transport work. Preserved from main.
     assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.balancerVaultAddress) {
       throw new Error(`Balancer V2 not available on ${this.chainId}`);
@@ -265,25 +372,22 @@ export class EvmExecutor {
 
     // Encode the swap targets + calldatas as the userData passed to receiveFlashLoan
     const userData = encodeAbi(
-      ['address[]', 'bytes[]'],
+      [{ type: 'address[]' }, { type: 'bytes[]' }],
       [params.swapTargets, params.swapCalldatas]
     );
 
     // Encode the call to AgentVault.balancerFlashLoan(tokens, amounts, userData)
-    const callData = encodeFunctionCall('balancerFlashLoan', [
+    const callData = encodeVaultFunctionCall('balancerFlashLoan', [
       [params.flashloanToken],
       [params.flashloanAmount],
       userData,
     ]);
-    const txHash = await this.#walletClient.sendTransaction({
+
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.#account,
-      chain: this.chain,
       gas: params.gasLimit,
     });
-
-    return { txHash };
   }
 
   /**
@@ -301,41 +405,37 @@ export class EvmExecutor {
     swapTargets: `0x${string}`[];
     swapCalldatas: `0x${string}`[];
     gasLimit?: bigint;
-  }): Promise<{ txHash: `0x${string}` }> {
+  }): Promise<ExecutionResult> {
     // EM-STRAT-012 Phase-0: re-checked per submission, before any validation,
-    // encoding, or transport work.
+    // encoding, or transport work. Preserved from main.
     assertExecutionAuthorized('evm-executor:send-transaction');
     if (!this.aaveV3PoolAddress) {
       throw new Error(`Aave V3 not available on ${this.chainId}`);
     }
 
     const userData = encodeAbi(
-      ['address[]', 'bytes[]'],
+      [{ type: 'address[]' }, { type: 'bytes[]' }],
       [params.swapTargets, params.swapCalldatas]
     );
 
-    const callData = encodeFunctionCall('aaveFlashLoan', [
+    const callData = encodeVaultFunctionCall('aaveFlashLoan', [
       params.flashloanToken,
       params.flashloanAmount,
       userData,
     ]);
-    const txHash = await this.#walletClient.sendTransaction({
+
+    return this.#submitAndWait({
       to: this.agentVaultAddress,
       data: callData,
-      account: this.#account,
-      chain: this.chain,
       gas: params.gasLimit,
     });
-
-    return { txHash };
   }
 
   /**
    * Read-only: check if a target is whitelisted on the AgentVault.
    */
   async isTargetWhitelisted(target: `0x${string}`): Promise<boolean> {
-    const publicClient = this.makePublicClient();
-    const result = await publicClient.readContract({
+    const result = await this.publicClient.readContract({
       address: this.agentVaultAddress,
       abi: AGENT_VAULT_ABI,
       functionName: 'whitelistedTargets',
@@ -348,8 +448,7 @@ export class EvmExecutor {
    * Read-only: check if the vault is paused.
    */
   async isPaused(): Promise<boolean> {
-    const publicClient = this.makePublicClient();
-    const result = await publicClient.readContract({
+    const result = await this.publicClient.readContract({
       address: this.agentVaultAddress,
       abi: AGENT_VAULT_ABI,
       functionName: 'paused',
@@ -357,25 +456,150 @@ export class EvmExecutor {
     return result;
   }
 
-  private makePublicClient(): PublicClient {
-    const rpcUrl = this.#walletClient.chain?.rpcUrls.default.http[0] ?? '';
-    return createPublicClient({
-      chain: this.chain,
-      transport: http(rpcUrl),
-    });
+  // ─── Internal: submit + wait for receipt (fail-closed) ─────────────
+
+  /**
+   * Submit a transaction and (optionally) wait for its receipt.
+   * Returns a fail-closed ExecutionResult. A tx hash alone is NEVER reported
+   * as success — status='confirmed' requires a receipt with status=1.
+   *
+   * ECMAScript PRIVATE METHOD (`#` prefix), not TypeScript `private`:
+   * a TS-private method compiles to a runtime-accessible prototype method,
+   * which would let any caller holding an executor instance supply an
+   * arbitrary `to`/`data` and broadcast through the signer WITHOUT routing
+   * through `agentVaultAddress` — defeating the vault perimeter. The `#`
+   * form is genuinely unreachable at runtime (not on the prototype, not an
+   * own property, lexically confined to this class body), so the only way
+   * to reach the raw `sendTransaction` sink is through the public methods,
+   * which encode AgentVault calldata and target the vault address.
+   * Regression-tested: see executor.test.ts "runtime privacy" describe.
+   */
+  async #submitAndWait(params: {
+    to: `0x${string}`;
+    data: `0x${string}`;
+    gas?: bigint;
+    maxFeePerGas?: bigint;
+    maxPriorityFeePerGas?: bigint;
+  }): Promise<ExecutionResult> {
+    // Defense-in-depth (reconciliation of PR #2 with main's guard): the sink
+    // itself re-checks the scope, even though every public entry point
+    // (execute / balancerFlashLoanArb / aaveFlashLoanArb) already asserts
+    // 'evm-executor:send-transaction' before calling this method. Containment
+    // at the sink means the raw sendTransaction call can never be reached
+    // without a currently-valid authorization, regardless of future callers.
+    assertExecutionAuthorized('evm-executor:send-transaction');
+    let txHash: `0x${string}`;
+    try {
+      txHash = await this.#walletClient.sendTransaction({
+        to: params.to,
+        data: params.data,
+        account: this.#account,
+        chain: this.chain,
+        gas: params.gas,
+        maxFeePerGas: params.maxFeePerGas,
+        maxPriorityFeePerGas: params.maxPriorityFeePerGas,
+      });
+    } catch (err: unknown) {
+      // AMBIGUOUS send failure (supervisor follow-up #2 on PR #2): a rejected
+      // RPC send does NOT prove the node did not accept the transaction —
+      // e.g. the request may have been broadcast before the connection
+      // dropped, or timed out after reaching the node. Reporting this as
+      // "error = nothing was submitted" would make retry look safe when a
+      // retry could double-submit. There is NO tx hash, but the outcome is
+      // explicitly AMBIGUOUS; resolution requires a caller-side check
+      // (e.g. receipt lookup by nonce). No automatic retry is performed.
+      return {
+        txHash: null,
+        status: 'ambiguous',
+        reason:
+          'AMBIGUOUS send outcome: sendTransaction failed, but this is NOT proof ' +
+          'that the transaction was not accepted by the node. Do NOT automatically ' +
+          'retry (double-submission risk); resolve via an external check such as ' +
+          'a receipt lookup by caller-side nonce. Underlying error: ' +
+          (err instanceof Error ? err.message : String(err)),
+        error: err,
+      };
+    }
+
+    if (!this.waitForReceipt) {
+      return { txHash, status: 'submitted' };
+    }
+
+    // Wait for receipt with timeout
+    const deadline = Date.now() + this.receiptTimeoutMs;
+    let lastErr: unknown = null;
+    while (Date.now() < deadline) {
+      try {
+        const receipt = await this.publicClient.getTransactionReceipt({ hash: txHash });
+        if (receipt) {
+          if (receipt.status === 'success') {
+            return {
+              txHash,
+              status: 'confirmed',
+              gasUsed: receipt.gasUsed,
+              blockNumber: receipt.blockNumber,
+            };
+          } else {
+            return {
+              txHash,
+              status: 'reverted',
+              gasUsed: receipt.gasUsed,
+              blockNumber: receipt.blockNumber,
+              reason: 'transaction reverted (status=0)',
+            };
+          }
+        }
+      } catch (err: unknown) {
+        lastErr = err;
+        // Receipt not yet available — keep polling
+      }
+      await sleep(this.receiptPollMs);
+    }
+
+    // Timeout — tx was submitted but receipt not obtained
+    return {
+      txHash,
+      status: 'submitted',
+      reason: lastErr instanceof Error
+        ? `receipt timeout after ${this.receiptTimeoutMs}ms; last error: ${lastErr.message}`
+        : `receipt timeout after ${this.receiptTimeoutMs}ms`,
+    };
   }
 }
 
-// ─── Helpers (lightweight ABI encoding without pulling in viem's full codec) ─
+// ─── Helpers (viem-based ABI encoding) ─────────────────────────────────
 
-function encodeFunctionCall(functionName: string, args: unknown[]): `0x${string}` {
-  // This is a stub — in production, use viem's encodeFunctionData
-  // For now, throw to remind us to wire up the real encoder
-  throw new Error(`encodeFunctionCall stub — use viem's encodeFunctionData in production. functionName=${functionName} args=${JSON.stringify(args).slice(0, 200)}`);
+/**
+ * Encode a function call to the AgentVault using viem's encodeFunctionData.
+ * Throws if the function name is not in AGENT_VAULT_ABI or if the args
+ * don't match the expected types.
+ */
+export function encodeVaultFunctionCall(functionName: string, args: readonly unknown[]): `0x${string}` {
+  return encodeFunctionData({
+    abi: AGENT_VAULT_ABI as Abi,
+    functionName,
+    args: args as readonly unknown[],
+  });
 }
 
-function encodeAbi(_types: string[], _values: unknown[]): `0x${string}` {
-  throw new Error(`encodeAbi stub — use viem's encodeAbiParameters in production. types=${JSON.stringify(_types)}`);
+/**
+ * Encode ABI parameters using viem's encodeAbiParameters.
+ * Each param is { type: string } paired with a value.
+ * Throws if the types/values don't match.
+ */
+export function encodeAbi(
+  params: { type: string }[],
+  values: readonly unknown[]
+): `0x${string}` {
+  return encodeAbiParameters(
+    params as Parameters<typeof encodeAbiParameters>[0],
+    values as Parameters<typeof encodeAbiParameters>[1],
+  );
+}
+
+/** Sleep helper. */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ─── Flashbots Protect submission ──────────────────────────────────────
@@ -390,18 +614,27 @@ function encodeAbi(_types: string[], _values: unknown[]): `0x${string}` {
  * For bundle submission (atomic multi-tx), use the Flashbots bundle API
  * directly. This function is for single-tx Protect.
  *
- * EM-STRAT-012 Phase-0.5 (work order A/E): this IS a submission sink — it
- * broadcasts a real signed transaction (`eth_sendRawTransaction`). It was
- * previously ungated: although the caller must supply an already-signed tx,
- * broadcasting is the capital-moving step. It now requires the same
- * 'evm-executor:send-transaction' scope as every other EVM submission and
- * is inventoried in the submission-sink census.
+ * NOTE (PR #2): as of this commit, this function is standalone and is NOT
+ * wired into EvmExecutor.execute() or the flashloan methods. Those methods
+ * submit via #submitAndWait() which goes to the public mempool. Wiring
+ * Flashbots into the executor requires a sign-then-submit flow:
+ *   1. walletClient.signTransaction(...) to get a signed raw tx
+ *   2. submitViaFlashbotsProtect(signedTx) to submit to the relay
+ * This is left as a future task.
+ *
+ * EM-STRAT-012 Phase-0.5 (work order A/E, from main): this IS a submission
+ * sink — it broadcasts a real signed transaction (`eth_sendRawTransaction`).
+ * It was previously ungated: although the caller must supply an
+ * already-signed tx, broadcasting is the capital-moving step. It requires
+ * the same 'evm-executor:send-transaction' scope as every other EVM
+ * submission and is inventoried in the submission-sink census.
  */
 export async function submitViaFlashbotsProtect(
   signedTx: `0x${string}`,
   fetchImpl: typeof fetch = fetch
 ): Promise<{ txHash: `0x${string}` }> {
-  // Fail-closed BEFORE any network request.
+  // Fail-closed BEFORE any network request. Order preserved: the guard runs
+  // first; no HTTP request is made unless the scope check passes.
   assertExecutionAuthorized('evm-executor:send-transaction');
   const res = await fetchImpl('https://rpc.flashbots.net/fast', {
     method: 'POST',
@@ -413,9 +646,44 @@ export async function submitViaFlashbotsProtect(
       params: [signedTx],
     }),
   });
-  const json = await res.json() as { result?: string; error?: { message: string } };
-  if (json.error) throw new Error(`Flashbots Protect: ${json.error.message}`);
-  return { txHash: json.result as `0x${string}` };
+
+  // Fail-closed response handling (supervisor follow-up #3 on PR #2):
+  // HTTP failure, malformed JSON, a JSON-RPC error object, or a missing/
+  // malformed transaction hash is a THROWN typed failure — never silently
+  // mapped to a txHash that was not actually returned by the relay.
+  if (!res.ok) {
+    throw new Error(
+      `Flashbots Protect: HTTP ${res.status} ${res.statusText || ''}`.trim() +
+      ' — raw transaction NOT confirmed as accepted by the relay (outcome ambiguous)',
+    );
+  }
+
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch (err: unknown) {
+    throw new Error(
+      `Flashbots Protect: invalid JSON response: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('Flashbots Protect: response is not a JSON-RPC object');
+  }
+  const rec = json as { result?: unknown; error?: { message?: unknown } };
+  if (rec.error) {
+    const msg = typeof rec.error.message === 'string' ? rec.error.message : JSON.stringify(rec.error);
+    throw new Error(`Flashbots Protect: ${msg}`);
+  }
+  const result = rec.result;
+  const TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+  if (typeof result !== 'string' || !TX_HASH_RE.test(result)) {
+    throw new Error(
+      `Flashbots Protect: JSON-RPC result is not a non-empty transaction hash ` +
+      `(got: ${typeof result === 'string' ? result.slice(0, 80) : typeof result}) ` +
+      '— raw transaction NOT confirmed as accepted by the relay (outcome ambiguous)',
+    );
+  }
+  return { txHash: result as `0x${string}` };
 }
 
 // ─── Kinetiq Liquid Staking (HyperEVM chain 999) ───────────────────────
