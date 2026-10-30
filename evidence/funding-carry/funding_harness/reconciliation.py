@@ -31,10 +31,16 @@ Candidate classification (E-12 acceptance):
                     are unavailable (no fee/holding/basis model): the
                     profit figure is gross/indicative ONLY
   NET-VERIFIED      RESERVED — requires evidence backing BOTH venue
-                    costs AND funding-interval semantics (an explicit
-                    ``net_cost_evidence`` block on the alert). Nothing
-                    in this repository provides that today, so this
-                    module can never award it from scanner output alone
+                    costs AND funding-interval semantics, supplied as a
+                    PROVENANCE-BEARING ``net_cost_evidence`` block that
+                    conforms to the strict ``net_cost_evidence/v1``
+                    schema (see ``net_cost_evidence_is_provenanced``).
+                    E-12-R2: an arbitrary non-empty dict — e.g. text
+                    labels like ``{"venue_costs": "verified"}`` — can
+                    NO LONGER trigger this class; nothing in this
+                    repository produces a conforming block today, so the
+                    class remains unreachable from scanner output by
+                    construction
   BLOCKED           evidence missing/mismatched/malformed: the alert
                     cannot be reconciled (gap recorded with reason)
 
@@ -71,6 +77,97 @@ def _f(alert: dict, *names: str) -> Any:
 
 def _venue_key(venue: Any) -> str:
     return str(venue or "").strip().lower()
+
+
+# E-12-R2 (Issue #17 supervisor review): the NET-VERIFIED gate accepts
+# only a concrete, provenance-bearing evidence schema. Text-label dicts
+# ("verified") and other arbitrary mappings are NOT evidence.
+NET_COST_EVIDENCE_SCHEMA = "net_cost_evidence/v1"
+
+
+def _is_nonempty_str(v: Any) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def _is_finite_number(v: Any) -> bool:
+    # bool is an int subclass — explicitly exclude it from cost figures.
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _venue_cost_block_ok(block: Any) -> bool:
+    """One venue's cost schedule with explicit provenance."""
+    if not isinstance(block, dict):
+        return False
+    if not _is_nonempty_str(block.get("venue")):
+        return False
+    schedule = block.get("schedule")
+    # The schedule must be a non-empty mapping whose every entry is a
+    # finite numeric cost figure (a text label like "verified" is not a
+    # cost figure, and neither is a NaN/bool masquerading as one).
+    if not isinstance(schedule, dict) or not schedule:
+        return False
+    if not all(_is_finite_number(v) for v in schedule.values()):
+        return False
+    # Provenance: a named source (citation/document reference) and the
+    # retrieval time are REQUIRED, not optional niceties.
+    if not _is_nonempty_str(block.get("source")):
+        return False
+    if not _is_nonempty_str(block.get("retrieved_at_utc")):
+        return False
+    return True
+
+
+def net_cost_evidence_is_provenanced(block: Any) -> bool:
+    """Strict validator for the NET-VERIFIED evidence gate (E-12-R2).
+
+    A conforming ``net_cost_evidence`` block must carry, explicitly:
+
+      - ``schema``: exactly ``net_cost_evidence/v1`` (version-pinned so a
+        future schema change cannot silently re-mean old blocks),
+      - ``long_venue_costs`` AND ``short_venue_costs``: each a dict with a
+        non-empty ``venue`` name, a non-empty ``schedule`` mapping whose
+        every value is a finite numeric cost figure, and provenance
+        (non-empty ``source`` citation + ``retrieved_at_utc``),
+      - ``interval_semantics``: the funding interval the costs apply to —
+        a finite positive ``funding_interval_hours``, a boolean
+        ``per_row_interval_published`` flag, and the same provenance pair,
+      - ``units``: non-empty ``rate_units`` and ``apr_units`` declarations
+        so the cost figures and the alert APRs are comparable.
+
+    Returns False on ANY violation (never throws). This is deliberately
+    strict: an arbitrary non-empty dictionary — the previous gate — could
+    be satisfied by text labels alone and falsely award NET-VERIFIED.
+    Nothing in this repository produces a conforming block today; scanner
+    output can therefore never reach NET-VERIFIED by construction.
+    """
+    if not isinstance(block, dict):
+        return False
+    if block.get("schema") != NET_COST_EVIDENCE_SCHEMA:
+        return False
+    if not _venue_cost_block_ok(block.get("long_venue_costs")):
+        return False
+    if not _venue_cost_block_ok(block.get("short_venue_costs")):
+        return False
+    interval = block.get("interval_semantics")
+    if not isinstance(interval, dict):
+        return False
+    hours = interval.get("funding_interval_hours")
+    if not _is_finite_number(hours) or hours <= 0:
+        return False
+    if not isinstance(interval.get("per_row_interval_published"), bool):
+        return False
+    if not _is_nonempty_str(interval.get("source")):
+        return False
+    if not _is_nonempty_str(interval.get("retrieved_at_utc")):
+        return False
+    units = block.get("units")
+    if not isinstance(units, dict):
+        return False
+    if not _is_nonempty_str(units.get("rate_units")):
+        return False
+    if not _is_nonempty_str(units.get("apr_units")):
+        return False
+    return True
 
 
 def _funding_obs_index(observations: list[dict]) -> dict:
@@ -231,15 +328,18 @@ def reconcile_alert(alert: dict, observations: list[dict],
         return record
 
     # Evidence corroborates both legs. Classify the ECONOMICS honestly:
-    # NET-VERIFIED requires explicit net-cost evidence (both venue costs
-    # AND interval semantics) — scanner output never carries that block,
-    # so it stays unreachable from this path by construction.
-    has_net_cost_evidence = isinstance(
-        _f(alert, "net_cost_evidence"), dict) and bool(_f(alert, "net_cost_evidence"))
+    # NET-VERIFIED requires a PROVENANCE-BEARING net-cost evidence block
+    # (both venues' cost schedules AND interval semantics AND units —
+    # validated by net_cost_evidence_is_provenanced, E-12-R2). Scanner
+    # output never carries such a block, so it stays unreachable from this
+    # path by construction; arbitrary/text-label dicts no longer trigger it.
+    has_net_cost_evidence = net_cost_evidence_is_provenanced(
+        _f(alert, "net_cost_evidence"))
     verified_net = (isinstance(net_apr, (int, float)) and math.isfinite(net_apr)
                     and net_basis in ("sharpe-net", "sharpe_net"))
     if has_net_cost_evidence:
-        # Reserved branch — requires evidence this repo does not yet have.
+        # Reserved branch — requires a schema-conforming, provenance-bearing
+        # evidence block that this repo does not yet have.
         record["classification"] = CLS_NET_VERIFIED
     elif verified_net:
         # A third-party net figure carried verbatim with its basis named:

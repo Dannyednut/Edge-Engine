@@ -130,7 +130,38 @@ def test_malformed_alert_figures_are_blocked_never_reconciled():
         assert rec["classification"] != reconciliation.CLS_NET_VERIFIED
 
 
-def test_net_verified_is_unreachable_without_net_cost_evidence():
+def _provenanced_net_cost_evidence():
+    """A SCHEMA-CONFORMING net_cost_evidence block (net_cost_evidence/v1).
+
+    SYNTHETIC FIXTURE — proves the validator's logic only. The values are
+    invented for the test; nothing in this repository produces such a
+    block today, and no venue API was called to obtain any of it.
+    """
+    return {
+        "schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+        "long_venue_costs": {
+            "venue": "hyperliquid",
+            "schedule": {"taker_fee_bps": 4.5, "maker_fee_bps": 1.5},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "short_venue_costs": {
+            "venue": "binance",
+            "schedule": {"taker_fee_bps": 5.0, "maker_fee_bps": 2.0},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "interval_semantics": {
+            "funding_interval_hours": 1,
+            "per_row_interval_published": False,
+            "source": "synthetic-fixture://interval-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "units": {"rate_units": "decimal-fraction per interval", "apr_units": "decimal-fraction APR"},
+    }
+
+
+def test_net_verified_requires_provenanced_evidence_not_text_labels():
     # A verified-basis net figure (Sharpe-sourced) alone must NOT award
     # NET-VERIFIED — venue costs AND interval semantics are required.
     a = _alert(netApr=0.12, netAprBasis="sharpe-net")
@@ -138,14 +169,54 @@ def test_net_verified_is_unreachable_without_net_cost_evidence():
                                           _corroborating_observations())["candidates"][0]
     assert rec["classification"] == reconciliation.CLS_DATA_CORRECTNESS
 
-    # Forging a net_cost_evidence block flips to the reserved class — this
-    # proves the gate exists, and equally that scanner output (which never
-    # carries such a block) can never reach NET-VERIFIED by accident.
-    b = _alert(netApr=0.12, netAprBasis="sharpe-net",
-               net_cost_evidence={"venue_costs": "verified", "interval": "verified"})
-    rec_b = reconciliation.reconcile_alerts([b],
+    # E-12-R2 regression: arbitrary / non-provenance dictionaries — the
+    # exact text-label form the old gate accepted — must NOT flip the
+    # class. The gate now demands the net_cost_evidence/v1 schema.
+    arbitrary_dicts = [
+        {"venue_costs": "verified", "interval": "verified"},   # supervisor's example
+        {"ok": True},
+        {"a": 1},
+        {"schema": "net_cost_evidence/v1"},                    # right tag, no content
+        {"schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+         "long_venue_costs": {"venue": "hyperliquid", "schedule": {"taker": "verified"},
+                              "source": "doc", "retrieved_at_utc": "2026-10-30T00:00:00Z"}},  # text schedule
+        {"schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+         "long_venue_costs": {"venue": "hyperliquid", "schedule": {"taker": 4.5},
+                              "source": "doc", "retrieved_at_utc": "2026-10-30T00:00:00Z"}},  # missing short + interval + units
+        {**_provenanced_net_cost_evidence(),
+         "schema": "net_cost_evidence/v2"},                    # wrong schema version
+        {**_provenanced_net_cost_evidence(),
+         "long_venue_costs": {**_provenanced_net_cost_evidence()["long_venue_costs"],
+                              "source": ""}},                  # empty provenance source
+        {**_provenanced_net_cost_evidence(),
+         "interval_semantics": {**_provenanced_net_cost_evidence()["interval_semantics"],
+                                "funding_interval_hours": 0}},  # non-positive interval
+        {**_provenanced_net_cost_evidence(),
+         "units": {"rate_units": "decimal-fraction"}},         # missing apr_units
+    ]
+    for bad in arbitrary_dicts:
+        b = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=bad)
+        rec_b = reconciliation.reconcile_alerts([b],
+                                                _corroborating_observations())["candidates"][0]
+        assert rec_b["classification"] == reconciliation.CLS_DATA_CORRECTNESS, bad
+        assert rec_b["classification"] != reconciliation.CLS_NET_VERIFIED, bad
+
+    # A FULLY schema-conforming (synthetic, clearly non-venue-sourced)
+    # block is the ONLY form that reaches the reserved class — proving the
+    # gate is concrete and satisfiable strictly through the schema, not by
+    # prose labels. Scanner output carries no such block, so production
+    # reachability remains nil.
+    c = _alert(netApr=0.12, netAprBasis="sharpe-net",
+               net_cost_evidence=_provenanced_net_cost_evidence())
+    rec_c = reconciliation.reconcile_alerts([c],
                                             _corroborating_observations())["candidates"][0]
-    assert rec_b["classification"] == reconciliation.CLS_NET_VERIFIED
+    assert rec_c["classification"] == reconciliation.CLS_NET_VERIFIED
+
+
+def test_net_cost_evidence_validator_is_total_never_throws():
+    # The validator must return False (not raise) on any malformed input.
+    for bad in (None, "verified", 42, [], {}, {"schema": None}):
+        assert reconciliation.net_cost_evidence_is_provenanced(bad) is False, bad
 
 
 def test_fee_sensitivity_sidecar_attached_read_only_and_labeled():

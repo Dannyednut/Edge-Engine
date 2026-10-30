@@ -146,8 +146,8 @@ describe('FundingDivergenceScanner — EM-STRAT-014-E11 items 4 + 5', () => {
       items: [{
         asset: '1000PEPE',
         pairs: [{
-          long: { exchange: 'Binance', fundingRate: 0.0068493 }, // annual≈60%
-          short: { exchange: 'HL', fundingRate: 0 },
+          long: { exchange: 'Binance', fundingRate: '0.0068493' }, // annual≈60%
+          short: { exchange: 'HL', fundingRate: '0' },
         }],
       }],
     };
@@ -171,8 +171,8 @@ describe('FundingDivergenceScanner — EM-STRAT-014-E11 items 4 + 5', () => {
       items: [{
         asset: 'DIFFERENTCOIN',
         pairs: [{
-          long: { exchange: 'Binance', fundingRate: 0.0068493 },
-          short: { exchange: 'HL', fundingRate: 0 },
+          long: { exchange: 'Binance', fundingRate: '0.0068493' },
+          short: { exchange: 'HL', fundingRate: '0' },
         }],
       }],
     };
@@ -211,14 +211,14 @@ describe('Cluster2-R1: VOOI OI parsed from actual response fields (openInterest 
   function makeVooiResponse(legOverrides: Record<string, unknown>): any {
     const leg = {
       exchange: 'hyperliquid',
-      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      fundingRate: '0.02', // 0.02/h → 175.2%/yr (≥ 50 threshold)
       ...legOverrides,
     };
     return {
       items: [
         {
           asset: 'BTC',
-          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: '0.0001', openInterest: '10', price: '100' } }],
         },
       ],
     };
@@ -275,14 +275,14 @@ describe('Cluster2-R2: strict full-string numeric validation (parseFloat prefix 
   function makeVooiResponse(legOverrides: Record<string, unknown>): any {
     const leg = {
       exchange: 'hyperliquid',
-      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      fundingRate: '0.02', // 0.02/h → 175.2%/yr (≥ 50 threshold)
       ...legOverrides,
     };
     return {
       items: [
         {
           asset: 'BTC',
-          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: '0.0001', openInterest: '10', price: '100' } }],
         },
       ],
     };
@@ -461,8 +461,8 @@ describe('E-12 — funding_divergence alerts are gross-indicative, never net', (
       items: [{
         asset: '1000PEPE',
         pairs: [{
-          long: { exchange: 'Binance', fundingRate: 0.0068493 },
-          short: { exchange: 'HL', fundingRate: 0 },
+          long: { exchange: 'Binance', fundingRate: '0.0068493' },
+          short: { exchange: 'HL', fundingRate: '0' },
         }],
       }],
     };
@@ -506,7 +506,7 @@ describe('E-12 — funding_divergence alerts are gross-indicative, never net', (
         asset: 'BTC',
         pairs: [{
           long: { exchange: 'Binance', fundingRate: 'not-a-number' },
-          short: { exchange: 'HL', fundingRate: 0.001 },
+          short: { exchange: 'HL', fundingRate: '0.001' },
         }],
       }],
     };
@@ -516,5 +516,79 @@ describe('E-12 — funding_divergence alerts are gross-indicative, never net', (
     });
     const { degradation } = await scanner.scanWithDegradation();
     expect(degradation.vooiSkipped).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── E-12-R2 (Issue #17 supervisor review) — VOOI leg fundingRate follows
+// the VooiArbitragePair contract (decimal STRING); annualization flows
+// through the shared helper ──────────────────────────────────────────────
+
+describe('E-12-R2 — VOOI leg fundingRate is contract-strict (decimal string, full grammar)', () => {
+  function singlePairVooi(longRate: unknown, shortRate: unknown = '0.0001'): any {
+    return {
+      items: [{
+        asset: 'BTC',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: longRate, openInterest: '100', price: '50000' },
+          short: { exchange: 'HL', fundingRate: shortRate, openInterest: '10', price: '100' },
+        }],
+      }],
+    };
+  }
+
+  it('valid decimal strings parse exactly as before: 0.02/h → 175.2%/yr → EXTREME_FUNDING fires', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi('0.02') }), now: () => FIXED_NOW });
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.shortFunding).toBeCloseTo(0.02 * 8760 * 100, 6); // helper (decimal APR) × 100 → pct-points
+    expect(degradation.vooiSkipped).toBe(0);
+  });
+
+  it('negative decimal strings preserve sign (SHORT_HARVEST direction intact)', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi('-0.02') }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.longFunding).toBeCloseTo(-0.02 * 8760 * 100, 6);
+    expect(extreme!.direction).toBe('LONG_HARVEST');
+  });
+
+  it('trimmed whitespace and exponent forms are accepted (same strict grammar as OI/price)', async () => {
+    for (const rate of ['  0.02  ', '2e-2', '+0.02']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(rate) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+      expect(extreme, `case ${JSON.stringify(rate)}`).toBeDefined();
+      expect(extreme!.shortFunding).toBeCloseTo(0.02 * 8760 * 100, 6);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(rate)}`).toBe(0);
+    }
+  });
+
+  it('malformed-suffix strings are rejected with visible vooiSkipped degradation (never zero, never parsed)', async () => {
+    for (const bad of ['0.02/h', '0.02 USD', '1e2JUNK', '1.2.3', 'NaN', 'Infinity']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `case ${JSON.stringify(bad)}`).toEqual([]);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(bad)}`).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('NUMERIC fundingRate is REJECTED (the VooiArbitragePair contract declares string; numbers are not contractually supported)', async () => {
+    for (const bad of [0.02, 0, -0.02, 42]) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad as unknown as string) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `numeric rate ${String(bad)} must not fabricate an alert`).toEqual([]);
+      expect(degradation.vooiSkipped, `numeric rate ${String(bad)}`).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('empty / whitespace-only strings are rejected (no fabricated 0 rate)', async () => {
+    for (const bad of ['', '   ']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `case ${JSON.stringify(bad)}`).toEqual([]);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(bad)}`).toBeGreaterThanOrEqual(1);
+    }
   });
 });

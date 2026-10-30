@@ -20,10 +20,34 @@
  * prefix-tolerant parseFloat accepted malformed provider strings such as
  * '100garbage' → 100 or '50000USD' → 50000, turning malformed data into a
  * fabricated positive OI.
+ *
+ * E-12-R2 (Issue #17 supervisor review):
+ *   - Annualization flows through lib/funding-annualization.ts
+ *     (`annualizeFundingRate` + `ASSUMED_FUNDING_INTERVAL_HOURS`) on EVERY
+ *     production path — the helper is no longer merely unit-tested while
+ *     production multiplies inline. The 1h basis remains an EXPLICIT,
+ *     UNVERIFIED assumption (see the lib module docblock; the vooi-client
+ *     derivation comment is not independent confirmation, and no network
+ *     verification is authorized).
+ *   - VOOI leg `fundingRate` is parsed per the `VooiArbitragePair`
+ *     contract: a decimal STRING, full-grammar-strict. Numeric values are
+ *     NOT contractually supported and are rejected with visible
+ *     degradation (vooiSkipped), never coerced — and never zero.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { canonAsset, canonVenue } from '../lib/venue-asset-aliases.js';
+import {
+  ASSUMED_FUNDING_INTERVAL_HOURS,
+  annualizeFundingRate,
+  parseStrictDecimalString,
+  STRICT_DECIMAL_RE,
+} from '../lib/funding-annualization.js';
+
+// Back-compat re-exports: the helper and the assumption constant were
+// first exported from this module (E-12-R1); existing consumers keep
+// importing them from here while the implementation lives in the lib.
+export { ASSUMED_FUNDING_INTERVAL_HOURS, annualizeFundingRate };
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const VOI_API = 'https://perps-api.vooi.io';
@@ -43,7 +67,7 @@ const VOI_API = 'https://perps-api.vooi.io';
  * string failing this grammar converts to NaN and therefore to `oi: null`
  * (fail-closed, unchanged).
  */
-const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const VOI_NUMERIC_RE = STRICT_DECIMAL_RE;
 
 // ─── E-12 (Issue #17): funding interval + gross/net integrity ──────────
 //
@@ -52,10 +76,14 @@ const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 // VOOI's `fundingRate` is HOURLY by VOOI's own derivation rule — the
 // vooi-client schema documents `fundingRate8h = Number(fundingRate) × 3`
 // (8h = 3 × 1h). NEITHER API publishes the underlying VENUE-SPECIFIC
-// funding interval, so every annualization below rests on an EXPLICIT
-// '1h-assumed' basis, recorded on every alert. If a future payload ever
-// carries a per-row interval, it must flow through annualizeFundingRate()
-// instead of the fixed-basis path.
+// funding interval, and that derivation comment alone is not independent
+// confirmation — so every annualization below rests on an EXPLICIT,
+// UNVERIFIED '1h-assumed' basis (ASSUMED_FUNDING_INTERVAL_HOURS via
+// annualizeFundingRate — the single production annualization input),
+// recorded on every alert as '1h-assumed'. These figures must never be
+// described as interval-verified. If a future payload ever carries a
+// per-row interval, it must flow through annualizeFundingRate() with that
+// row interval instead of the fixed-basis constant.
 //
 // Gross vs net: divergence math is a RAW rate difference. No fees, no
 // holding/persistence, no basis assumptions are modeled here — net
@@ -63,33 +91,10 @@ const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 // `dailyProfitOn5k` was a GROSS annualized divergence converted to a
 // daily dollar figure, not realized/net profit; it is retained only as a
 // @deprecated gross-documented alias of `dailyGrossIndicativeOn5k`.
-
-/** The annualization-interval assumption used by this scanner (hours). */
-export const ASSUMED_FUNDING_INTERVAL_HOURS = 1;
-
-/**
- * Annualize a per-interval funding rate into a decimal-fraction APR
- * (1.0 = 100%/yr), pure and fail-closed.
- *
- *   apr = rate_per_interval × (24 / interval_hours) × 365
- *
- * Examples (fixtures in funding-divergence-scanner.test.ts):
- *   annualizeFundingRate(0.0001, 1)  → 0.876   (0.01%/h ≈ 87.6%/yr)
- *   annualizeFundingRate(0.0008, 8)  → 0.876   (0.08%/8h ≈ same annual)
- *   annualizeFundingRate(0.01, 24)   → 0.152   (1%/day ≈ 15.2%/yr)
- *
- * Throws on a non-finite rate or a non-finite/≤0 interval — a missing or
- * malformed interval must FAIL, never silently annualize as if hourly.
- */
-export function annualizeFundingRate(ratePerInterval: number, intervalHours: number): number {
-  if (typeof ratePerInterval !== 'number' || !Number.isFinite(ratePerInterval)) {
-    throw new Error(`annualizeFundingRate: ratePerInterval must be a finite number, got ${String(ratePerInterval)}`);
-  }
-  if (typeof intervalHours !== 'number' || !Number.isFinite(intervalHours) || intervalHours <= 0) {
-    throw new Error(`annualizeFundingRate: intervalHours must be a finite positive number of hours, got ${String(intervalHours)}`);
-  }
-  return ratePerInterval * (24 / intervalHours) * 365;
-}
+//
+// (annualizeFundingRate + ASSUMED_FUNDING_INTERVAL_HOURS live in
+// lib/funding-annualization.ts and are re-exported above; the strict
+// decimal grammar is shared via STRICT_DECIMAL_RE.)
 
 export interface FundingDivergenceParams {
   /** Min divergence (spread) to alert (default 20%/yr) */
@@ -259,7 +264,10 @@ export class FundingDivergenceScanner implements Strategy {
         const fundingHourly = parseFloat(ctx.funding);
         // Item 5: reject NaN funding instead of `|| 0`
         if (!isFinite(fundingHourly)) { degradation.hlSkipped++; continue; }
-        const fundingAnnual = fundingHourly * 24 * 365 * 100;
+        // E-12-R2: annualization flows through the shared helper — the
+        // interval input is ASSUMED_FUNDING_INTERVAL_HOURS, not an inline
+        // 24×365; × 100 converts decimal APR → the alert's pct-points unit.
+        const fundingAnnual = annualizeFundingRate(fundingHourly, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
         if (Math.abs(fundingAnnual) < 5) continue;
 
         // Item 5: derive real OI; null when missing/invalid
@@ -324,10 +332,16 @@ export class FundingDivergenceScanner implements Strategy {
         if (!canonA) { degradation.vooiSkipped++; continue; }
         for (const p of (item.pairs || [])) {
           if (p.long?.exchange) {
-            const fr = p.long.fundingRate;
-            // Item 5: reject NaN funding instead of `|| 0`
-            if (typeof fr !== 'number' || !isFinite(fr)) { degradation.vooiSkipped++; continue; }
-            const longFunding = fr * 24 * 365 * 100;
+            // E-12-R2: the VooiArbitragePair contract declares leg
+            // `fundingRate` as a decimal STRING. Parse with the strict
+            // full-string grammar; numeric values are NOT contractually
+            // supported and — like malformed strings — are rejected with
+            // visible degradation (vooiSkipped), never coerced, never 0.
+            const fr = parseStrictDecimalString(p.long.fundingRate);
+            if (!Number.isFinite(fr)) { degradation.vooiSkipped++; continue; }
+            // Annualization via the shared helper (explicit 1h-assumed
+            // basis); × 100 → pct-points alert unit.
+            const longFunding = annualizeFundingRate(fr, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
             if (Math.abs(longFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
               // Cluster2-R1: OI = openInterest × price (strict); null if invalid.
@@ -336,9 +350,9 @@ export class FundingDivergenceScanner implements Strategy {
             }
           }
           if (p.short?.exchange) {
-            const fr = p.short.fundingRate;
-            if (typeof fr !== 'number' || !isFinite(fr)) { degradation.vooiSkipped++; continue; }
-            const shortFunding = fr * 24 * 365 * 100;
+            const fr = parseStrictDecimalString(p.short.fundingRate);
+            if (!Number.isFinite(fr)) { degradation.vooiSkipped++; continue; }
+            const shortFunding = annualizeFundingRate(fr, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
             if (Math.abs(shortFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
               // Cluster2-R1: OI = openInterest × price (strict); null if invalid.

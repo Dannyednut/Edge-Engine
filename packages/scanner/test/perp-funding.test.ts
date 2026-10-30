@@ -475,3 +475,68 @@ describe('E-12 — perp_funding canonical APR unit and gross/net separation', ()
     expect(alerts).toEqual([]);
   });
 });
+
+// ─── E-12-R2 (Issue #17 supervisor review) — contract-strict leg rates +
+// helper-wired annualization ─────────────────────────────────────────────
+
+import { annualizeFundingRate, ASSUMED_FUNDING_INTERVAL_HOURS } from '../src/lib/funding-annualization.js';
+
+describe('E-12-R2 — perp_funding leg rates follow the VooiArbitragePair contract; annualization flows through the shared helper', () => {
+  it('leg APRs are EXACTLY annualizeFundingRate(rate, 1h) — the helper is the production interval input (no inline drift)', async () => {
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([makeVooiPair()]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    const vooiOnly = alerts.find(x => x.source === 'vooi');
+    expect(vooiOnly).toBeDefined();
+    expect(vooiOnly!.longFundingApr).toBeCloseTo(
+      annualizeFundingRate(Number('-0.00010'), ASSUMED_FUNDING_INTERVAL_HOURS), 12);
+    expect(vooiOnly!.shortFundingApr).toBeCloseTo(
+      annualizeFundingRate(Number('0.00020'), ASSUMED_FUNDING_INTERVAL_HOURS), 12);
+    expect(vooiOnly!.spreadApr).toBeCloseTo(
+      annualizeFundingRate(0.0003, ASSUMED_FUNDING_INTERVAL_HOURS), 12);
+  });
+
+  it('non-contractual NUMERIC leg fundingRate is rejected (schema declares string) — row skipped, never fabricated', async () => {
+    const badPair = makeVooiPair({
+      long: { ...makeVooiPair().long, fundingRate: -0.0001 as unknown as string },
+    } as Partial<VooiArbitragePair>);
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([badPair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts.find(x => x.source === 'vooi')).toBeUndefined();
+  });
+
+  it('empty-string leg fundingRate is rejected — the bare-Number() coercion that mapped "" to a fabricated 0 is gone', async () => {
+    const badPair = makeVooiPair({
+      long: { ...makeVooiPair().long, fundingRate: '   ' },
+    } as Partial<VooiArbitragePair>);
+    const strat = new PerpFundingStrategy(
+      makeSharpeClient([], { asOf: null }),
+      makeVooiClient([badPair]),
+      PARAMS,
+    );
+    const alerts = await strat.scan();
+    expect(alerts.find(x => x.source === 'vooi')).toBeUndefined();
+  });
+
+  it('malformed-suffix leg fundingRate strings are rejected with the row skipped (visible warn path)', async () => {
+    for (const bad of ['0.0002/h', '0.0002 USD', '1e-4JUNK', '0x10', 'NaN', 'Infinity']) {
+      const badPair = makeVooiPair({
+        long: { ...makeVooiPair().long, fundingRate: bad },
+      } as Partial<VooiArbitragePair>);
+      const strat = new PerpFundingStrategy(
+        makeSharpeClient([], { asOf: null }),
+        makeVooiClient([badPair]),
+        PARAMS,
+      );
+      const alerts = await strat.scan();
+      expect(alerts.find(x => x.source === 'vooi'), `case ${bad}`).toBeUndefined();
+    }
+  });
+});

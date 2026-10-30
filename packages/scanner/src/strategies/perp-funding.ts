@@ -23,6 +23,20 @@
  *     fundingRate × 3 — see the vooi-client schema comment), so
  *     ×24×365 is the annualization; it is an EXPLICIT ASSUMPTION recorded
  *     on every VOOI-only alert.
+ *   - E-12-R2 (supervisor review): the annualization arithmetic flows
+ *     through lib/funding-annualization.ts (`annualizeFundingRate` with
+ *     ASSUMED_FUNDING_INTERVAL_HOURS) on EVERY production path — the
+ *     helper is no longer merely unit-tested while production multiplies
+ *     inline. The 1h basis remains EXPLICIT and UNVERIFIED (the
+ *     vooi-client derivation comment is not independent confirmation; no
+ *     network verification is authorized) — nothing here may be described
+ *     as interval-verified.
+ *   - E-12-R2: VOOI leg `fundingRate` is parsed per the
+ *     `VooiArbitragePair` contract (decimal STRING) with the strict
+ *     full-string grammar — the previous bare `Number()` coercion also
+ *     accepted numeric values (not contractually supported) and mapped
+ *     ''/whitespace to 0 (a fabricated zero rate). Non-conforming values
+ *     now skip the row with visible degradation, never zero.
  *   - GROSS vs NET separation: `netApr` is populated ONLY from a verifiably
  *     sourced fee-adjusted value (the Sharpe `netApr` field). A missing
  *     netApr is NEVER silently replaced by grossApr and labeled net — the
@@ -37,6 +51,11 @@ import type { Strategy, DataPoint, TradeOrder, RiskParams } from '@edge/types';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient, type VooiArbitragePair } from '@edge/vooi-client';
 import { canonAsset, canonVenue } from '../lib/venue-asset-aliases.js';
+import {
+  ASSUMED_FUNDING_INTERVAL_HOURS,
+  annualizeFundingRate,
+  parseStrictDecimalString,
+} from '../lib/funding-annualization.js';
 
 export interface PerpFundingParams {
   minSpreadApr: number;          // 0.08 = 8% APR
@@ -283,11 +302,13 @@ export class PerpFundingStrategy implements Strategy {
           // E-12: VOOI fundingSpread1h is a HOURLY decimal-fraction rate
           // (VOOI's own fundingRate8h field is defined as fundingRate × 3 —
           // 8h = 3 × 1h — see the vooi-client schema comment). Annualize
-          // ×24×365 into the CANONICAL DECIMAL-FRACTION APR. The previous
-          // extra ×100 produced percentage points — 100× larger than the
-          // decimal threshold (min_spread_apr = 0.08) and than Sharpe rows,
-          // corrupting both the gate and the shared sort. The 1h basis is
-          // an explicit assumption recorded on the alert.
+          // into the CANONICAL DECIMAL-FRACTION APR via the shared helper
+          // (E-12-R2: the helper IS the production interval input — no
+          // inline 24×365). The previous extra ×100 produced percentage
+          // points — 100× larger than the decimal threshold
+          // (min_spread_apr = 0.08) and than Sharpe rows, corrupting both
+          // the gate and the shared sort. The 1h basis is an explicit,
+          // UNVERIFIED assumption recorded on the alert.
           const fundingSpread1h = p.fundingSpread1h;
           if (typeof fundingSpread1h !== 'number' || !Number.isFinite(fundingSpread1h) || fundingSpread1h < 0) {
             // Fail-closed: a malformed spread must not propagate into
@@ -296,12 +317,16 @@ export class PerpFundingStrategy implements Strategy {
             vooiSkippedMalformed++;
             continue;
           }
-          const spreadApr = fundingSpread1h * 24 * 365;
+          const spreadApr = annualizeFundingRate(fundingSpread1h, ASSUMED_FUNDING_INTERVAL_HOURS);
           if (spreadApr < this.params.minSpreadApr) continue;
 
           // Leg rates: same hourly decimal basis, fail-closed on malformed.
-          const longFundingRate = Number(p.long.fundingRate);
-          const shortFundingRate = Number(p.short.fundingRate);
+          // E-12-R2: the contract declares `fundingRate` as a decimal
+          // STRING — strict full-grammar parsing (numeric values are not
+          // contractually supported; ''/whitespace must never coerce to a
+          // fabricated 0). Non-conforming → visible skip, never zero.
+          const longFundingRate = parseStrictDecimalString(p.long.fundingRate);
+          const shortFundingRate = parseStrictDecimalString(p.short.fundingRate);
           if (!Number.isFinite(longFundingRate) || !Number.isFinite(shortFundingRate)) {
             vooiSkippedMalformed++;
             continue;
@@ -312,8 +337,8 @@ export class PerpFundingStrategy implements Strategy {
             asset: p.asset,
             longVenue: p.long.exchange,
             shortVenue: p.short.exchange,
-            longFundingApr: longFundingRate * 24 * 365,
-            shortFundingApr: shortFundingRate * 24 * 365,
+            longFundingApr: annualizeFundingRate(longFundingRate, ASSUMED_FUNDING_INTERVAL_HOURS),
+            shortFundingApr: annualizeFundingRate(shortFundingRate, ASSUMED_FUNDING_INTERVAL_HOURS),
             spreadApr,
             // E-12: VOOI provides NO fee-adjusted net APR, and this scanner
             // has no cost model — the row is GROSS-INDICATIVE. netApr stays
