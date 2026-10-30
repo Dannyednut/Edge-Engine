@@ -258,8 +258,15 @@ async function main() {
         console.log(formatFundingDegradation(fundingDivDegradation));
       }
 
-      // Process perp alerts
-      for (const a of perpAlerts.filter(a => a.netApr >= 8).slice(0, 3)) {
+      // Process perp alerts — E-12: netApr is now `number | null` (null =
+      // gross/indicative only). Alert eligibility is NET-ECONOMICS-based:
+      // only rows with a VERIFIED (Sharpe-sourced) net APR at or above the
+      // 8%/yr threshold pass. PERP_MIN_NET_APR is DECIMAL-FRACTION APR
+      // (0.08 = 8%/yr) matching the min_spread_apr default and the E-12
+      // canonical unit; display converts ×100 to percentage points.
+      const PERP_MIN_NET_APR = 0.08;
+      for (const a of perpAlerts.filter(a => a.netApr !== null && a.netApr >= PERP_MIN_NET_APR).slice(0, 3)) {
+        const netAprPct = (a.netApr as number) * 100;
         const key = `perp|${a.asset}|${a.longVenue}|${a.shortVenue}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
@@ -268,10 +275,10 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: 'perp_funding',
-          title: `[PERP] ${a.asset} ${a.netApr.toFixed(1)}% APR${a.vooiExecutable ? ' · VOOI-exec' : ''}`,
+          title: `[PERP] ${a.asset} ${netAprPct.toFixed(1)}% net APR${a.vooiExecutable ? ' · VOOI-exec' : ''}`,
           body: [
             `Long ${a.longVenue} → Short ${a.shortVenue}`,
-            `Net APR: ${a.netApr.toFixed(2)}%`,
+            `Net APR: ${netAprPct.toFixed(2)}% (Sharpe-reported fee-adjusted net APR, provider-sourced; not independently verified; decimal-fraction ×100)`,
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
             `Source: ${a.source} | VOOI: ${a.vooiExecutable ? 'YES' : 'NO'}`,

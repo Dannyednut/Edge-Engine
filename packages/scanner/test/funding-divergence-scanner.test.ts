@@ -146,8 +146,8 @@ describe('FundingDivergenceScanner — EM-STRAT-014-E11 items 4 + 5', () => {
       items: [{
         asset: '1000PEPE',
         pairs: [{
-          long: { exchange: 'Binance', fundingRate: 0.0068493 }, // annual≈60%
-          short: { exchange: 'HL', fundingRate: 0 },
+          long: { exchange: 'Binance', fundingRate: '0.0068493' }, // annual≈60%
+          short: { exchange: 'HL', fundingRate: '0' },
         }],
       }],
     };
@@ -171,8 +171,8 @@ describe('FundingDivergenceScanner — EM-STRAT-014-E11 items 4 + 5', () => {
       items: [{
         asset: 'DIFFERENTCOIN',
         pairs: [{
-          long: { exchange: 'Binance', fundingRate: 0.0068493 },
-          short: { exchange: 'HL', fundingRate: 0 },
+          long: { exchange: 'Binance', fundingRate: '0.0068493' },
+          short: { exchange: 'HL', fundingRate: '0' },
         }],
       }],
     };
@@ -211,14 +211,14 @@ describe('Cluster2-R1: VOOI OI parsed from actual response fields (openInterest 
   function makeVooiResponse(legOverrides: Record<string, unknown>): any {
     const leg = {
       exchange: 'hyperliquid',
-      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      fundingRate: '0.02', // 0.02/h → 175.2%/yr (≥ 50 threshold)
       ...legOverrides,
     };
     return {
       items: [
         {
           asset: 'BTC',
-          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: '0.0001', openInterest: '10', price: '100' } }],
         },
       ],
     };
@@ -275,14 +275,14 @@ describe('Cluster2-R2: strict full-string numeric validation (parseFloat prefix 
   function makeVooiResponse(legOverrides: Record<string, unknown>): any {
     const leg = {
       exchange: 'hyperliquid',
-      fundingRate: 0.02, // 0.02/h → 175.2%/yr (≥ 50 threshold)
+      fundingRate: '0.02', // 0.02/h → 175.2%/yr (≥ 50 threshold)
       ...legOverrides,
     };
     return {
       items: [
         {
           asset: 'BTC',
-          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: 0.0001, openInterest: '10', price: '100' } }],
+          pairs: [{ long: leg, short: { exchange: 'binance', fundingRate: '0.0001', openInterest: '10', price: '100' } }],
         },
       ],
     };
@@ -405,5 +405,190 @@ describe('Cluster2-R1: degradation reaches production observability', () => {
     expect(src).toMatch(/fundingDivergence\.scanWithDegradation\(\)/);
     expect(src).not.toMatch(/fundingDivergence\.scan\(\)/);
     expect(src).toContain('formatFundingDegradation(fundingDivDegradation)');
+  });
+});
+
+// ─── E-12 (Issue #17) — interval-aware annualization + gross/net honesty ──
+
+import { annualizeFundingRate, ASSUMED_FUNDING_INTERVAL_HOURS } from '../src/strategies/funding-divergence-scanner.js';
+
+describe('E-12 — annualizeFundingRate (interval-aware, fail-closed)', () => {
+  it('1h interval: 0.0001/h → 0.876 decimal APR (87.6%/yr)', () => {
+    expect(annualizeFundingRate(0.0001, 1)).toBeCloseTo(0.876, 12);
+  });
+
+  it('8h interval: 0.0008/8h → 0.876 decimal APR (same annual, different interval)', () => {
+    expect(annualizeFundingRate(0.0008, 8)).toBeCloseTo(0.876, 12);
+  });
+
+  it('1h and 8h representations of the SAME economics annualize identically', () => {
+    // 0.01%/h ≡ 0.08%/8h — interval-aware normalization must not confuse them
+    expect(annualizeFundingRate(0.0008, 8)).toBeCloseTo(annualizeFundingRate(0.0001, 1), 12);
+  });
+
+  it('24h interval: 0.01/day → 3.65 decimal APR (365%/yr — daily rate × 365)', () => {
+    expect(annualizeFundingRate(0.01, 24)).toBeCloseTo(3.65, 12);
+  });
+
+  it('negative rates annualize sign-preserving (short-harvest detection depends on it)', () => {
+    expect(annualizeFundingRate(-0.0001, 1)).toBeCloseTo(-0.876, 12);
+  });
+
+  it('fails closed on malformed rates (NaN / Infinity / non-number)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '0.01' as unknown as number, null as unknown as number]) {
+      expect(() => annualizeFundingRate(bad, 1), `rate ${String(bad)}`).toThrow(/ratePerInterval/);
+    }
+  });
+
+  it('fails closed on missing/invalid intervals (0, negative, NaN, Infinity) — never silently annualizes as hourly', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '8' as unknown as number]) {
+      expect(() => annualizeFundingRate(0.0001, bad), `interval ${String(bad)}`).toThrow(/intervalHours/);
+    }
+  });
+
+  it('ASSUMED_FUNDING_INTERVAL_HOURS is the documented 1h basis', () => {
+    expect(ASSUMED_FUNDING_INTERVAL_HOURS).toBe(1);
+  });
+});
+
+describe('E-12 — funding_divergence alerts are gross-indicative, never net', () => {
+  it('DIVERGENCE alert carries dailyGrossIndicativeOn5k = deprecated dailyProfitOn5k = gross value; netEconomics unavailable; 1h-assumed', async () => {
+    // HL PEPE 30%/yr gross, VOOI 1000PEPE 60%/yr gross → divergence 30 pct-points/yr
+    const hl = makeHlResponse([
+      { name: 'PEPE', funding: '0.0034247', openInterest: '0', markPx: '0' },
+    ]);
+    const vooi = {
+      items: [{
+        asset: '1000PEPE',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: '0.0068493' },
+          short: { exchange: 'HL', fundingRate: '0' },
+        }],
+      }],
+    };
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi }),
+      now: () => FIXED_NOW,
+    });
+    const { alerts } = await scanner.scanWithDegradation();
+    const div = alerts.find(a => a.type === 'DIVERGENCE');
+    expect(div).toBeDefined();
+    // Gross daily figure: 5000 × 30/100 / 365 ≈ $4.11 — INDICATIVE ONLY
+    expect(div!.dailyGrossIndicativeOn5k).toBeCloseTo(5000 * div!.divergence / 100 / 365, 10);
+    // The deprecated alias carries the SAME value and nothing more
+    expect(div!.dailyProfitOn5k).toBe(div!.dailyGrossIndicativeOn5k);
+    // Net economics are explicitly UNAVAILABLE (no fee/holding/basis model)
+    expect(div!.netEconomics).toBe('unavailable');
+    expect(div!.fundingIntervalAssumption).toBe('1h-assumed');
+  });
+
+  it('EXTREME_FUNDING alert is equally labeled gross-indicative with net unavailable', async () => {
+    const hl = makeHlResponse([
+      { name: 'BTC', funding: '0.02', openInterest: '100', markPx: '50000' },
+    ]);
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi: { items: [] } }),
+      now: () => FIXED_NOW,
+    });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.dailyGrossIndicativeOn5k).toBeCloseTo(5000 * extreme!.divergence / 100 / 365, 10);
+    expect(extreme!.dailyProfitOn5k).toBe(extreme!.dailyGrossIndicativeOn5k);
+    expect(extreme!.netEconomics).toBe('unavailable');
+    expect(extreme!.fundingIntervalAssumption).toBe('1h-assumed');
+  });
+
+  it('malformed VOOI fundingRate strings are skipped with vooiSkipped degradation (failure behavior)', async () => {
+    const hl = makeHlResponse([]);
+    const vooi = {
+      items: [{
+        asset: 'BTC',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: 'not-a-number' },
+          short: { exchange: 'HL', fundingRate: '0.001' },
+        }],
+      }],
+    };
+    const scanner = new FundingDivergenceScanner(PARAMS, {
+      fetchImpl: fakeFetch({ hl, vooi }),
+      now: () => FIXED_NOW,
+    });
+    const { degradation } = await scanner.scanWithDegradation();
+    expect(degradation.vooiSkipped).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── E-12-R2 (Issue #17 supervisor review) — VOOI leg fundingRate follows
+// the VooiArbitragePair contract (decimal STRING); annualization flows
+// through the shared helper ──────────────────────────────────────────────
+
+describe('E-12-R2 — VOOI leg fundingRate is contract-strict (decimal string, full grammar)', () => {
+  function singlePairVooi(longRate: unknown, shortRate: unknown = '0.0001'): any {
+    return {
+      items: [{
+        asset: 'BTC',
+        pairs: [{
+          long: { exchange: 'Binance', fundingRate: longRate, openInterest: '100', price: '50000' },
+          short: { exchange: 'HL', fundingRate: shortRate, openInterest: '10', price: '100' },
+        }],
+      }],
+    };
+  }
+
+  it('valid decimal strings parse exactly as before: 0.02/h → 175.2%/yr → EXTREME_FUNDING fires', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi('0.02') }), now: () => FIXED_NOW });
+    const { alerts, degradation } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.shortFunding).toBeCloseTo(0.02 * 8760 * 100, 6); // helper (decimal APR) × 100 → pct-points
+    expect(degradation.vooiSkipped).toBe(0);
+  });
+
+  it('negative decimal strings preserve sign (SHORT_HARVEST direction intact)', async () => {
+    const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi('-0.02') }), now: () => FIXED_NOW });
+    const { alerts } = await scanner.scanWithDegradation();
+    const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+    expect(extreme).toBeDefined();
+    expect(extreme!.longFunding).toBeCloseTo(-0.02 * 8760 * 100, 6);
+    expect(extreme!.direction).toBe('LONG_HARVEST');
+  });
+
+  it('trimmed whitespace and exponent forms are accepted (same strict grammar as OI/price)', async () => {
+    for (const rate of ['  0.02  ', '2e-2', '+0.02']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(rate) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      const extreme = alerts.find(a => a.type === 'EXTREME_FUNDING');
+      expect(extreme, `case ${JSON.stringify(rate)}`).toBeDefined();
+      expect(extreme!.shortFunding).toBeCloseTo(0.02 * 8760 * 100, 6);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(rate)}`).toBe(0);
+    }
+  });
+
+  it('malformed-suffix strings are rejected with visible vooiSkipped degradation (never zero, never parsed)', async () => {
+    for (const bad of ['0.02/h', '0.02 USD', '1e2JUNK', '1.2.3', 'NaN', 'Infinity']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `case ${JSON.stringify(bad)}`).toEqual([]);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(bad)}`).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('NUMERIC fundingRate is REJECTED (the VooiArbitragePair contract declares string; numbers are not contractually supported)', async () => {
+    for (const bad of [0.02, 0, -0.02, 42]) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad as unknown as string) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `numeric rate ${String(bad)} must not fabricate an alert`).toEqual([]);
+      expect(degradation.vooiSkipped, `numeric rate ${String(bad)}`).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('empty / whitespace-only strings are rejected (no fabricated 0 rate)', async () => {
+    for (const bad of ['', '   ']) {
+      const scanner = new FundingDivergenceScanner(PARAMS, { fetchImpl: fakeFetch({ hl: makeHlResponse([]), vooi: singlePairVooi(bad) }), now: () => FIXED_NOW });
+      const { alerts, degradation } = await scanner.scanWithDegradation();
+      expect(alerts, `case ${JSON.stringify(bad)}`).toEqual([]);
+      expect(degradation.vooiSkipped, `case ${JSON.stringify(bad)}`).toBeGreaterThanOrEqual(1);
+    }
   });
 });

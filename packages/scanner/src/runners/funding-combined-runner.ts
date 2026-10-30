@@ -153,7 +153,11 @@ async function main() {
         }),
       ]);
 
-      const filteredPerp = perpAlerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
+      // E-12: netApr is `number | null` — only VERIFIED (Sharpe-sourced) net
+      // APRs are alert-eligible. MIN_APR_FOR_ALERT is entered in percentage
+      // points (8 = 8%/yr); the canonical internal unit is a decimal
+      // fraction, hence /100 (same convention as minAprToExecute below).
+      const filteredPerp = perpAlerts.filter(a => a.netApr !== null && a.netApr >= MIN_APR_FOR_ALERT / 100);
       // EM-STRAT-005 §2: CEX-HL alerts are non-actionable until venue-native
       // corroboration is wired (provenance = 'independently-corroborated').
       // Until then, the actionable flag is always false, so filteredCexHl
@@ -183,15 +187,16 @@ async function main() {
       for (const { alert, type } of newAlerts) {
         if (type === 'perp') {
           const a = alert as PerpFundingAlert;
+          const netAprPct = (a.netApr as number) * 100; // verified non-null by filteredPerp
           await alerter.sendAlert({
             id: `perp_${a.asset}_${a.longVenue}_${a.shortVenue}_${Date.now()}`,
             ts: Date.now(),
             severity: 'opportunity',
             strategyId: 'perp_funding',
-            title: `[PERP] ${a.asset} ${a.netApr.toFixed(1)}% APR${a.vooiExecutable ? ' · VOOI-exec' : ''}`,
+            title: `[PERP] ${a.asset} ${netAprPct.toFixed(1)}% net APR${a.vooiExecutable ? ' · VOOI-exec' : ''}`,
             body: [
               `*Long* ${a.longVenue}  →  *Short* ${a.shortVenue}`,
-              `Net APR: *${a.netApr.toFixed(2)}%*`,
+              `Net APR: *${netAprPct.toFixed(2)}%* (Sharpe-reported fee-adjusted net APR, provider-sourced; not independently verified)`,
               `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
               `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M / Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,
               `Source: \`${a.source}\`  Confidence: ${(a.confidence * 100).toFixed(0)}%`,

@@ -17,7 +17,7 @@ import { TelegramAlerter } from '@edge/alerts';
 import { PnlDb } from '@edge/pnl';
 import { SharpeClient } from '@edge/sharpe-client';
 import { VooiClient } from '@edge/vooi-client';
-import { PerpFundingStrategy } from '../strategies/perp-funding.js';
+import { PerpFundingStrategy, type PerpFundingAlert } from '../strategies/perp-funding.js';
 
 // Resolve repo root (4 levels up: runners/ → src/ → scanner/ → packages/ → repo)
 import { fileURLToPath } from 'node:url';
@@ -41,7 +41,13 @@ try {
 
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
 const TOP_N_ALERTS = 5;
-const MIN_APR_FOR_ALERT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
+// E-12: PerpFundingAlert.netApr is a DECIMAL-FRACTION APR (0.08 = 8%/yr) —
+// canonical internal unit. This env knob keeps its documented PCT-POINTS
+// meaning (default 8 = 8%/yr); the comparison converts at the boundary.
+// netApr === null (net economics UNAVAILABLE — gross/indicative-only row)
+// is never alerted: eligibility is net-verified-only, fail-closed.
+const MIN_APR_FOR_ALERT_PCT = Number(process.env.MIN_APR_FOR_ALERT ?? 8);
+const MIN_NET_APR_DECIMAL = MIN_APR_FOR_ALERT_PCT / 100;
 
 async function main() {
   console.log('── Edge-Engine / Perp-Funding Scanner ────────────');
@@ -106,7 +112,13 @@ async function main() {
     const start = Date.now();
     try {
       const alerts = await strategy.scan();
-      const filtered = alerts.filter(a => a.netApr >= MIN_APR_FOR_ALERT);
+      // E-12: null-guarded, decimal-consistent alert eligibility — a row
+      // with UNAVAILABLE net economics (netApr === null) can never be
+      // alerted, and the threshold is compared in the alert's decimal unit.
+      const filtered = alerts.filter(
+        (a): a is PerpFundingAlert & { netApr: number } =>
+          a.netApr !== null && a.netApr >= MIN_NET_APR_DECIMAL,
+      );
       const top = filtered.slice(0, TOP_N_ALERTS);
       const newAlerts = top.filter(a => {
         const key = `${a.asset}|${a.longVenue}|${a.shortVenue}`;
@@ -116,7 +128,7 @@ async function main() {
         return true;
       });
 
-      console.log(`[scan ${scanCount}] ${filtered.length} opps ≥ ${MIN_APR_FOR_ALERT}% APR, ${newAlerts.length} new (of ${alerts.length} total) in ${Date.now() - start}ms`);
+      console.log(`[scan ${scanCount}] ${filtered.length} opps ≥ ${MIN_APR_FOR_ALERT_PCT}% net APR, ${newAlerts.length} new (of ${alerts.length} total) in ${Date.now() - start}ms`);
 
       for (const a of newAlerts) {
         await alerter.sendAlert({
@@ -124,10 +136,10 @@ async function main() {
           ts: Date.now(),
           severity: 'opportunity',
           strategyId: strategy.id,
-          title: `${a.asset} funding arb · ${a.netApr.toFixed(1)}% APR${a.vooiExecutable ? ' · VOOI-executable' : ''}`,
+          title: `${a.asset} funding arb · ${(a.netApr * 100).toFixed(1)}% net APR (Sharpe-reported, provider-sourced; not independently verified)${a.vooiExecutable ? ' · VOOI-executable' : ''}`,
           body: [
             `*Long* ${a.longVenue}  →  *Short* ${a.shortVenue}`,
-            `Net APR: *${a.netApr.toFixed(2)}%*`,
+            `Net APR (Sharpe-reported, provider-sourced; not independently verified): *${(a.netApr * 100).toFixed(2)}%*`,
             `Price spread: ${a.priceSpreadPct.toFixed(3)}%`,
             `Long OI: $${(a.longOiUsd / 1e6).toFixed(2)}M`,
             `Short OI: $${(a.shortOiUsd / 1e6).toFixed(2)}M`,

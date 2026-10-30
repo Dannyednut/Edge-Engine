@@ -96,13 +96,21 @@ export class VooiArbExecutor {
         continue; // skip non-VOOI pairs
       }
 
-      if (alert.netApr < this.opts.minNetApr) {
+      // E-12: netApr is a DECIMAL-FRACTION APR (0.08 = 8%/yr) and is null
+      // when net economics are UNAVAILABLE (gross/indicative-only row).
+      // Fail-closed: an unverified net can never be executable, and the
+      // min/max gates — documented in pct-points — convert at the boundary.
+      if (alert.netApr === null) {
+        continue; // no verified net economics → not executable
+      }
+
+      if (alert.netApr * 100 < this.opts.minNetApr) {
         continue; // skip low-APR pairs
       }
 
       // VOOI recommends max APR cap — ">120% APR collapses fast"
       const maxApr = this.opts.maxNetApr ?? 120;
-      if (alert.netApr > maxApr) {
+      if (alert.netApr * 100 > maxApr) {
         continue; // skip high-APR spikes (likely ephemeral)
       }
 
@@ -111,10 +119,11 @@ export class VooiArbExecutor {
       }
 
       // Estimate daily profit
-      // netApr is annualized; daily = netApr / 365
+      // netApr is an annualized DECIMAL-FRACTION; daily = netApr / 365
+      // (E-12: the former /100 assumed pct-points — 100× understated).
       // But funding resets every 8h, so effective hold is ~8-24h
       const estimatedHoldHours = Math.min(this.opts.maxHoldHours, 8);
-      const estimatedDailyProfitUsd = (alert.netApr / 100 / 365) * this.opts.maxSizeUsd;
+      const estimatedDailyProfitUsd = (alert.netApr / 365) * this.opts.maxSizeUsd;
 
       opps.push({
         alert,
@@ -142,7 +151,7 @@ export class VooiArbExecutor {
       console.log(`  Hedge:   SELL ${opp.alert.shortVenue} (funding -)`);
       console.log(`  Notional: $${opp.notionalUsd}`);
       console.log(`  Est. daily profit: $${opp.estimatedDailyProfitUsd.toFixed(2)}`);
-      console.log(`  Net APR: ${opp.alert.netApr.toFixed(1)}%`);
+      console.log(`  Net APR: ${opp.alert.netApr === null ? 'n/a (unverified)' : (opp.alert.netApr * 100).toFixed(1) + '% (Sharpe-reported, provider-sourced; not independently verified)'}`);
       return { success: false, error: 'dry-run mode' };
     }
 
