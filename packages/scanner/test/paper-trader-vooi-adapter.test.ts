@@ -17,6 +17,9 @@
  *   1. Non-2xx HTTP statuses throw (429, 500, 403) with status preserved
  *   2. Invalid JSON body throws VooiScanError kind 'shape'
  *   3. Malformed response shapes throw VooiScanError kind 'shape'
+ *      (including the supervisor regression set: `{}` / missing `items` /
+ *      missing `pairs` — an incomplete response can no longer pass as
+ *      "no opportunities"; `items` and per-item `pairs` are REQUIRED)
  *   4. Valid empty results pass through (no throw)
  *   5. Valid non-empty results pass through unchanged
  *   6. Query params are serialized correctly; only the injected fetch is used
@@ -142,10 +145,13 @@ describe('vooiScan: malformed response shape throws VooiScanError kind shape', (
     { name: 'body is an array', body: [] },
     { name: 'body is null', body: null },
     { name: 'body is a string', body: 'hello' },
+    { name: 'body is an empty object (items missing)', body: {} },
+    { name: 'items is missing (total only)', body: { total: 0 } },
     { name: 'items is a string', body: { items: 'not-an-array' } },
     { name: 'items entry is null', body: { items: [null] } },
     { name: 'items entry lacks string asset', body: { items: [{ pairs: [] }] } },
     { name: 'items entry asset is a number', body: { items: [{ asset: 42 }] } },
+    { name: 'item.pairs is missing', body: { items: [{ asset: 'ETH' }] } },
     { name: 'item.pairs is a string', body: { items: [{ asset: 'BTC', pairs: 'nope' }] } },
     { name: 'item.pairs entry is null', body: { items: [{ asset: 'BTC', pairs: [null] }] } },
     { name: 'total is a string', body: { items: [], total: 'many' } },
@@ -167,6 +173,19 @@ describe('vooiScan: malformed response shape throws VooiScanError kind shape', (
     expect(() => validateVooiResponse({ items: [], total: Number.NaN })).toThrow(VooiScanError);
     expect(() => validateVooiResponse({ items: [], total: Number.POSITIVE_INFINITY })).toThrow(VooiScanError);
   });
+
+  it('validateVooiResponse rejects the supervisor regression set directly', () => {
+    // Regression (supervisor review): these incomplete forms were previously
+    // accepted and could masquerade as "no opportunities".
+    expect(() => validateVooiResponse({})).toThrow(/items is missing/);
+    expect(() => validateVooiResponse({ total: 0 })).toThrow(/items is missing/);
+    expect(() => validateVooiResponse({ items: [{ asset: 'ETH' }] })).toThrow(/item\.pairs is missing/);
+    // A genuine empty result remains valid.
+    expect(validateVooiResponse({ items: [], total: 0 })).toEqual({ items: [], total: 0 });
+    expect(validateVooiResponse({ items: [{ asset: 'ETH', pairs: [] }] })).toEqual({
+      items: [{ asset: 'ETH', pairs: [] }],
+    });
+  });
 });
 
 // ─── 4/5. Valid payloads pass through unchanged ───────────────────────
@@ -181,13 +200,14 @@ describe('vooiScan: valid results (including empty) pass through', () => {
     expect(resp).toEqual({ items: [], total: 0 });
   });
 
-  it('valid result with missing items key passes (items optional)', async () => {
+  it('item with empty pairs array { items: [{ asset: "ETH", pairs: [] }] } does NOT throw', async () => {
+    const payload = { items: [{ asset: 'ETH', pairs: [] }], total: 1 };
     const { fetchImpl } = makeMockFetch(
-      makeResponse({ ok: true, status: 200, body: JSON.stringify({ total: 0 }) }),
+      makeResponse({ ok: true, status: 200, body: JSON.stringify(payload) }),
     );
 
     const resp = await vooiScan(BASE, {}, fetchImpl);
-    expect(resp).toEqual({ total: 0 });
+    expect(resp).toEqual(payload);
   });
 
   it('valid non-empty result passes through unchanged', async () => {
@@ -216,14 +236,19 @@ describe('vooiScan: valid results (including empty) pass through', () => {
     expect(resp.items?.[0]?.pairs?.[0]?.priceSpread).toBe(0.008);
   });
 
-  it('item with pairs absent passes (pairs optional per VooiItem)', async () => {
+  it('item with pairs absent is REJECTED (pairs required per VooiItem contract)', async () => {
+    // Regression (supervisor review): `{ items: [{ asset: 'ETH' }] }` was
+    // previously blessed as valid; a response without per-item `pairs` can
+    // no longer pass validation.
     const payload = { items: [{ asset: 'ETH' }], total: 1 };
     const { fetchImpl } = makeMockFetch(
       makeResponse({ ok: true, status: 200, body: JSON.stringify(payload) }),
     );
 
-    const resp = await vooiScan(BASE, {}, fetchImpl);
-    expect(resp).toEqual(payload);
+    const err = await vooiScan(BASE, {}, fetchImpl).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VooiScanError);
+    expect((err as VooiScanError).kind).toBe('shape');
+    expect((err as VooiScanError).message).toContain('item.pairs is missing');
   });
 });
 

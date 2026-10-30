@@ -54,7 +54,8 @@ export interface VooiItem {
 }
 
 export interface VooiResponse {
-  items?: VooiItem[];
+  /** Required: every accepted VOOI response must carry an `items` array (possibly empty). */
+  items: VooiItem[];
   total?: number;
 }
 
@@ -85,11 +86,13 @@ export class VooiScanError extends Error {
  * than tolerating malformed data (a malformed row could silently change
  * accounting inputs).
  *
- * Accepted shape (matching `VooiResponse` / `VooiItem`):
+ * Accepted shape (matching the `VooiResponse` / `VooiItem` contracts —
+ * the fields the engine actually consumes are REQUIRED, so an incomplete
+ * response can never masquerade as "no opportunities"):
  *   - body must be a non-null object
- *   - `items`, if present, must be an array of non-null objects each with
- *     a string `asset`; each item's `pairs`, if present, must be an array
- *     of non-null objects
+ *   - `items` is REQUIRED and must be an array of non-null objects, each
+ *     with a string `asset` and a REQUIRED `pairs` array (possibly empty)
+ *     of non-null objects; a genuine `{ items: [], total: 0 }` is valid
  *   - `total`, if present, must be a finite number
  */
 export function validateVooiResponse(body: unknown): VooiResponse {
@@ -105,10 +108,12 @@ export function validateVooiResponse(body: unknown): VooiResponse {
     throw shapeFail('total is present but not a finite number');
   }
 
-  if (rec.items === undefined) return body as VooiResponse;
-
   if (!Array.isArray(rec.items)) {
-    throw shapeFail('items is present but not an array');
+    throw shapeFail(
+      rec.items === undefined
+        ? 'items is missing (a valid response requires an items array, possibly empty)'
+        : 'items is present but not an array',
+    );
   }
   for (const item of rec.items) {
     if (item === null || typeof item !== 'object' || Array.isArray(item)) {
@@ -118,14 +123,16 @@ export function validateVooiResponse(body: unknown): VooiResponse {
     if (typeof itemRec.asset !== 'string') {
       throw shapeFail('items entry is missing a string asset');
     }
-    if (itemRec.pairs !== undefined && !Array.isArray(itemRec.pairs)) {
-      throw shapeFail('item.pairs is present but not an array');
+    if (!Array.isArray(itemRec.pairs)) {
+      throw shapeFail(
+        itemRec.pairs === undefined
+          ? 'item.pairs is missing (a valid item requires a pairs array, possibly empty)'
+          : 'item.pairs is present but not an array',
+      );
     }
-    if (Array.isArray(itemRec.pairs)) {
-      for (const pair of itemRec.pairs) {
-        if (pair === null || typeof pair !== 'object' || Array.isArray(pair)) {
-          throw shapeFail('item.pairs entry is not a JSON object');
-        }
+    for (const pair of itemRec.pairs) {
+      if (pair === null || typeof pair !== 'object' || Array.isArray(pair)) {
+        throw shapeFail('item.pairs entry is not a JSON object');
       }
     }
   }
@@ -140,7 +147,9 @@ export function validateVooiResponse(body: unknown): VooiResponse {
  *     a 429/500 is NEVER mapped to an empty result (which previously made
  *     an API failure look like "no opportunities")
  *   - invalid JSON body    → throws `VooiScanError('shape', …)`
- *   - malformed shape      → throws `VooiScanError('shape', …)`
+ *   - malformed shape      → throws `VooiScanError('shape', …)`; this
+ *     includes a missing `items` array, an item without `pairs`, or an
+ *     item without a string `asset` — none of these may pass as empty
  *   - valid empty results  → returns `{ items: [], total: 0 }` unchanged
  *
  * `fetchImpl` is injectable so tests run fully offline with a mock fetch;

@@ -56,10 +56,10 @@ The historical line references to the old pre-integration script are obsolete: t
 **Issue:** `vooiScan()` in the live script converted EVERY non-2xx response into `{ items: [], total: 0 }` — a 429/500 was indistinguishable from "no opportunities," and the JSON body was used without any shape validation.
 **Fix:** The adapter now lives in the engine module with an **injectable fetch** (`vooiScan(baseUrl, params, fetchImpl)`, `paper-trader-engine.ts:149`):
 - non-2xx → throws `VooiScanError(kind: 'http', status)` (class at `:70`);
-- invalid JSON or malformed shape → throws `VooiScanError(kind: 'shape')` via `validateVooiResponse()` (`:95`), which requires a JSON object body, array `items` of objects with string `asset`, array `pairs` of objects, and finite numeric `total` when present;
+- invalid JSON or malformed shape → throws `VooiScanError(kind: 'shape')` via `validateVooiResponse()` (`:98`), which requires a JSON object body, a REQUIRED `items` array of objects each with a string `asset` and a REQUIRED `pairs` array (both possibly empty — a genuine `{ items: [], total: 0 }` is valid), and finite numeric `total` when present; a response missing `items`, or an item missing `pairs`, is REJECTED (supervisor review regression fix: incomplete responses can no longer pass as "no opportunities");
 - valid empty results pass through unchanged — an empty result is only ever a real empty result;
 - `runScan` records any thrown failure in `result.errors` (prefixed `Price-spread scan failed:` / `Funding-rate scan failed:`), and the scan summary prints an Errors section.
-**Tests:** 28 direct adapter tests in `packages/scanner/test/paper-trader-vooi-adapter.test.ts` — non-2xx (429/500/403), invalid JSON, 11 malformed-shape cases, valid empty/non-empty pass-through, query serialization, transport isolation, and `runScan` integration. All use an injected mock fetch; no test touches the network.
+**Tests:** 32 direct adapter tests in `packages/scanner/test/paper-trader-vooi-adapter.test.ts` — non-2xx (429/500/403), invalid JSON, 14 malformed-shape cases (including the regression set: `{}`, missing `items`, missing `pairs`), valid empty/empty-`pairs`/non-empty pass-through, query serialization, transport isolation, and `runScan` integration. All use an injected mock fetch; no test touches the network.
 
 ### 7. ✅ APR configuration mismatch fixed (supervisor follow-up #3, this revision)
 **Issue:** The script loaded `.env` "for PAPER_HLP_APR / PAPER_KHYPE_APR" but never used them; a fresh baseline in `runScan` hardcoded `createV2InitialState(0.30, 0.0193)`. Setting the env knobs had no effect — a misleading configuration surface.
@@ -103,25 +103,25 @@ The historical line references to the old pre-integration script are obsolete: t
 npx vitest run packages/scanner/test/paper-trader-accounting.test.ts   → 52/52 PASS
 npx vitest run packages/scanner/test/paper-trader-integration.test.ts  → 22/22 PASS
 npx vitest run packages/scanner/test/paper-trader-engine.test.ts       → 54/54 PASS
-npx vitest run packages/scanner/test/paper-trader-vooi-adapter.test.ts → 28/28 PASS
-Paper-trader total                                                     → 156/156 PASS
+npx vitest run packages/scanner/test/paper-trader-vooi-adapter.test.ts → 32/32 PASS
+Paper-trader total                                                     → 160/160 PASS
 
 npx pnpm -r build      → all workspace packages PASS
 npx pnpm -r typecheck  → all workspace packages PASS
-npx vitest run         → 1023/1023 PASS (61 test files, repository-wide)
+npx vitest run         → 1027/1027 PASS (61 test files, repository-wide)
 ```
 
-### Paper-trader test breakdown (156 tests)
+### Paper-trader test breakdown (160 tests)
 
 | Test file | Tests | Description |
 |---|---|---|
 | `paper-trader-accounting.test.ts` | 52 | Pure-function tests: slippage, fees, erosion, arb P&L, funding reversal, yield freshness, capital allocation, trade recording, state persistence |
 | `paper-trader-integration.test.ts` | 22 | Integration tests: profitable/losing arbs, funding lifecycle, capital checks, yield handling, repeated scans, restart, invalid inputs |
 | `paper-trader-engine.test.ts` | 54 | V2 orchestration with mocked VOOI data, deterministic timestamps, temp filesystem. Includes 5 migration-safety tests + 18 APR-configuration tests (describe 16) |
-| `paper-trader-vooi-adapter.test.ts` | 28 | Direct adapter tests: non-2xx, invalid JSON, malformed shapes, valid empty results, query serialization, transport isolation, runScan error recording |
-| **Total paper-trader tests** | **156** | |
+| `paper-trader-vooi-adapter.test.ts` | 32 | Direct adapter tests: non-2xx, invalid JSON, malformed shapes (incl. missing `items`/`pairs` regressions), valid empty results, query serialization, transport isolation, runScan error recording |
+| **Total paper-trader tests** | **160** | |
 
-(The 156 paper-trader tests are a subset of the 1023 repository-wide tests.)
+(The 160 paper-trader tests are a subset of the 1027 repository-wide tests.)
 
 ---
 
@@ -144,7 +144,7 @@ V2 state/log files are separate from V1. V1 files are preserved as unaudited his
 
 ## F. Conclusion
 
-The original audit (Oct 13) identified 8 issues; all are fixed and now enforced in unit-tested modules. The integration sprint wired the live script to the tested accounting/engine modules (V2), made VOOI failures visible, and fixed the APR configuration mismatch. 156 deterministic paper-trader tests pass at this head, within a green 1023-test repository-wide run.
+The original audit (Oct 13) identified 8 issues; all are fixed and now enforced in unit-tested modules. The integration sprint wired the live script to the tested accounting/engine modules (V2), made VOOI failures visible, and fixed the APR configuration mismatch. 160 deterministic paper-trader tests pass at this head, within a green 1027-test repository-wide run.
 
 The paper trader's reported performance should STILL NOT be cited as evidence of strategy viability until:
 1. The HLP APR is verified against a live API (explicitly not authorized in this offline work item)
