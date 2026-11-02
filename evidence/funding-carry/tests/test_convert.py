@@ -57,6 +57,26 @@ def test_non_positive_interval_rejected():
         funding_apr(0.0001, 0)
 
 
+def test_hostile_intervals_rejected_at_conversion_boundary():
+    """E-12-R6 (PR #18 supervisor review, comment 6573930428).
+
+    ``float("inf")`` passed the previous naive ``interval_hours <= 0``
+    check and ``HOURS_PER_YEAR / inf`` silently yielded a 0.0 APR from a
+    malformed observation. The conversion boundary must reject — with
+    ConversionError, before any annualization — a non-finite interval
+    (inf/NaN), a bool (an int subclass that would silently annualize at
+    1h), and a valid but float-unrepresentable int. The absent (None)
+    interval still passes through as None, never a fabricated default.
+    """
+    for hostile in (float("inf"), float("nan"), True, 10 ** 10000):
+        with pytest.raises(ConversionError):
+            funding_apr(0.00005, hostile)
+        with pytest.raises(ConversionError):
+            rate_8h_equivalent(0.00005, hostile)
+    assert funding_apr(0.00005, None) is None
+    assert rate_8h_equivalent(0.00005, None) is None
+
+
 def test_clamp_detection_exact():
     assert is_at_clamp(0.0000125, 0.0000125)
     assert is_at_clamp(float("0.0000125000000"), 0.0000125)

@@ -11,6 +11,7 @@ import math
 import pytest
 
 from funding_harness import config, reconciliation
+from funding_harness.convert import ConversionError, funding_apr
 from funding_harness.models import (funding_metrics, funding_unit_conventions,
                                     make_observation)
 
@@ -466,6 +467,114 @@ def test_validator_and_record_path_are_total_for_huge_integers():
         [a, b, _alert(divergence=huge), _alert(netApr=huge, netAprBasis="sharpe-net")],
         _corroborating_observations())
     assert len(report["candidates"]) == 4
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+
+
+def test_nonfinite_interval_and_silent_pct_overflow_fail_closed():
+    """E-12-R6 regression (PR #18 supervisor review, comment 6573930428).
+
+    Two observation-validation edge cases that survived R5, both of which
+    could falsely corroborate a leg:
+
+    1. ``interval_hours=float("inf")`` passed the previous naive
+       ``<= 0`` check and silently annualized to a 0.0 APR
+       (``HOURS_PER_YEAR / inf``) — a malformed observation recorded as
+       annualizable.
+    2. a finite annualized APR (rate 1e304 / 1h -> 8.76e307) x 100
+       overflows SILENTLY to inf (float multiplication raises nothing, so
+       neither the R5 ``isfinite(apr)`` check nor the ``except
+       OverflowError`` could see it). Stored as ``rederived_apr_pct`` it
+       either short-circuited the no-expected-figure path to ``ok=True``
+       or produced an ``inf/inf -> NaN`` relative error whose
+       ``NaN > tol`` is False — both falsely ok.
+
+    Both must fail closed: BLOCKED / unannualizable_rate, and the leg
+    record must never carry an infinite ``rederived_apr_pct``.
+    """
+
+    def _hand_built_funding_obs(rate_native, interval_hours):
+        # funding_metrics annualizes at construction time (and now fails
+        # closed on hostile intervals), so a STORED malformed row is
+        # simulated with the same metric keys, hand-built.
+        return make_observation(
+            run_id="e12-r6", collected_at_utc="2026-10-29T00:00:00Z",
+            observation_ts_utc="2026-10-29T00:00:00Z",
+            observation_ts_basis="response_time", source="binance",
+            source_kind="cex", asset="BTC", source_instrument="BTC",
+            metric_group="funding",
+            metrics={
+                "funding_rate_native": rate_native,
+                "funding_interval_hours": interval_hours,
+                "funding_interval_assumed": True,
+                "funding_rate_apr": None,
+                "funding_rate_apr_pct": None,
+                "funding_rate_8h_equiv": None,
+                "at_clamp_reference": False,
+                "mark_price": None,
+                "index_price": None,
+                "open_interest_native": None,
+                "open_interest_unit": None,
+                "open_interest_usd_estimate": None,
+                "next_funding_ts_utc": None,
+                "volume_24h_usd": None,
+                "price_spread_at_size": None,
+                "price_spread_headline": None,
+                "net_apr_reference": None,
+            },
+            unit_conventions=funding_unit_conventions(),
+            evidence={"endpoint": "x", "http_status": 200,
+                      "payload_sha256": "h", "provenance": "test",
+                      "raw_ref": "r", "raw_bounded": False})
+
+    # 0) Pin the exact arithmetic premises the supervisor identified.
+    assert 8760.0 / float("inf") == 0.0  # inf interval silently -> 0.0 APR
+    apr = funding_apr(1e304, 1)
+    assert math.isfinite(apr)                    # 8.76e307 — finite
+    assert not math.isfinite(apr * 100.0)        # x100 silently -> inf
+
+    # 1) Construction boundary: funding_metrics itself now fails closed on
+    #    a non-finite interval (ConversionError), never a 0.0-APR row.
+    with pytest.raises(ConversionError):
+        funding_metrics(rate_native=0.00005, interval_hours=float("inf"),
+                        interval_assumed=True)
+
+    # 2) Record path, inf interval with a FINITE rate: the stored malformed
+    #    row must not annualize to 0.0 and corroborate the short leg.
+    obs_inf = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False),
+               _hand_built_funding_obs(0.00005, float("inf"))]
+    rec1 = reconciliation.reconcile_alerts([_alert()], obs_inf)["candidates"][0]
+    assert rec1["classification"] == reconciliation.CLS_BLOCKED
+    assert rec1["legs"]["long"]["ok"] is True
+    assert rec1["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec1["legs"]["short"]["observation"] is None  # no inf-derived figures stored
+
+    # 3) Record path, silent x100 overflow WITHOUT expected leg figures:
+    #    pre-R6 this leg recorded ok=True with rederived_apr_pct=inf.
+    obs_ovf = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False),
+               _hand_built_funding_obs(1e304, 1)]
+    rec2 = reconciliation.reconcile_alerts([_alert()], obs_ovf)["candidates"][0]
+    assert rec2["classification"] == reconciliation.CLS_BLOCKED
+    assert rec2["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec2["legs"]["short"]["observation"] is None
+
+    # 4) Record path, silent x100 overflow WITH a present expected leg
+    #    figure: pre-R6 the inf/inf relative error was NaN and
+    #    `NaN > tol` is False — the leg was falsely ok=True. Leg figures
+    #    are DECIMAL APRs (perp_funding emission; ×100 → pct at the
+    #    boundary). The legit long leg must still corroborate; the
+    #    overflowing short leg must fail closed.
+    alert_fig = _alert(longFundingApr=0.1095, shortFundingApr=0.438)
+    rec3 = reconciliation.reconcile_alerts([alert_fig], obs_ovf)["candidates"][0]
+    assert rec3["classification"] == reconciliation.CLS_BLOCKED
+    assert rec3["legs"]["long"]["ok"] is True
+    assert rec3["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec3["legs"]["short"]["observation"] is None
+
+    # 5) Batch-level totality: all three hostile candidates reconcile in
+    #    one run, and NET-VERIFIED remains unreachable.
+    report = reconciliation.reconcile_alerts([_alert(), _alert(), alert_fig],
+                                             obs_ovf)
+    assert len(report["candidates"]) == 3
     assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
 
 

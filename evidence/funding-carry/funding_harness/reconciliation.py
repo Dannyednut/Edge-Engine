@@ -263,6 +263,19 @@ def _reconcile_leg(venue: Any, asset: str, expected_apr_pct: Optional[float],
         rec["gap_reason"] = "incomplete_observation_metrics"
         return rec
 
+    # E-12-R6 (defensive, PR #18 supervisor review): the conversion
+    # boundary now rejects a bool or non-finite interval, but this record
+    # path must stay total even if upstream semantics drift. An inf
+    # interval would silently annualize to a 0.0 APR (HOURS_PER_YEAR /
+    # inf) and falsely corroborate the leg; NaN would propagate into
+    # every comparison; a bool would silently annualize at 1h. All are
+    # UNANNUALIZABLE — a recorded gap, never a corroborated leg, never an
+    # exception. (Zero stays reachable and is rejected downstream as
+    # non-positive, exactly as before.)
+    if not _is_finite_number(interval):
+        rec["gap_reason"] = "unannualizable_rate"
+        return rec
+
     apr = None
     try:
         apr = funding_apr(rate_native, interval)
@@ -286,6 +299,18 @@ def _reconcile_leg(venue: Any, asset: str, expected_apr_pct: Optional[float],
     try:
         apr_pct = apr * 100.0
     except OverflowError:
+        rec["gap_reason"] = "unannualizable_rate"
+        return rec
+    # E-12-R6: float multiplication overflows SILENTLY — a finite APR of
+    # 8.76e307 × 100 becomes inf with NO OverflowError, so the except
+    # above (and the R5 isfinite(apr) check on the unmultiplied value)
+    # cannot see it. An inf (or NaN) percentage is not an annualizable
+    # economic figure: stored as rederived_apr_pct it would either (a)
+    # short-circuit the no-expected-figure path to ok=True, or (b) drive
+    # an inf/inf -> NaN relative error whose `NaN > tol` is False — both
+    # falsely corroborate the leg. Check AFTER the multiplication; fail
+    # closed instead.
+    if not math.isfinite(apr_pct):
         rec["gap_reason"] = "unannualizable_rate"
         return rec
 
