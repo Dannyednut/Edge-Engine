@@ -1,0 +1,624 @@
+"""E-12 (Issue #17) item 3: offline reconciliation of scanner alerts.
+
+All inputs are in-memory fixtures built with the canonical observation
+helpers — NO transport, NO network, NO collection. GATE_CONFIG is never
+modified (the fee sidecar reads it read-only, per fees.py design).
+"""
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from funding_harness import config, reconciliation
+from funding_harness.convert import ConversionError, funding_apr
+from funding_harness.models import (funding_metrics, funding_unit_conventions,
+                                    make_observation)
+
+
+# ------------------------------------------------------------------ fixtures
+
+def _funding_obs(asset, source, rate_native, interval_hours, interval_assumed,
+                 collected_at="2026-10-29T00:00:00Z"):
+    return make_observation(
+        run_id="e12", collected_at_utc=collected_at,
+        observation_ts_utc=collected_at,
+        observation_ts_basis="response_time", source=source,
+        source_kind="dex_perp" if source == "hyperliquid" else "cex",
+        asset=asset, source_instrument=asset, metric_group="funding",
+        metrics=funding_metrics(rate_native=rate_native,
+                                interval_hours=interval_hours,
+                                interval_assumed=interval_assumed),
+        unit_conventions=funding_unit_conventions(),
+        evidence={"endpoint": "x", "http_status": 200, "payload_sha256": "h",
+                  "provenance": "test", "raw_ref": "r", "raw_bounded": False})
+
+
+def _alert(**overrides):
+    """A funding_divergence-shaped alert (camelCase, as the scanner emits)."""
+    alert = {
+        "asset": "BTC",
+        "longVenue": "hyperliquid",
+        "shortVenue": "binance",
+        "longFunding": 10.95,          # %/yr gross (0.0000125/h × 8760 × 100)
+        "shortFunding": 43.8,          # %/yr gross (0.00005/h × 8760 × 100)
+        "divergence": 32.85,           # pct-points/yr gross
+        "dailyGrossIndicativeOn5k": 5000 * 32.85 / 100 / 365,
+        "dailyProfitOn5k": 5000 * 32.85 / 100 / 365,  # deprecated alias
+        "netEconomics": "unavailable",
+        "fundingIntervalAssumption": "1h-assumed",
+        "type": "DIVERGENCE",
+        "direction": "DIVERGENCE",
+        "oi": None,
+        "scanTs": 1700000000000,
+        "venueTs": None,
+    }
+    alert.update(overrides)
+    return alert
+
+
+def _corroborating_observations():
+    # HL: 0.0000125/h (1h, NOT assumed) → 10.95%/yr ; Binance: 0.00005/h
+    # (1h assumed — venue interval unpublished) → 43.8%/yr.
+    return [
+        _funding_obs("BTC", "hyperliquid", 0.0000125, 1, False),
+        _funding_obs("BTC", "binance", 0.00005, 1, True),
+    ]
+
+
+# ------------------------------------------------------------------- tests
+
+def test_corroborated_alert_is_gross_indicative_with_raw_units_preserved():
+    report = reconciliation.reconcile_alerts([_alert()],
+                                             _corroborating_observations())
+    rec = report["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec["gap_reasons"] == []
+    long_obs = rec["legs"]["long"]["observation"]
+    short_obs = rec["legs"]["short"]["observation"]
+    # Per-venue RAW units, interval and its assumed flag are preserved…
+    assert long_obs["funding_rate_native"] == 0.0000125
+    assert long_obs["funding_interval_hours"] == 1
+    assert long_obs["funding_interval_assumed"] is False
+    assert short_obs["funding_rate_native"] == 0.00005
+    assert short_obs["funding_interval_assumed"] is True
+    # …as is the observation-time basis.
+    assert long_obs["observation_ts_basis"] == "response_time"
+    assert long_obs["observation_ts_utc"] == "2026-10-29T00:00:00Z"
+    # Alert leg figures re-derive from the raw rates under the same interval.
+    assert long_obs["rederived_apr_pct"] == pytest.approx(10.95)
+    assert short_obs["rederived_apr_pct"] == pytest.approx(43.8)
+
+
+def test_deprecated_alias_must_match_the_gross_named_field():
+    a = _alert()
+    assert a["dailyProfitOn5k"] == a["dailyGrossIndicativeOn5k"]
+    report = reconciliation.reconcile_alerts([a], _corroborating_observations())
+    rec = report["candidates"][0]
+    assert rec["alert_figure_units"]["deprecated_daily_profit_on5k_is_gross"] is True
+    # A mismatch between the alias and the gross field is a BLOCKER.
+    bad = _alert(dailyProfitOn5k=999.0)
+    rec_bad = reconciliation.reconcile_alerts([bad],
+                                              _corroborating_observations())["candidates"][0]
+    assert rec_bad["alert_figure_units"]["deprecated_daily_profit_on5k_is_gross"] is False
+
+
+def test_leg_rate_mismatch_is_blocked_with_explicit_reason():
+    # Alert claims 20%/yr for the HL leg but the raw rate annualizes to 10.95%.
+    a = _alert(longFundingApr=0.20)  # decimal APR ×100 = 20 pct-points
+    rec = reconciliation.reconcile_alerts([a],
+                                          _corroborating_observations())["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_BLOCKED
+    assert "leg_rate_mismatch" in rec["gap_reasons"]
+
+
+def test_missing_observation_for_one_venue_is_blocked_and_recorded():
+    obs = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False)]  # no binance row
+    rec = reconciliation.reconcile_alerts([_alert()], obs)["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_BLOCKED
+    assert rec["legs"]["long"]["ok"] is True
+    assert rec["legs"]["short"]["gap_reason"] == "missing_observation"
+
+
+def test_malformed_alert_figures_are_blocked_never_reconciled():
+    for bad in ({"divergence": float("nan")}, {"divergence": float("inf")},
+                {"divergence": "30%"}, {"spreadApr": float("nan")}):
+        rec = reconciliation.reconcile_alerts([_alert(**bad)],
+                                              _corroborating_observations())["candidates"][0]
+        assert rec["classification"] == reconciliation.CLS_BLOCKED, bad
+        # No fabricated economics: a blocked record must not classify any
+        # net-verdict — the malformed figure never reaches the legs' math.
+        assert rec["classification"] != reconciliation.CLS_NET_VERIFIED
+
+
+def _provenanced_net_cost_evidence():
+    """A SCHEMA-CONFORMING net_cost_evidence block (net_cost_evidence/v1).
+
+    SYNTHETIC FIXTURE — proves the validator's SHAPE logic only (E-12-R3:
+    the validator is retained for future evidence ingestion). The values
+    are invented for the test; nothing in this repository produces such a
+    block today, no venue API was called to obtain any of it, and the
+    block can NEVER award the NET-VERIFIED classification.
+    """
+    return {
+        "schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+        "long_venue_costs": {
+            "venue": "hyperliquid",
+            "schedule": {"taker_fee_bps": 4.5, "maker_fee_bps": 1.5},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "short_venue_costs": {
+            "venue": "binance",
+            "schedule": {"taker_fee_bps": 5.0, "maker_fee_bps": 2.0},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "interval_semantics": {
+            "funding_interval_hours": 1,
+            "per_row_interval_published": False,
+            "source": "synthetic-fixture://interval-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "units": {"rate_units": "decimal-fraction per interval", "apr_units": "decimal-fraction APR"},
+    }
+
+
+def test_net_verified_not_awarded_by_text_labels_or_arbitrary_dicts():
+    # A verified-basis net figure (Sharpe-sourced) alone must NOT award
+    # NET-VERIFIED. E-12-R3: NOTHING awards NET-VERIFIED in this work
+    # item — the class is reserved; these cases stay DATA-CORRECTNESS at
+    # most (the provider-claim path).
+    a = _alert(netApr=0.12, netAprBasis="sharpe-net")
+    rec = reconciliation.reconcile_alerts([a],
+                                          _corroborating_observations())["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec["net_cost_evidence_shape_ok"] is None  # no block supplied
+
+    # E-12-R2 regression: arbitrary / non-provenance dictionaries — the
+    # exact text-label form the old gate accepted — must NOT flip the
+    # class. The shape validator rejects them (shape_ok is False).
+    arbitrary_dicts = [
+        {"venue_costs": "verified", "interval": "verified"},   # supervisor's example
+        {"ok": True},
+        {"a": 1},
+        {"schema": "net_cost_evidence/v1"},                    # right tag, no content
+        {"schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+         "long_venue_costs": {"venue": "hyperliquid", "schedule": {"taker": "verified"},
+                              "source": "doc", "retrieved_at_utc": "2026-10-30T00:00:00Z"}},  # text schedule
+        {"schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+         "long_venue_costs": {"venue": "hyperliquid", "schedule": {"taker": 4.5},
+                              "source": "doc", "retrieved_at_utc": "2026-10-30T00:00:00Z"}},  # missing short + interval + units
+        {**_provenanced_net_cost_evidence(),
+         "schema": "net_cost_evidence/v2"},                    # wrong schema version
+        {**_provenanced_net_cost_evidence(),
+         "long_venue_costs": {**_provenanced_net_cost_evidence()["long_venue_costs"],
+                              "source": ""}},                  # empty provenance source
+        {**_provenanced_net_cost_evidence(),
+         "interval_semantics": {**_provenanced_net_cost_evidence()["interval_semantics"],
+                                "funding_interval_hours": 0}},  # non-positive interval
+        {**_provenanced_net_cost_evidence(),
+         "units": {"rate_units": "decimal-fraction"}},         # missing apr_units
+    ]
+    for bad in arbitrary_dicts:
+        b = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=bad)
+        rec_b = reconciliation.reconcile_alerts([b],
+                                                _corroborating_observations())["candidates"][0]
+        assert rec_b["classification"] == reconciliation.CLS_DATA_CORRECTNESS, bad
+        assert rec_b["classification"] != reconciliation.CLS_NET_VERIFIED, bad
+        assert rec_b["net_cost_evidence_shape_ok"] is False, bad
+
+
+def test_synthetic_provenance_cannot_award_net_verified():
+    """E-12-R3 regression (PR #18 supervisor review).
+
+    A fully schema-conforming SYNTHETIC block must NOT promote any
+    candidate to NET-VERIFIED. Shape conformance proves the schema can
+    be satisfied — not that the economics are verified. Synthetic
+    fixtures remain DATA-CORRECTNESS, GROSS-INDICATIVE or BLOCKED; the
+    NET-VERIFIED class is unreachable in this offline work item.
+    """
+    block = _provenanced_net_cost_evidence()
+
+    # 1) Verified-basis (provider-claim) alert + synthetic evidence:
+    #    stays DATA-CORRECTNESS — the provider-claim path — with the
+    #    shape result and reservation note recorded for transparency.
+    c = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=block)
+    rec_c = reconciliation.reconcile_alerts([c],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_c["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec_c["classification"] != reconciliation.CLS_NET_VERIFIED
+    assert rec_c["net_cost_evidence_shape_ok"] is True   # shape ran, passed
+    assert "RESERVED" in rec_c["net_cost_evidence_note"]
+
+    # 2) Gross alert (no net figure) + synthetic evidence: stays
+    #    GROSS-INDICATIVE — synthetic provenance cannot conjure net.
+    g = _alert(net_cost_evidence=block)
+    rec_g = reconciliation.reconcile_alerts([g],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_g["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_g["classification"] != reconciliation.CLS_NET_VERIFIED
+    assert rec_g["net_cost_evidence_shape_ok"] is True
+
+    # 3) Venue names in the evidence deliberately DO NOT match the
+    #    alert's legs (the shape validator does not — and must not be
+    #    assumed to — cross-check leg identity): classification is
+    #    still unaffected and never NET-VERIFIED.
+    mismatched = {**block,
+                  "long_venue_costs": {**block["long_venue_costs"], "venue": "venue-a"},
+                  "short_venue_costs": {**block["short_venue_costs"], "venue": "venue-b"}}
+    m = _alert(netApr=0.12, netAprBasis="sharpe-net", net_cost_evidence=mismatched)
+    rec_m = reconciliation.reconcile_alerts([m],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_m["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec_m["classification"] != reconciliation.CLS_NET_VERIFIED
+
+    # 4) Batch-level: no input shape can make the reserved count non-zero.
+    report = reconciliation.reconcile_alerts([c, g, m], _corroborating_observations())
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+    assert report["classification_counts"][reconciliation.CLS_BLOCKED] == 0
+
+
+def test_net_cost_evidence_validator_is_total_never_throws():
+    # The validator must return False (not raise) on any malformed input.
+    for bad in (None, "verified", 42, [], {}, {"schema": None}):
+        assert reconciliation.net_cost_evidence_is_provenanced(bad) is False, bad
+
+
+def test_shape_status_present_on_every_candidate_including_blocked():
+    """E-12-R4 regression (PR #18 supervisor review, comment 6526021277).
+
+    ``net_cost_evidence_shape_ok`` must be attached BEFORE the early-return
+    branches so EVERY candidate — including BLOCKED ones — carries the
+    tri-state field. Shape validity NEVER affects the classification.
+    """
+    block = _provenanced_net_cost_evidence()
+
+    # 1) BLOCKED via missing venue observation + a schema-conforming
+    #    synthetic block: stays BLOCKED AND carries shape_ok == True
+    #    (the supervisor's exact example).
+    obs = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False)]  # no binance
+    a = _alert(net_cost_evidence=block)
+    rec = reconciliation.reconcile_alerts([a], obs)["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_BLOCKED
+    assert "missing_observation" in rec["gap_reasons"]
+    assert rec["net_cost_evidence_shape_ok"] is True
+    assert "RESERVED" in rec["net_cost_evidence_note"]
+
+    # 2) BLOCKED via malformed alert figures + no block: shape_ok is None
+    #    (no block supplied) on the early-return candidate.
+    m = _alert(divergence=float("nan"))
+    rec_m = reconciliation.reconcile_alerts([m],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_m["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_m["gap_reasons"]
+    assert rec_m["net_cost_evidence_shape_ok"] is None
+    assert "net_cost_evidence_note" not in rec_m
+
+    # 3) BLOCKED via malformed alert figures + a MALFORMED shape block:
+    #    shape_ok is False on the early-return candidate.
+    bad_block = {"venue_costs": "verified"}  # text-label form
+    m2 = _alert(divergence=float("nan"), net_cost_evidence=bad_block)
+    rec_m2 = reconciliation.reconcile_alerts([m2],
+                                             _corroborating_observations())["candidates"][0]
+    assert rec_m2["classification"] == reconciliation.CLS_BLOCKED
+    assert rec_m2["net_cost_evidence_shape_ok"] is False
+    assert "net_cost_evidence_note" not in rec_m2
+
+    # 4) Sanity: the non-blocked paths still carry the field.
+    g = _alert()
+    rec_g = reconciliation.reconcile_alerts([g],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_g["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_g["net_cost_evidence_shape_ok"] is None
+
+
+def test_validator_and_record_path_are_total_for_huge_integers():
+    """E-12-R5 regression (PR #18 supervisor review, comment 6570904247).
+
+    ``10**10000`` is a VALID Python int but cannot be converted to float:
+    ``math.isfinite`` (and ``float()``) raise OverflowError on it. The
+    validator and the record path must BOTH stay total — return a value/
+    record, never throw. Since R4, the validator also runs during record
+    construction, so an unhandled raise would abort reconciliation.
+    """
+    huge = 10 ** 10000
+
+    # 0) The safe helper itself: total, fail-closed on the huge int.
+    assert reconciliation._is_finite_number(huge) is False
+
+    # 1) Validator-level: a huge schedule value is not a usable finite
+    #    cost figure -> False, NO raise.
+    block_huge_schedule = {
+        "schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+        "long_venue_costs": {
+            "venue": "hyperliquid", "schedule": {"taker_fee_bps": huge},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "short_venue_costs": {
+            "venue": "binance", "schedule": {"taker_fee_bps": 5.0},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "interval_semantics": {
+            "funding_interval_hours": 1, "per_row_interval_published": True,
+            "source": "synthetic-fixture://interval-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "units": {"rate_units": "decimal-fraction per interval",
+                  "apr_units": "decimal-fraction APR"},
+    }
+    assert reconciliation.net_cost_evidence_is_provenanced(
+        block_huge_schedule) is False
+
+    # 2) Validator-level: a huge interval (or huge interval hours value)
+    #    is likewise rejected without raising.
+    block_huge_interval = {
+        **block_huge_schedule,
+        "long_venue_costs": block_huge_schedule["long_venue_costs"] | {"schedule": {"taker_fee_bps": 4.5}},
+        "interval_semantics": {**block_huge_schedule["interval_semantics"],
+                               "funding_interval_hours": huge},
+    }
+    assert reconciliation.net_cost_evidence_is_provenanced(
+        block_huge_interval) is False
+
+    # 3) Record path, pre-R4 abort scenario: the validator runs during
+    #    record construction — a huge-int evidence payload must yield a
+    #    record with the tri-state (False), never an exception.
+    a = _alert(netApr=0.12, netAprBasis="sharpe-net",
+               net_cost_evidence=block_huge_schedule)
+    rec = reconciliation.reconcile_alerts([a],
+                                          _corroborating_observations())["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec["net_cost_evidence_shape_ok"] is False
+    assert "net_cost_evidence_note" not in rec
+
+    # 4) Record path on an EARLY-RETURN (malformed figures) candidate with
+    #    a huge-int evidence payload: BLOCKED record returned, shape
+    #    attached (False), no exception — the exact R4-construction abort
+    #    scenario the supervisor flagged.
+    b = _alert(divergence="garbage", net_cost_evidence=block_huge_schedule)
+    rec_b = reconciliation.reconcile_alerts([b],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_b["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_b["gap_reasons"]
+    assert rec_b["net_cost_evidence_shape_ok"] is False
+
+    # 5) Record path: huge divergence figure -> BLOCKED (malformed), no
+    #    exception.
+    rec_c = reconciliation.reconcile_alerts([_alert(divergence=huge)],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_c["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_c["gap_reasons"]
+
+    # 6) Record path: huge netApr with a verified basis is NOT treated as
+    #    verified (fail-closed) — the record is returned, classified
+    #    GROSS-INDICATIVE, never NET-VERIFIED.
+    rec_d = reconciliation.reconcile_alerts(
+        [_alert(netApr=huge, netAprBasis="sharpe-net")],
+        _corroborating_observations())["candidates"][0]
+    assert rec_d["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_d["classification"] != reconciliation.CLS_NET_VERIFIED
+
+    # 7) Record path: huge per-leg figure (decimal APR) -> the leg records
+    #    a MALFORMED figure (BLOCKED), no exception, no silent absence.
+    rec_e = reconciliation.reconcile_alerts([_alert(longFundingApr=huge)],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_e["classification"] == reconciliation.CLS_BLOCKED
+    assert rec_e["legs"]["long"]["gap_reason"] == "malformed_alert_leg_figure"
+
+    # 8) Observation path (defense in depth): hostile observation metrics
+    #    (float-unrepresentable rate, non-positive interval, silent float
+    #    overflow -> inf, NaN) yield an unannualizable_rate gap — the
+    #    record path stays total. NOTE: funding_metrics annualizes at
+    #    construction time, so hostile observations are hand-crafted with
+    #    the same metric keys.
+    def _hostile_funding_metrics(rate_native, interval_hours):
+        return {
+            "funding_rate_native": rate_native,
+            "funding_interval_hours": interval_hours,
+            "funding_interval_assumed": True,
+            "funding_rate_apr": None,
+            "funding_rate_apr_pct": None,
+            "funding_rate_8h_equiv": None,
+            "at_clamp_reference": False,
+            "mark_price": None,
+            "index_price": None,
+            "open_interest_native": None,
+            "open_interest_unit": None,
+            "open_interest_usd_estimate": None,
+            "next_funding_ts_utc": None,
+            "volume_24h_usd": None,
+            "price_spread_at_size": None,
+            "price_spread_headline": None,
+            "net_apr_reference": None,
+        }
+
+    def _hostile_funding_obs(rate_native, interval_hours):
+        return make_observation(
+            run_id="e12-r5", collected_at_utc="2026-10-29T00:00:00Z",
+            observation_ts_utc="2026-10-29T00:00:00Z",
+            observation_ts_basis="response_time", source="binance",
+            source_kind="cex", asset="BTC", source_instrument="BTC",
+            metric_group="funding",
+            metrics=_hostile_funding_metrics(rate_native, interval_hours),
+            unit_conventions=funding_unit_conventions(),
+            evidence={"endpoint": "x", "http_status": 200,
+                      "payload_sha256": "h", "provenance": "test",
+                      "raw_ref": "r", "raw_bounded": False})
+
+    for label, hostile in (
+            ("huge-int rate", _hostile_funding_obs(huge, 1)),
+            ("zero interval (ConversionError)",
+             _hostile_funding_obs(0.00005, 0)),
+            ("silent float overflow -> inf",
+             _hostile_funding_obs(1e308, 1)),
+            ("NaN rate", _hostile_funding_obs(float("nan"), 1))):
+        obs = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False), hostile]
+        rec_h = reconciliation.reconcile_alerts([_alert()], obs)["candidates"][0]
+        assert rec_h["classification"] == reconciliation.CLS_BLOCKED, label
+        assert rec_h["legs"]["long"]["ok"] is True, label
+        assert rec_h["legs"]["short"]["gap_reason"] == "unannualizable_rate", label
+
+    # 9) Batch-level totality: the whole report is produced with every
+    #    hostile payload above in one run.
+    report = reconciliation.reconcile_alerts(
+        [a, b, _alert(divergence=huge), _alert(netApr=huge, netAprBasis="sharpe-net")],
+        _corroborating_observations())
+    assert len(report["candidates"]) == 4
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+
+
+def test_nonfinite_interval_and_silent_pct_overflow_fail_closed():
+    """E-12-R6 regression (PR #18 supervisor review, comment 6573930428).
+
+    Two observation-validation edge cases that survived R5, both of which
+    could falsely corroborate a leg:
+
+    1. ``interval_hours=float("inf")`` passed the previous naive
+       ``<= 0`` check and silently annualized to a 0.0 APR
+       (``HOURS_PER_YEAR / inf``) — a malformed observation recorded as
+       annualizable.
+    2. a finite annualized APR (rate 1e304 / 1h -> 8.76e307) x 100
+       overflows SILENTLY to inf (float multiplication raises nothing, so
+       neither the R5 ``isfinite(apr)`` check nor the ``except
+       OverflowError`` could see it). Stored as ``rederived_apr_pct`` it
+       either short-circuited the no-expected-figure path to ``ok=True``
+       or produced an ``inf/inf -> NaN`` relative error whose
+       ``NaN > tol`` is False — both falsely ok.
+
+    Both must fail closed: BLOCKED / unannualizable_rate, and the leg
+    record must never carry an infinite ``rederived_apr_pct``.
+    """
+
+    def _hand_built_funding_obs(rate_native, interval_hours):
+        # funding_metrics annualizes at construction time (and now fails
+        # closed on hostile intervals), so a STORED malformed row is
+        # simulated with the same metric keys, hand-built.
+        return make_observation(
+            run_id="e12-r6", collected_at_utc="2026-10-29T00:00:00Z",
+            observation_ts_utc="2026-10-29T00:00:00Z",
+            observation_ts_basis="response_time", source="binance",
+            source_kind="cex", asset="BTC", source_instrument="BTC",
+            metric_group="funding",
+            metrics={
+                "funding_rate_native": rate_native,
+                "funding_interval_hours": interval_hours,
+                "funding_interval_assumed": True,
+                "funding_rate_apr": None,
+                "funding_rate_apr_pct": None,
+                "funding_rate_8h_equiv": None,
+                "at_clamp_reference": False,
+                "mark_price": None,
+                "index_price": None,
+                "open_interest_native": None,
+                "open_interest_unit": None,
+                "open_interest_usd_estimate": None,
+                "next_funding_ts_utc": None,
+                "volume_24h_usd": None,
+                "price_spread_at_size": None,
+                "price_spread_headline": None,
+                "net_apr_reference": None,
+            },
+            unit_conventions=funding_unit_conventions(),
+            evidence={"endpoint": "x", "http_status": 200,
+                      "payload_sha256": "h", "provenance": "test",
+                      "raw_ref": "r", "raw_bounded": False})
+
+    # 0) Pin the exact arithmetic premises the supervisor identified.
+    assert 8760.0 / float("inf") == 0.0  # inf interval silently -> 0.0 APR
+    apr = funding_apr(1e304, 1)
+    assert math.isfinite(apr)                    # 8.76e307 — finite
+    assert not math.isfinite(apr * 100.0)        # x100 silently -> inf
+
+    # 1) Construction boundary: funding_metrics itself now fails closed on
+    #    a non-finite interval (ConversionError), never a 0.0-APR row.
+    with pytest.raises(ConversionError):
+        funding_metrics(rate_native=0.00005, interval_hours=float("inf"),
+                        interval_assumed=True)
+
+    # 2) Record path, inf interval with a FINITE rate: the stored malformed
+    #    row must not annualize to 0.0 and corroborate the short leg.
+    obs_inf = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False),
+               _hand_built_funding_obs(0.00005, float("inf"))]
+    rec1 = reconciliation.reconcile_alerts([_alert()], obs_inf)["candidates"][0]
+    assert rec1["classification"] == reconciliation.CLS_BLOCKED
+    assert rec1["legs"]["long"]["ok"] is True
+    assert rec1["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec1["legs"]["short"]["observation"] is None  # no inf-derived figures stored
+
+    # 3) Record path, silent x100 overflow WITHOUT expected leg figures:
+    #    pre-R6 this leg recorded ok=True with rederived_apr_pct=inf.
+    obs_ovf = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False),
+               _hand_built_funding_obs(1e304, 1)]
+    rec2 = reconciliation.reconcile_alerts([_alert()], obs_ovf)["candidates"][0]
+    assert rec2["classification"] == reconciliation.CLS_BLOCKED
+    assert rec2["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec2["legs"]["short"]["observation"] is None
+
+    # 4) Record path, silent x100 overflow WITH a present expected leg
+    #    figure: pre-R6 the inf/inf relative error was NaN and
+    #    `NaN > tol` is False — the leg was falsely ok=True. Leg figures
+    #    are DECIMAL APRs (perp_funding emission; ×100 → pct at the
+    #    boundary). The legit long leg must still corroborate; the
+    #    overflowing short leg must fail closed.
+    alert_fig = _alert(longFundingApr=0.1095, shortFundingApr=0.438)
+    rec3 = reconciliation.reconcile_alerts([alert_fig], obs_ovf)["candidates"][0]
+    assert rec3["classification"] == reconciliation.CLS_BLOCKED
+    assert rec3["legs"]["long"]["ok"] is True
+    assert rec3["legs"]["short"]["gap_reason"] == "unannualizable_rate"
+    assert rec3["legs"]["short"]["observation"] is None
+
+    # 5) Batch-level totality: all three hostile candidates reconcile in
+    #    one run, and NET-VERIFIED remains unreachable.
+    report = reconciliation.reconcile_alerts([_alert(), _alert(), alert_fig],
+                                             obs_ovf)
+    assert len(report["candidates"]) == 3
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+
+
+def test_fee_sensitivity_sidecar_attached_read_only_and_labeled():
+    rec = reconciliation.reconcile_alerts([_alert()],
+                                          _corroborating_observations())["candidates"][0]
+    sidecar = rec["fee_sensitivity_sidecar"]
+    assert sidecar["sidecar"] == "non_gate_fee_sensitivity"
+    assert sidecar["affects_preregistered_verdict"] is False
+    # Sensitivity across plausible holding periods — the one-time 0.20%
+    # gate deduction must NOT appear as a flat annualized drag here.
+    holding_days = [row["holding_days"] for row in sidecar["rows"]]
+    assert holding_days == [1, 7, 14, 30]
+    drags = [row["fee_drag_annualized_conservative"] for row in sidecar["rows"]]
+    assert drags[0] > drags[-1]  # turnover-scaled, decreasing with holding period
+    # GATE_CONFIG untouched (read-only use).
+    assert config.GATE_CONFIG["round_trip_fee_conservative"] == 0.002
+
+
+def test_batch_report_counts_and_offline_markers():
+    alerts = [
+        _alert(),                                            # GROSS-INDICATIVE
+        _alert(asset="MISSING"),                             # BLOCKED (no obs)
+        _alert(netApr=0.12, netAprBasis="sharpe-net"),       # DATA-CORRECTNESS
+    ]
+    report = reconciliation.reconcile_alerts(alerts, _corroborating_observations())
+    assert report["offline"] is True
+    assert report["network_calls"] == 0
+    assert report["affects_preregistered_verdict"] is False
+    assert report["classification_counts"] == {
+        reconciliation.CLS_DATA_CORRECTNESS: 1,
+        reconciliation.CLS_GROSS_INDICATIVE: 1,
+        reconciliation.CLS_NET_VERIFIED: 0,
+        reconciliation.CLS_BLOCKED: 1,
+    }
+    assert "never" in report["coverage_statement"]
+
+
+def test_e12_candidate_classification_statement():
+    rows = reconciliation.classify_candidates()
+    by_name = {r["candidate"]: r["classification"] for r in rows}
+    assert by_name["perp_funding"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert by_name["funding_divergence"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert by_name["cross_dex_arb"] == reconciliation.CLS_BLOCKED
+    assert by_name["equity_perp_cross_venue"] == reconciliation.CLS_BLOCKED
+    # None may be NET-VERIFIED until evidence backs venue costs + intervals.
+    assert reconciliation.CLS_NET_VERIFIED not in by_name.values()

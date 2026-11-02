@@ -20,10 +20,34 @@
  * prefix-tolerant parseFloat accepted malformed provider strings such as
  * '100garbage' → 100 or '50000USD' → 50000, turning malformed data into a
  * fabricated positive OI.
+ *
+ * E-12-R2 (Issue #17 supervisor review):
+ *   - Annualization flows through lib/funding-annualization.ts
+ *     (`annualizeFundingRate` + `ASSUMED_FUNDING_INTERVAL_HOURS`) on EVERY
+ *     production path — the helper is no longer merely unit-tested while
+ *     production multiplies inline. The 1h basis remains an EXPLICIT,
+ *     UNVERIFIED assumption (see the lib module docblock; the vooi-client
+ *     derivation comment is not independent confirmation, and no network
+ *     verification is authorized).
+ *   - VOOI leg `fundingRate` is parsed per the `VooiArbitragePair`
+ *     contract: a decimal STRING, full-grammar-strict. Numeric values are
+ *     NOT contractually supported and are rejected with visible
+ *     degradation (vooiSkipped), never coerced — and never zero.
  */
 
 import type { DataPoint, TradeOrder, RiskParams, Strategy } from '@edge/types';
 import { canonAsset, canonVenue } from '../lib/venue-asset-aliases.js';
+import {
+  ASSUMED_FUNDING_INTERVAL_HOURS,
+  annualizeFundingRate,
+  parseStrictDecimalString,
+  STRICT_DECIMAL_RE,
+} from '../lib/funding-annualization.js';
+
+// Back-compat re-exports: the helper and the assumption constant were
+// first exported from this module (E-12-R1); existing consumers keep
+// importing them from here while the implementation lives in the lib.
+export { ASSUMED_FUNDING_INTERVAL_HOURS, annualizeFundingRate };
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const VOI_API = 'https://perps-api.vooi.io';
@@ -43,7 +67,34 @@ const VOI_API = 'https://perps-api.vooi.io';
  * string failing this grammar converts to NaN and therefore to `oi: null`
  * (fail-closed, unchanged).
  */
-const VOI_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const VOI_NUMERIC_RE = STRICT_DECIMAL_RE;
+
+// ─── E-12 (Issue #17): funding interval + gross/net integrity ──────────
+//
+// Annualization interval: the raw provider rates are PER-INTERVAL rates.
+// Hyperliquid's `funding` is an HOURLY rate (Hyperliquid API docs);
+// VOOI's `fundingRate` is HOURLY by VOOI's own derivation rule — the
+// vooi-client schema documents `fundingRate8h = Number(fundingRate) × 3`
+// (8h = 3 × 1h). NEITHER API publishes the underlying VENUE-SPECIFIC
+// funding interval, and that derivation comment alone is not independent
+// confirmation — so every annualization below rests on an EXPLICIT,
+// UNVERIFIED '1h-assumed' basis (ASSUMED_FUNDING_INTERVAL_HOURS via
+// annualizeFundingRate — the single production annualization input),
+// recorded on every alert as '1h-assumed'. These figures must never be
+// described as interval-verified. If a future payload ever carries a
+// per-row interval, it must flow through annualizeFundingRate() with that
+// row interval instead of the fixed-basis constant.
+//
+// Gross vs net: divergence math is a RAW rate difference. No fees, no
+// holding/persistence, no basis assumptions are modeled here — net
+// economics are UNAVAILABLE and every alert says so explicitly. The old
+// `dailyProfitOn5k` was a GROSS annualized divergence converted to a
+// daily dollar figure, not realized/net profit; it is retained only as a
+// @deprecated gross-documented alias of `dailyGrossIndicativeOn5k`.
+//
+// (annualizeFundingRate + ASSUMED_FUNDING_INTERVAL_HOURS live in
+// lib/funding-annualization.ts and are re-exported above; the strict
+// decimal grammar is shared via STRICT_DECIMAL_RE.)
 
 export interface FundingDivergenceParams {
   /** Min divergence (spread) to alert (default 20%/yr) */
@@ -58,10 +109,30 @@ export interface FundingDivergenceAlert {
   asset: string;
   longVenue: string;
   shortVenue: string;
+  /** Gross annualized funding, %/yr (pct-points), 1h-assumed basis — indicative only. */
   longFunding: number;
+  /** Gross annualized funding, %/yr (pct-points), 1h-assumed basis — indicative only. */
   shortFunding: number;
+  /** Gross annualized divergence between the two legs, %/yr (pct-points) — indicative only. */
   divergence: number;
+  /**
+   * E-12: GROSS-INDICATIVE daily dollar figure on $5k notional —
+   * `5000 × divergence%/yr / 100 / 365`. It is the raw annualized
+   * divergence amortized linearly to one day; it is NOT realized/net
+   * profit: no fees, no holding-period persistence, no basis modeling.
+   */
+  dailyGrossIndicativeOn5k: number;
+  /**
+   * @deprecated GROSS-INDICATIVE ONLY — identical value to
+   * `dailyGrossIndicativeOn5k`. Retained solely as a compatibility alias
+   * for existing consumers; never interpret it as realized or net profit.
+   */
+  /** @deprecated Use dailyGrossIndicativeOn5k (gross-indicative, same value). */
   dailyProfitOn5k: number;
+  /** E-12: net economics are UNAVAILABLE for this scanner (no fee/holding/basis model). */
+  netEconomics: 'unavailable';
+  /** E-12: the annualization rests on an explicit 1h-interval assumption. */
+  fundingIntervalAssumption: '1h-assumed';
   type: 'DIVERGENCE' | 'EXTREME_FUNDING';
   direction: 'SHORT_HARVEST' | 'LONG_HARVEST' | 'DIVERGENCE';
   /** EM-STRAT-014-E11 item 5: null when OI is missing/unverifiable. */
@@ -193,7 +264,10 @@ export class FundingDivergenceScanner implements Strategy {
         const fundingHourly = parseFloat(ctx.funding);
         // Item 5: reject NaN funding instead of `|| 0`
         if (!isFinite(fundingHourly)) { degradation.hlSkipped++; continue; }
-        const fundingAnnual = fundingHourly * 24 * 365 * 100;
+        // E-12-R2: annualization flows through the shared helper — the
+        // interval input is ASSUMED_FUNDING_INTERVAL_HOURS, not an inline
+        // 24×365; × 100 converts decimal APR → the alert's pct-points unit.
+        const fundingAnnual = annualizeFundingRate(fundingHourly, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
         if (Math.abs(fundingAnnual) < 5) continue;
 
         // Item 5: derive real OI; null when missing/invalid
@@ -258,10 +332,16 @@ export class FundingDivergenceScanner implements Strategy {
         if (!canonA) { degradation.vooiSkipped++; continue; }
         for (const p of (item.pairs || [])) {
           if (p.long?.exchange) {
-            const fr = p.long.fundingRate;
-            // Item 5: reject NaN funding instead of `|| 0`
-            if (typeof fr !== 'number' || !isFinite(fr)) { degradation.vooiSkipped++; continue; }
-            const longFunding = fr * 24 * 365 * 100;
+            // E-12-R2: the VooiArbitragePair contract declares leg
+            // `fundingRate` as a decimal STRING. Parse with the strict
+            // full-string grammar; numeric values are NOT contractually
+            // supported and — like malformed strings — are rejected with
+            // visible degradation (vooiSkipped), never coerced, never 0.
+            const fr = parseStrictDecimalString(p.long.fundingRate);
+            if (!Number.isFinite(fr)) { degradation.vooiSkipped++; continue; }
+            // Annualization via the shared helper (explicit 1h-assumed
+            // basis); × 100 → pct-points alert unit.
+            const longFunding = annualizeFundingRate(fr, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
             if (Math.abs(longFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
               // Cluster2-R1: OI = openInterest × price (strict); null if invalid.
@@ -270,9 +350,9 @@ export class FundingDivergenceScanner implements Strategy {
             }
           }
           if (p.short?.exchange) {
-            const fr = p.short.fundingRate;
-            if (typeof fr !== 'number' || !isFinite(fr)) { degradation.vooiSkipped++; continue; }
-            const shortFunding = fr * 24 * 365 * 100;
+            const fr = parseStrictDecimalString(p.short.fundingRate);
+            if (!Number.isFinite(fr)) { degradation.vooiSkipped++; continue; }
+            const shortFunding = annualizeFundingRate(fr, ASSUMED_FUNDING_INTERVAL_HOURS) * 100;
             if (Math.abs(shortFunding) > 5) {
               if (!fundingMap[canonA]) fundingMap[canonA] = [];
               // Cluster2-R1: OI = openInterest × price (strict); null if invalid.
@@ -293,6 +373,10 @@ export class FundingDivergenceScanner implements Strategy {
 
       const divergence = highest.fundingAnnual - lowest.fundingAnnual;
       if (divergence >= this.params.minDivergencePct) {
+        // E-12: gross-indicative daily figure — divergence is a raw rate
+        // difference (pct-points/yr, 1h-assumed annualization). This is
+        // NOT realized/net profit; netEconomics is explicitly 'unavailable'.
+        const dailyGross = 5000 * divergence / 100 / 365;
         alerts.push({
           asset,
           longVenue: lowest.venue,
@@ -300,7 +384,10 @@ export class FundingDivergenceScanner implements Strategy {
           longFunding: lowest.fundingAnnual,
           shortFunding: highest.fundingAnnual,
           divergence,
-          dailyProfitOn5k: 5000 * divergence / 100 / 365,
+          dailyGrossIndicativeOn5k: dailyGross,
+          dailyProfitOn5k: dailyGross, // @deprecated gross alias — same value, documented
+          netEconomics: 'unavailable',
+          fundingIntervalAssumption: '1h-assumed',
           type: 'DIVERGENCE',
           direction: 'DIVERGENCE',
           oi: highest.oi, // may be null
@@ -318,6 +405,8 @@ export class FundingDivergenceScanner implements Strategy {
           // Item 5: null OI excluded from EXTREME_FUNDING
           if (v.oi === null) continue;
           if (v.oi < this.params.minExtremeOiUsd) continue;
+          // E-12: gross-indicative daily figure (see DIVERGENCE note above).
+          const dailyGross = 5000 * Math.abs(v.fundingAnnual) / 100 / 365;
           alerts.push({
             asset,
             longVenue: v.fundingAnnual < 0 ? v.venue : '',
@@ -325,7 +414,10 @@ export class FundingDivergenceScanner implements Strategy {
             longFunding: v.fundingAnnual < 0 ? v.fundingAnnual : 0,
             shortFunding: v.fundingAnnual > 0 ? v.fundingAnnual : 0,
             divergence: Math.abs(v.fundingAnnual),
-            dailyProfitOn5k: 5000 * Math.abs(v.fundingAnnual) / 100 / 365,
+            dailyGrossIndicativeOn5k: dailyGross,
+            dailyProfitOn5k: dailyGross, // @deprecated gross alias — same value, documented
+            netEconomics: 'unavailable',
+            fundingIntervalAssumption: '1h-assumed',
             type: 'EXTREME_FUNDING',
             direction: v.fundingAnnual > 0 ? 'SHORT_HARVEST' : 'LONG_HARVEST',
             oi: v.oi,

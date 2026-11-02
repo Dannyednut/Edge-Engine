@@ -6,6 +6,7 @@ default numeric value (especially not zero) for missing data.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
 HOURS_PER_YEAR = 24.0 * 365.0
@@ -41,6 +42,39 @@ def safe_float(value: Any) -> Optional[float]:
     return f
 
 
+def _interval_hours_or_raise(value: Any) -> float:
+    """Coerce an observation interval to a finite float, or raise.
+
+    E-12-R6 (PR #18 supervisor review): the conversion boundary must
+    reject, BEFORE any annualization, an interval that is (a) a bool (an
+    int subclass — ``True`` would silently annualize at 1h), (b) not an
+    int/float, (c) a valid but float-unrepresentable int (``float()``
+    raises OverflowError), or (d) non-finite — ``float("inf")`` passes a
+    naive ``<= 0`` check and ``HOURS_PER_YEAR / inf`` silently yields a
+    0.0 APR from a malformed observation. Every rejection is a
+    ConversionError so each caller's existing fail-closed handling keeps
+    working unchanged.
+    """
+    if isinstance(value, bool):
+        raise ConversionError(f"boolean interval_hours: {value!r}")
+    if not isinstance(value, (int, float)):
+        raise ConversionError(
+            f"unsupported interval_hours type: {type(value).__name__}")
+    try:
+        hours = float(value)
+    except OverflowError as exc:
+        # NB: do NOT format the raw int with !r/!s here — for a valid but
+        # huge int (e.g. 10**10000) that conversion itself raises
+        # ValueError under CPython's 4300-digit int->str limit. Report the
+        # magnitude via bit_length() instead (a plain int operation).
+        raise ConversionError(
+            f"float-unrepresentable interval_hours: "
+            f"<int bit_length={value.bit_length()}>") from exc
+    if not math.isfinite(hours):
+        raise ConversionError(f"non-finite interval_hours: {value!r}")
+    return hours
+
+
 def funding_apr(rate_per_interval: Optional[float], interval_hours: Optional[float]) -> Optional[float]:
     """Annualize a per-interval funding rate (decimal fraction) to APR fraction.
 
@@ -50,9 +84,10 @@ def funding_apr(rate_per_interval: Optional[float], interval_hours: Optional[flo
     rate = safe_float(rate_per_interval) if not isinstance(rate_per_interval, float) else rate_per_interval
     if rate is None or interval_hours is None:
         return None
-    if interval_hours <= 0:
-        raise ConversionError(f"non-positive interval_hours: {interval_hours}")
-    return rate * (HOURS_PER_YEAR / float(interval_hours))
+    hours = _interval_hours_or_raise(interval_hours)
+    if hours <= 0:
+        raise ConversionError(f"non-positive interval_hours: {hours}")
+    return rate * (HOURS_PER_YEAR / hours)
 
 
 def rate_8h_equivalent(rate_per_interval: Optional[float], interval_hours: Optional[float]) -> Optional[float]:
@@ -63,9 +98,10 @@ def rate_8h_equivalent(rate_per_interval: Optional[float], interval_hours: Optio
     """
     if rate_per_interval is None or interval_hours is None:
         return None
-    if interval_hours <= 0:
-        raise ConversionError(f"non-positive interval_hours: {interval_hours}")
-    return rate_per_interval * (8.0 / float(interval_hours))
+    hours = _interval_hours_or_raise(interval_hours)
+    if hours <= 0:
+        raise ConversionError(f"non-positive interval_hours: {hours}")
+    return rate_per_interval * (8.0 / hours)
 
 
 def apr_pct(apr_fraction: Optional[float]) -> Optional[float]:
