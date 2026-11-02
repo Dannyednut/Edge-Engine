@@ -312,6 +312,163 @@ def test_shape_status_present_on_every_candidate_including_blocked():
     assert rec_g["net_cost_evidence_shape_ok"] is None
 
 
+def test_validator_and_record_path_are_total_for_huge_integers():
+    """E-12-R5 regression (PR #18 supervisor review, comment 6570904247).
+
+    ``10**10000`` is a VALID Python int but cannot be converted to float:
+    ``math.isfinite`` (and ``float()``) raise OverflowError on it. The
+    validator and the record path must BOTH stay total — return a value/
+    record, never throw. Since R4, the validator also runs during record
+    construction, so an unhandled raise would abort reconciliation.
+    """
+    huge = 10 ** 10000
+
+    # 0) The safe helper itself: total, fail-closed on the huge int.
+    assert reconciliation._is_finite_number(huge) is False
+
+    # 1) Validator-level: a huge schedule value is not a usable finite
+    #    cost figure -> False, NO raise.
+    block_huge_schedule = {
+        "schema": reconciliation.NET_COST_EVIDENCE_SCHEMA,
+        "long_venue_costs": {
+            "venue": "hyperliquid", "schedule": {"taker_fee_bps": huge},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "short_venue_costs": {
+            "venue": "binance", "schedule": {"taker_fee_bps": 5.0},
+            "source": "synthetic-fixture://venue-cost-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "interval_semantics": {
+            "funding_interval_hours": 1, "per_row_interval_published": True,
+            "source": "synthetic-fixture://interval-doc",
+            "retrieved_at_utc": "2026-10-30T00:00:00Z",
+        },
+        "units": {"rate_units": "decimal-fraction per interval",
+                  "apr_units": "decimal-fraction APR"},
+    }
+    assert reconciliation.net_cost_evidence_is_provenanced(
+        block_huge_schedule) is False
+
+    # 2) Validator-level: a huge interval (or huge interval hours value)
+    #    is likewise rejected without raising.
+    block_huge_interval = {
+        **block_huge_schedule,
+        "long_venue_costs": block_huge_schedule["long_venue_costs"] | {"schedule": {"taker_fee_bps": 4.5}},
+        "interval_semantics": {**block_huge_schedule["interval_semantics"],
+                               "funding_interval_hours": huge},
+    }
+    assert reconciliation.net_cost_evidence_is_provenanced(
+        block_huge_interval) is False
+
+    # 3) Record path, pre-R4 abort scenario: the validator runs during
+    #    record construction — a huge-int evidence payload must yield a
+    #    record with the tri-state (False), never an exception.
+    a = _alert(netApr=0.12, netAprBasis="sharpe-net",
+               net_cost_evidence=block_huge_schedule)
+    rec = reconciliation.reconcile_alerts([a],
+                                          _corroborating_observations())["candidates"][0]
+    assert rec["classification"] == reconciliation.CLS_DATA_CORRECTNESS
+    assert rec["net_cost_evidence_shape_ok"] is False
+    assert "net_cost_evidence_note" not in rec
+
+    # 4) Record path on an EARLY-RETURN (malformed figures) candidate with
+    #    a huge-int evidence payload: BLOCKED record returned, shape
+    #    attached (False), no exception — the exact R4-construction abort
+    #    scenario the supervisor flagged.
+    b = _alert(divergence="garbage", net_cost_evidence=block_huge_schedule)
+    rec_b = reconciliation.reconcile_alerts([b],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_b["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_b["gap_reasons"]
+    assert rec_b["net_cost_evidence_shape_ok"] is False
+
+    # 5) Record path: huge divergence figure -> BLOCKED (malformed), no
+    #    exception.
+    rec_c = reconciliation.reconcile_alerts([_alert(divergence=huge)],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_c["classification"] == reconciliation.CLS_BLOCKED
+    assert "malformed_alert_figures" in rec_c["gap_reasons"]
+
+    # 6) Record path: huge netApr with a verified basis is NOT treated as
+    #    verified (fail-closed) — the record is returned, classified
+    #    GROSS-INDICATIVE, never NET-VERIFIED.
+    rec_d = reconciliation.reconcile_alerts(
+        [_alert(netApr=huge, netAprBasis="sharpe-net")],
+        _corroborating_observations())["candidates"][0]
+    assert rec_d["classification"] == reconciliation.CLS_GROSS_INDICATIVE
+    assert rec_d["classification"] != reconciliation.CLS_NET_VERIFIED
+
+    # 7) Record path: huge per-leg figure (decimal APR) -> the leg records
+    #    a MALFORMED figure (BLOCKED), no exception, no silent absence.
+    rec_e = reconciliation.reconcile_alerts([_alert(longFundingApr=huge)],
+                                            _corroborating_observations())["candidates"][0]
+    assert rec_e["classification"] == reconciliation.CLS_BLOCKED
+    assert rec_e["legs"]["long"]["gap_reason"] == "malformed_alert_leg_figure"
+
+    # 8) Observation path (defense in depth): hostile observation metrics
+    #    (float-unrepresentable rate, non-positive interval, silent float
+    #    overflow -> inf, NaN) yield an unannualizable_rate gap — the
+    #    record path stays total. NOTE: funding_metrics annualizes at
+    #    construction time, so hostile observations are hand-crafted with
+    #    the same metric keys.
+    def _hostile_funding_metrics(rate_native, interval_hours):
+        return {
+            "funding_rate_native": rate_native,
+            "funding_interval_hours": interval_hours,
+            "funding_interval_assumed": True,
+            "funding_rate_apr": None,
+            "funding_rate_apr_pct": None,
+            "funding_rate_8h_equiv": None,
+            "at_clamp_reference": False,
+            "mark_price": None,
+            "index_price": None,
+            "open_interest_native": None,
+            "open_interest_unit": None,
+            "open_interest_usd_estimate": None,
+            "next_funding_ts_utc": None,
+            "volume_24h_usd": None,
+            "price_spread_at_size": None,
+            "price_spread_headline": None,
+            "net_apr_reference": None,
+        }
+
+    def _hostile_funding_obs(rate_native, interval_hours):
+        return make_observation(
+            run_id="e12-r5", collected_at_utc="2026-10-29T00:00:00Z",
+            observation_ts_utc="2026-10-29T00:00:00Z",
+            observation_ts_basis="response_time", source="binance",
+            source_kind="cex", asset="BTC", source_instrument="BTC",
+            metric_group="funding",
+            metrics=_hostile_funding_metrics(rate_native, interval_hours),
+            unit_conventions=funding_unit_conventions(),
+            evidence={"endpoint": "x", "http_status": 200,
+                      "payload_sha256": "h", "provenance": "test",
+                      "raw_ref": "r", "raw_bounded": False})
+
+    for label, hostile in (
+            ("huge-int rate", _hostile_funding_obs(huge, 1)),
+            ("zero interval (ConversionError)",
+             _hostile_funding_obs(0.00005, 0)),
+            ("silent float overflow -> inf",
+             _hostile_funding_obs(1e308, 1)),
+            ("NaN rate", _hostile_funding_obs(float("nan"), 1))):
+        obs = [_funding_obs("BTC", "hyperliquid", 0.0000125, 1, False), hostile]
+        rec_h = reconciliation.reconcile_alerts([_alert()], obs)["candidates"][0]
+        assert rec_h["classification"] == reconciliation.CLS_BLOCKED, label
+        assert rec_h["legs"]["long"]["ok"] is True, label
+        assert rec_h["legs"]["short"]["gap_reason"] == "unannualizable_rate", label
+
+    # 9) Batch-level totality: the whole report is produced with every
+    #    hostile payload above in one run.
+    report = reconciliation.reconcile_alerts(
+        [a, b, _alert(divergence=huge), _alert(netApr=huge, netAprBasis="sharpe-net")],
+        _corroborating_observations())
+    assert len(report["candidates"]) == 4
+    assert report["classification_counts"][reconciliation.CLS_NET_VERIFIED] == 0
+
+
 def test_fee_sensitivity_sidecar_attached_read_only_and_labeled():
     rec = reconciliation.reconcile_alerts([_alert()],
                                           _corroborating_observations())["candidates"][0]

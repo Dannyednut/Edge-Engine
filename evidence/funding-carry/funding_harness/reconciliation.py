@@ -57,7 +57,7 @@ import math
 from typing import Any, Optional
 
 from . import fees
-from .convert import funding_apr
+from .convert import ConversionError, funding_apr
 
 # Relative tolerance when re-deriving an alert's annualized leg figure
 # from the raw rate under the recorded interval (floating-point headroom).
@@ -99,7 +99,17 @@ def _is_nonempty_str(v: Any) -> bool:
 
 def _is_finite_number(v: Any) -> bool:
     # bool is an int subclass — explicitly exclude it from cost figures.
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    # E-12-R5 (PR #18 supervisor review): math.isfinite converts int ->
+    # float and RAISES OverflowError for a valid but too-large int
+    # (e.g. 10**10000) instead of returning a boolean. The validator must
+    # stay TOTAL (never throw), so a non-representable magnitude is
+    # treated as not a finite usable number (fail-closed).
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
 
 
 def _venue_cost_block_ok(block: Any) -> bool:
@@ -253,11 +263,31 @@ def _reconcile_leg(venue: Any, asset: str, expected_apr_pct: Optional[float],
         rec["gap_reason"] = "incomplete_observation_metrics"
         return rec
 
-    apr = funding_apr(rate_native, interval)
+    apr = None
+    try:
+        apr = funding_apr(rate_native, interval)
+    except (ConversionError, OverflowError):
+        # E-12-R5: an observation whose rate/interval cannot be converted
+        # (non-positive interval -> ConversionError; a valid but float-
+        # unrepresentable magnitude -> OverflowError) is UNANNUALIZABLE —
+        # a recorded gap, never an exception escaping the record path.
+        pass
     if apr is None:
         rec["gap_reason"] = "unannualizable_rate"
         return rec
-    apr_pct = apr * 100.0
+    # E-12-R5 (adjacent hardening): float overflow is SILENT in Python
+    # (1e308 * 8760 -> inf, no exception), and safe_float is bypassed for
+    # float inputs (NaN passes through). An inf/NaN APR is not an
+    # annualizable economic figure — record the gap instead of letting an
+    # inf/inf -> NaN comparison falsely corroborate the leg.
+    if not math.isfinite(apr):
+        rec["gap_reason"] = "unannualizable_rate"
+        return rec
+    try:
+        apr_pct = apr * 100.0
+    except OverflowError:
+        rec["gap_reason"] = "unannualizable_rate"
+        return rec
 
     rec["observation"] = {
         # preserve per-venue RAW units and interval, and the time basis
@@ -279,7 +309,7 @@ def _reconcile_leg(venue: Any, asset: str, expected_apr_pct: Optional[float],
         rec["note"] = "alert_carries_no_leg_figure"
         return rec
 
-    if not isinstance(expected_apr_pct, (int, float)) or not math.isfinite(expected_apr_pct):
+    if not _is_finite_number(expected_apr_pct):
         rec["gap_reason"] = "malformed_alert_leg_figure"
         return rec
 
@@ -346,7 +376,9 @@ def reconcile_alert(alert: dict, observations: list[dict],
 
     malformed = False
     for v in (divergence, spread_apr):
-        if v is not None and (not isinstance(v, (int, float)) or not math.isfinite(v)):
+        # E-12-R5: _is_finite_number is total (never throws) — a valid but
+        # float-unrepresentable int (10**10000) is malformed, not fatal.
+        if v is not None and not _is_finite_number(v):
             malformed = True
     if malformed:
         record["classification"] = CLS_BLOCKED
@@ -361,10 +393,25 @@ def reconcile_alert(alert: dict, observations: list[dict],
     short_apr_pct = _f(alert, "short_funding_apr_pct")
     if long_apr_pct is None:
         lf = _f(alert, "long_funding_apr", "longFundingApr")
-        long_apr_pct = lf * 100.0 if isinstance(lf, (int, float)) else None
+        if isinstance(lf, (int, float)) and not isinstance(lf, bool):
+            try:
+                long_apr_pct = lf * 100.0
+            except OverflowError:
+                # E-12-R5: present but float-unrepresentable — keep a
+                # non-finite sentinel so the leg records a MALFORMED
+                # figure (BLOCKED) instead of aborting or looking absent.
+                long_apr_pct = float("inf")
+        else:
+            long_apr_pct = None
     if short_apr_pct is None:
         sf = _f(alert, "short_funding_apr", "shortFundingApr")
-        short_apr_pct = sf * 100.0 if isinstance(sf, (int, float)) else None
+        if isinstance(sf, (int, float)) and not isinstance(sf, bool):
+            try:
+                short_apr_pct = sf * 100.0
+            except OverflowError:
+                short_apr_pct = float("inf")
+        else:
+            short_apr_pct = None
 
     obs_index = _funding_obs_index(observations)
     long_leg = _reconcile_leg(long_venue, asset, long_apr_pct, obs_index, tol)
@@ -390,7 +437,7 @@ def reconcile_alert(alert: dict, observations: list[dict],
     # ``_attach_net_cost_evidence_fields`` so it is present on EVERY
     # candidate (including BLOCKED ones); no recomputation is needed
     # here and shape validity never affects the classification below.
-    verified_net = (isinstance(net_apr, (int, float)) and math.isfinite(net_apr)
+    verified_net = (_is_finite_number(net_apr)
                     and net_basis in ("sharpe-net", "sharpe_net"))
     if verified_net:
         # A third-party net figure carried verbatim with its basis named:
