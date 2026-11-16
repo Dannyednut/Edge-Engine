@@ -104,7 +104,7 @@ const WATCH_SELECTORS: PoolSelector[] = [
  * `apy: null` means the pool was found but APY data is missing.
  * `apy: 0` means the pool reports a true zero yield.
  */
-interface PoolObservation {
+export interface PoolObservation {
   label: string;
   poolId: string;        // DefiLlama pool identifier (e.g., "0xabc..-hyperevm")
   chain: string;
@@ -116,7 +116,7 @@ interface PoolObservation {
   tvlUsd: number;
 }
 
-interface Observation {
+export interface Observation {
   ts: string;            // ISO 8601 UTC (second precision)
   source: 'defillama';
   apiStatus: 'ok' | 'error' | 'empty';
@@ -130,7 +130,16 @@ interface Observation {
 // ─── Overlap guard ──────────────────────────────────────────────────
 let collecting = false;
 
-async function fetchPools(): Promise<{ pools: any[]; ok: boolean; error?: string }> {
+/**
+ * Type of the fetch function — injectable for testing.
+ * The default implementation calls the live DefiLlama API; tests inject
+ * a controlled fixture that returns a known pools list or a simulated
+ * failure without touching the network.
+ */
+export type FetchFn = () => Promise<{ pools: any[]; ok: boolean; error?: string }>;
+
+/** Default production fetch implementation — calls the live DefiLlama API. */
+const defaultFetch: FetchFn = async () => {
   try {
     const res = await fetch(LLAMA_POOLS_API, {
       headers: { 'User-Agent': 'Edge-Engine-Manager/khype-timeseries', 'Accept': 'application/json' },
@@ -148,6 +157,14 @@ async function fetchPools(): Promise<{ pools: any[]; ok: boolean; error?: string
   } catch (err: any) {
     return { pools: [], ok: false, error: err?.message ?? String(err) };
   }
+};
+
+// Injectable fetch function — tests can override this to avoid live API calls.
+let fetchFn: FetchFn = defaultFetch;
+
+/** Set the fetch function (for testing). Pass `null` to reset to default. */
+export function setFetchFn(fn: FetchFn | null): void {
+  fetchFn = fn ?? defaultFetch;
 }
 
 function matchPool(pool: any): PoolSelector | null {
@@ -183,112 +200,150 @@ function toPoolObservation(pool: any, selector: PoolSelector): PoolObservation {
   };
 }
 
-async function collectOnce(): Promise<void> {
-  // Overlap guard — skip if a previous cycle is still running
-  if (collecting) {
-    console.warn(`[kHYPE] overlap: previous cycle still running, skipping`);
-    return;
-  }
-  collecting = true;
+/** Type of the append function — injectable for testing. */
+export type DefiLlamaAppendFn = (obs: Observation) => boolean;
 
-  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const t0 = Date.now();
-  console.log(`[kHYPE] collecting sample at ${ts}`);
-
-  const { pools, ok, error } = await fetchPools();
-  const fetchMs = Date.now() - t0;
-
-  if (!ok) {
-    console.error(`[kHYPE] fetch failed: ${error} (${fetchMs}ms)`);
-    // Record the failure in the JSONL so we can see gaps in the time-series
-    const failObs: Observation = {
-      ts,
-      source: 'defillama',
-      apiStatus: 'error',
-      fetchMs,
-      totalPoolsScanned: 0,
-      matchedPools: 0,
-      pools: [],
-      note: `fetch failed: ${error}`,
-    };
-    appendObservation(failObs);
-    collecting = false;
-    return;
-  }
-
-  if (pools.length === 0) {
-    console.warn(`[kHYPE] API returned 0 pools (${fetchMs}ms) — possible upstream issue`);
-    const emptyObs: Observation = {
-      ts,
-      source: 'defillama',
-      apiStatus: 'empty',
-      fetchMs,
-      totalPoolsScanned: 0,
-      matchedPools: 0,
-      pools: [],
-      note: 'API returned 0 pools',
-    };
-    appendObservation(emptyObs);
-    collecting = false;
-    return;
-  }
-
-  // Match pools and record full identity
-  const matched: PoolObservation[] = [];
-  // Track best (highest TVL) pool per label to avoid duplicates
-  const best = new Map<string, PoolObservation>();
-
-  for (const p of pools) {
-    const selector = matchPool(p);
-    if (!selector) continue;
-    const obs = toPoolObservation(p, selector);
-    const prev = best.get(obs.label);
-    if (!prev || obs.tvlUsd > prev.tvlUsd) {
-      best.set(obs.label, obs);
-    }
-  }
-
-  for (const v of best.values()) matched.push(v);
-
-  const observation: Observation = {
-    ts,
-    source: 'defillama',
-    apiStatus: 'ok',
-    fetchMs,
-    totalPoolsScanned: pools.length,
-    matchedPools: matched.length,
-    pools: matched,
-  };
-
-  appendObservation(observation);
-  console.log(`[kHYPE] sample saved: ${matched.length}/${pools.length} pools matched (${fetchMs}ms)`);
-  for (const p of matched) {
-    const apyStr = p.apy === null ? 'MISSING' : p.apy.toFixed(4) + '%';
-    console.log(`[kHYPE]   ${p.label}: ${apyStr} (TVL $${(p.tvlUsd / 1e6).toFixed(2)}M) [${p.symbol} @ ${p.project}/${p.chain}]`);
-  }
-  console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
-
-  collecting = false;
-}
-
-function appendObservation(obs: Observation): void {
+/** Default production append function. */
+const defaultDefiLlamaAppend: DefiLlamaAppendFn = (obs: Observation): boolean => {
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
     appendFileSync(DATA_FILE, JSON.stringify(obs) + '\n', 'utf8');
+    return true;
   } catch (err: any) {
     console.error(`[kHYPE] FAILED to write observation: ${err?.message ?? err}`);
+    return false;
+  }
+};
+
+// Injectable append function — tests can override this
+let appendFn: DefiLlamaAppendFn = defaultDefiLlamaAppend;
+
+/** Set the append function (for testing). */
+export function setAppendFn(fn: DefiLlamaAppendFn): void {
+  appendFn = fn;
+}
+
+/**
+ * Append an observation via the (possibly injected) append function.
+ *
+ * Production safety: catches throws from the injected append function so
+ * that a misbehaving test fixture (or a corrupted default) cannot crash
+ * the sampler. A throw is treated as a durable-write failure — returns
+ * false so the one-shot path exits non-zero.
+ */
+function appendObservation(obs: Observation): boolean {
+  try {
+    return appendFn(obs);
+  } catch (err: any) {
+    console.error(`[kHYPE] append function threw: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/**
+ * The production one-shot collection path. Exposed for testing so tests
+ * can exercise the REAL collection logic (fetch → match → build obs → append)
+ * with a controlled fetch fixture and injected append behavior, without
+ * depending on the live DefiLlama API and without spawning a subprocess.
+ *
+ * Returns true iff the observation was durably appended.
+ */
+export async function collectOnce(): Promise<boolean> {
+  // Overlap guard — skip if a previous cycle is still running
+  if (collecting) {
+    console.warn(`[kHYPE] overlap: previous cycle still running, skipping`);
+    return false;
+  }
+  collecting = true;
+
+  try {
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const t0 = Date.now();
+    console.log(`[kHYPE] collecting sample at ${ts}`);
+
+    const { pools, ok, error } = await fetchFn();
+    const fetchMs = Date.now() - t0;
+
+    if (!ok) {
+      console.error(`[kHYPE] fetch failed: ${error} (${fetchMs}ms)`);
+      const failObs: Observation = {
+        ts, source: 'defillama', apiStatus: 'error', fetchMs,
+        totalPoolsScanned: 0, matchedPools: 0, pools: [],
+        note: `fetch failed: ${error}`,
+      };
+      const appendOk = appendObservation(failObs);
+      console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+      return appendOk;
+    }
+
+    if (pools.length === 0) {
+      console.warn(`[kHYPE] API returned 0 pools (${fetchMs}ms) — possible upstream issue`);
+      const emptyObs: Observation = {
+        ts, source: 'defillama', apiStatus: 'empty', fetchMs,
+        totalPoolsScanned: 0, matchedPools: 0, pools: [],
+        note: 'API returned 0 pools',
+      };
+      const appendOk = appendObservation(emptyObs);
+      console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+      return appendOk;
+    }
+
+    const matched: PoolObservation[] = [];
+    const best = new Map<string, PoolObservation>();
+
+    for (const p of pools) {
+      const selector = matchPool(p);
+      if (!selector) continue;
+      const obs = toPoolObservation(p, selector);
+      const prev = best.get(obs.label);
+      if (!prev || obs.tvlUsd > prev.tvlUsd) {
+        best.set(obs.label, obs);
+      }
+    }
+
+    for (const v of best.values()) matched.push(v);
+
+    const observation: Observation = {
+      ts, source: 'defillama', apiStatus: 'ok', fetchMs,
+      totalPoolsScanned: pools.length, matchedPools: matched.length, pools: matched,
+    };
+
+    const appendSuccess = appendObservation(observation);
+    if (appendSuccess) {
+      console.log(`[kHYPE] sample saved: ${matched.length}/${pools.length} pools matched (${fetchMs}ms)`);
+      for (const p of matched) {
+        const apyStr = p.apy === null ? 'MISSING' : p.apy.toFixed(4) + '%';
+        console.log(`[kHYPE]   ${p.label}: ${apyStr} (TVL $${(p.tvlUsd / 1e6).toFixed(2)}M) [${p.symbol} @ ${p.project}/${p.chain}]`);
+      }
+    }
+    console.log(`[kHYPE] next sample in ${POLL_INTERVAL_MS / 1000}s`);
+    return appendSuccess;
+
+  } finally {
+    collecting = false;
   }
 }
 
 async function main() {
+  const oneShot = process.argv.includes('--once');
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / kHYPE Time-Series Collector (hardened)');
   console.log(`  Data file:  ${DATA_FILE}`);
-  console.log(`  Poll:       every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Mode:       ${oneShot ? 'ONE-SHOT (exits after 1 sample)' : `continuous (poll every ${POLL_INTERVAL_MS / 1000}s)`}`);
   console.log(`  Zero-capital: no .env, no wallet, public DefiLlama data only`);
   console.log(`  Overlap guard: enabled`);
   console.log(`  Pool identity: full metadata recorded per sample`);
   console.log('═══════════════════════════════════════════════════');
+
+  if (oneShot) {
+    const success = await collectOnce();
+    if (!success) {
+      console.error('[kHYPE] one-shot FAILED: observation not durably appended');
+      process.exit(1);
+    }
+    console.log('[kHYPE] one-shot complete, exiting');
+    process.exit(0);
+  }
 
   await collectOnce();
   setInterval(collectOnce, POLL_INTERVAL_MS);
@@ -300,7 +355,16 @@ async function main() {
   process.on('SIGTERM', () => { console.log('[kHYPE] SIGTERM, exiting'); process.exit(0); });
 }
 
-main().catch(err => {
-  console.error('[kHYPE] fatal:', err);
-  process.exit(1);
-});
+// Only auto-invoke main() when this file is the entry point (tsx runner).
+// Guard prevents main() from running when vitest imports the module for
+// type/function access — otherwise collectOnce() would start, set the
+// overlap-guard flag, and cause tests to spuriously hit "previous cycle
+// still running".
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(err => {
+    console.error('[kHYPE] fatal:', err);
+    process.exit(1);
+  });
+}
+
+

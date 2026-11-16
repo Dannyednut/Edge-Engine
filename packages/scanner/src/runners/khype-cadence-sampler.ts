@@ -266,13 +266,14 @@ export function commitCadenceObservation(
 
 let collecting = false;
 
-async function collectOnce(): Promise<void> {
+async function collectOnce(): Promise<boolean> {
   if (collecting) {
     console.warn(`[khype-cadence] overlap: previous cycle still running, skipping`);
-    return;
+    return false;
   }
   collecting = true;
 
+  let commitSuccess = false;
   try {
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     console.log(`[khype-cadence] collecting sample at ${ts}`);
@@ -373,21 +374,23 @@ async function collectOnce(): Promise<void> {
       lastTs: ts,
       rewardStep: rewardStepDetected,
     };
-    commitCadenceObservation(state, obs, staged);
+    commitSuccess = commitCadenceObservation(state, obs, staged);
 
     console.log(`[khype-cadence] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
   } finally {
-    // ALWAYS reset the overlap flag, even if an unexpected throw occurred.
     collecting = false;
   }
+
+  return commitSuccess;
 }
 
 async function main() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / kHYPE On-Chain Cadence Sampler');
   console.log(`  Data file:  ${DATA_FILE}`);
-  console.log(`  Poll:       every ${POLL_INTERVAL_MS / 1000}s`);
+  const oneShot = process.argv.includes('--once');
+  console.log(`  Mode:       ${oneShot ? 'ONE-SHOT (exits after 1 sample)' : `continuous (poll every ${POLL_INTERVAL_MS / 1000}s)`}`);
   console.log(`  Zero-capital: no transactions, no wallet, read-only RPC`);
   console.log(`  Accountant: ${ACCOUNTANT_ADDR}`);
   console.log(`  StakingMgr: ${STAKING_MANAGER_ADDR}`);
@@ -398,6 +401,16 @@ async function main() {
   console.log(`              totalSupply=${TOTAL_SUPPLY_SELECTOR}`);
   console.log(`  Cadence:    UNRESOLVED until ≥3 distinct reward-step timestamps`);
   console.log('═══════════════════════════════════════════════════');
+
+  if (oneShot) {
+    const success = await collectOnce();
+    if (!success) {
+      console.error('[khype-cadence] one-shot FAILED: observation not durably appended');
+      process.exit(1);
+    }
+    console.log('[khype-cadence] one-shot complete, exiting');
+    process.exit(0);
+  }
 
   await collectOnce();
   setInterval(collectOnce, POLL_INTERVAL_MS);

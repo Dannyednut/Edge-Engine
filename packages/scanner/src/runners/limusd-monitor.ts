@@ -535,13 +535,14 @@ function shouldAlert(state: MonitorState, alertKey: string): boolean {
 
 let collecting = false;
 
-async function collectOnce(): Promise<void> {
+async function collectOnce(): Promise<boolean> {
   if (collecting) {
     console.warn(`[limusd] overlap: previous cycle still running, skipping`);
-    return;
+    return false;
   }
   collecting = true;
 
+  let commitSuccess = false;
   // try/finally ensures the overlap flag is ALWAYS reset, even if an
   // unexpected throw occurs mid-collection. Without this, a single
   // unhandled error would permanently disable sampling.
@@ -709,22 +710,24 @@ async function collectOnce(): Promise<void> {
     lastSharePriceTs: stagedLastSharePriceTs,
     cooldowns: stagedCooldowns,
   };
-  commitObservation(state, obs, staged);
+  commitSuccess = commitObservation(state, obs, staged);
 
   console.log(`[limusd] next sample in ${POLL_INTERVAL_MS / 1000}s`);
 
   } finally {
-    // ALWAYS reset the overlap flag, even if an unexpected throw occurred.
-    // Without this, a single unhandled error would permanently disable sampling.
     collecting = false;
   }
+
+  return commitSuccess;
 }
 
 async function main() {
+  const oneShot = process.argv.includes('--once');
+
   console.log('═══════════════════════════════════════════════════');
   console.log('  Edge-Engine / limUSD Monitor (EI-010-V2 corrected)');
   console.log(`  Data file:  ${DATA_FILE}`);
-  console.log(`  Poll:       every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Mode:       ${oneShot ? 'ONE-SHOT (exits after 1 sample)' : `continuous (poll every ${POLL_INTERVAL_MS / 1000}s)`}`);
   console.log(`  Zero-capital: no transactions, no wallet, read-only RPC + DefiLlama`);
   console.log(`  limUSD:     ${LIMUSD_ADDR} (18 dec)`);
   console.log(`  PT-limUSD:  ${PT_LIMUSD_ADDR} (6 dec)`);
@@ -735,6 +738,18 @@ async function main() {
   console.log(`  USDC:       ${USDC_ADDR} (6 dec)`);
   console.log(`  Status:     WATCHLIST — NOT capital-ready`);
   console.log('═══════════════════════════════════════════════════');
+
+  if (oneShot) {
+    // One-shot mode: collect once, then exit. Used by GitHub Actions.
+    // Exit non-zero if the observation could not be durably appended.
+    const success = await collectOnce();
+    if (!success) {
+      console.error('[limusd] one-shot FAILED: observation not durably appended');
+      process.exit(1);
+    }
+    console.log('[limusd] one-shot complete, exiting');
+    process.exit(0);
+  }
 
   await collectOnce();
   setInterval(collectOnce, POLL_INTERVAL_MS);
