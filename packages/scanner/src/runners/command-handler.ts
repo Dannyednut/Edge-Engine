@@ -342,9 +342,12 @@ async function handleOpportunities(): Promise<string> {
     if (khypeAlerts.length > 0) {
       const a = khypeAlerts[0];
       const annualProfit = a.estimatedProfitUsd * (365 / 8);
-      lines.push(`#1 kHYPE LST carry arb — SUPPRESSED (unstake-fee evidence unavailable; net figures are pre-fee)`);
-      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}%  APR (pre-fee): ${((annualProfit / 5000) * 100).toFixed(1)}%`);
-      lines.push(`  Est. profit: $${annualProfit.toFixed(0)}/yr on $5k`);
+      // EM-STRAT-016-WO-01-R1: suppressed reference information only. Its
+      // pre-fee estimate is NOT added to Total verified profit below.
+      lines.push(`#1 kHYPE LST carry arb — SUPPRESSED reference (unstake-fee evidence unavailable; NOT counted in totals)`);
+      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee, unverified): ${a.netProfitPct.toFixed(2)}%  Pre-fee APR reference: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
+      lines.push(`  Pre-fee est. profit reference: $${annualProfit.toFixed(0)}/yr on $5k (excludes unstake fee — NOT verified profit)`);
+      lines.push(`  Unstake fee: UNAVAILABLE (never assumed zero)`);
       lines.push(`  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`);
       lines.push('');
     } else {
@@ -368,10 +371,15 @@ async function handleOpportunities(): Promise<string> {
     }
 
     // Total profit — only counts alerts where estimatedProfitUsd is verified non-null.
-    const khypeProfit = khypeAlerts[0]?.estimatedProfitUsd ?? 0;
+    // EM-STRAT-016-WO-01-R1: kHYPE is SUPPRESSED (unstake-fee evidence
+    // unavailable) — its pre-fee estimate is NOT verified profit and is
+    // NOT included in this aggregate. Euler alerts are monitoring-only
+    // (null P&L), so this total currently aggregates nothing; it stays an
+    // explicit verified-only aggregate rather than absorbing suppressed
+    // references.
     const eulerProfit = eulerAlerts.slice(0, 3).reduce((s, a) => s + (a.estimatedProfitUsd ?? 0), 0);
-    const totalProfit = khypeProfit * (365 / 8) + eulerProfit;
-    lines.push(`Total verified profit: $${totalProfit.toFixed(0)}/yr (Euler alerts are monitoring-only; their P&L is not included)`);
+    const totalProfit = eulerProfit;
+    lines.push(`Total verified profit: $${totalProfit.toFixed(0)}/yr (kHYPE suppressed — pre-fee reference excluded; Euler alerts are monitoring-only; their P&L is not included)`);
 
     return lines.join('\n');
   } catch (e: any) {
@@ -404,16 +412,11 @@ async function handleKhype(): Promise<string> {
       `Flashloan fee: ${a.flashloanFeePct.toFixed(2)}%`,
       `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
       '',
-      `Net profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
-      `Annualized: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(1)}% APR)`,
+      `Pre-fee profit reference per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)} (excludes unstake fee — NOT verified profit)`,
+      `Pre-fee annualized reference: $${annualProfit.toFixed(0)} (${((annualProfit / 5000) * 100).toFixed(1)}% APR pre-fee — NOT an expected strategy return)`,
       '',
-      'Execution:',
-      '  1. Buy kHYPE on HyperSwap V3',
-      '  2. Queue Kinetiq withdrawal (delay above)',
-      '  3. Claim HYPE after delay',
-      '  4. Wrap to WHYPE, repeat',
-      '',
-      '⚠️ Needs AGENT_HYPE_PRIVKEY to execute',
+      'Execution: SUPPRESSED — do not execute this strategy while the unstake fee is unverified.',
+      'A separate evidence-backed work order is required before any kHYPE carry execution is considered.',
     ].join('\n');
   } catch (e: any) {
     return `kHYPE scan failed: ${e.message}`;

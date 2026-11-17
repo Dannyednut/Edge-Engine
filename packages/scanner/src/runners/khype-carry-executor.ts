@@ -9,20 +9,36 @@
  *   5. Call claimWithdrawal(withdrawalId) → receive HYPE
  *   6. Wrap HYPE → WHYPE. Repeat.
  *
- * NET P&L PER CYCLE (8-day average):
+ * NET P&L PER CYCLE (8-day average) — UNSUPPORTED, see below:
  *   +2.46% kHYPE discount on HyperSwap V3 (live Oct 13 2026)
  *   -0.01% HyperSwap V3 fee
- *   -0.10% Kinetiq unstake fee (verified)
+ *   -????% Kinetiq unstake fee — UNKNOWN: no measured source is wired
  *   -gas (negligible on HyperEVM)
  *   -0.04% HyperLend flashloan fee (optional — own capital = no fee)
- *   = ~2.31% per 8-day cycle = ~105% APR (with own capital)
+ *   = previous "~2.31%/cycle ≈ 105% APR" arithmetic assumed a 0.10% fee and
+ *     is WITHDRAWN (EM-STRAT-016-WO-01-R1): the accepted EI evidence does
+ *     not establish any measured unstake-fee input.
+ *
+ * ───────────────────────────────────────────────────────────────────────
+ * EM-STRAT-016-WO-01-R1 — EXECUTION FAIL-CLOSED (unstake fee unverified)
+ * ───────────────────────────────────────────────────────────────────────
+ * The Kinetiq unstake fee and the economic model of THIS implementation are
+ * unverified: the fee below is an unverified hardcoded figure (no measured
+ * source), and the discount math uses `(1 - price) * 100` against an
+ * assumed 1:1 ratio rather than the redemption-anchor model used by
+ * HlLstArbScanner. executeCycle()/CLI --execute therefore fails closed:
+ * it rejects at the entry gate, BEFORE any transaction is built or
+ * submitted, and no environment variable or strategy configuration may
+ * bypass the stop. This is on top of (not instead of) the shared execution
+ * authorization checks, which are preserved unchanged. Re-enabling
+ * execution requires a separate evidence-backed work order covering the
+ * fee source and the economic model.
+ *
+ * Any scan output this file still produces is UNVERIFIED reference
+ * information, not a validated executable opportunity.
  *
  * STATE PERSISTENCE:
  *   data/khype-carry-state.json — tracks pending withdrawal IDs + claim times
- *
- * REQUIREMENTS:
- *   - Agent wallet with HYPE/WHYPE capital (still waiting on principal funding)
- *   - Once funded: set AGENT_HYPE_PRIVKEY env var
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -33,6 +49,28 @@ import { createWalletClient, createPublicClient, http, type WalletClient, type P
 import { privateKeyToAccount } from 'viem/accounts';
 import { HYPERSWAP_V3_POOLS, HYPERSWAP_V3_SWAP_ROUTER_02, HL_TOKEN_DECIMALS, HYPEREVM_RPC, v3PriceToHuman } from '../lib/hyperliquid-defi.js';
 import { assertExecutionAuthorized, type ExecutionScope } from '@edge/risk';
+
+/**
+ * EM-STRAT-016-WO-01-R1: execution is fail-closed while the unstake fee
+ * and economic model remain unverified. Observable + testable rejection
+ * reason; no env or strategy-config bypass exists.
+ */
+export const KHYPE_CARRY_EXECUTION_SUPPRESSED =
+  'kHYPE carry execution suppressed — unstake fee unverified (no measured ' +
+  'source; hardcoded 0.10% claim withdrawn) and discount model unverified ' +
+  '(assumed 1:1 ratio, not the redemption-anchor model) ' +
+  '(EM-STRAT-016-WO-01-R1)';
+
+/**
+ * EM-STRAT-016-WO-01-R1 fail-closed execution gate. Synchronous by design
+ * so the rejection happens BEFORE any transaction construction, RPC call,
+ * or submission attempt — and before the wallet/authorization layer, which
+ * remains a defense-in-depth layer, not the first gate. Deliberately NOT
+ * configurable: no environment variable or ordinary strategy configuration
+ * can bypass this stop; re-enabling requires editing this constant and a
+ * separate evidence-backed work order.
+ */
+export const KHYPE_CARRY_EXECUTION_STOPPED = true;
 
 /** Entrypoint scope for this script (defense-in-depth layer). */
 export const ENTRYPOINT_SCOPE: ExecutionScope = 'entrypoint:khype-carry-executor';
@@ -232,8 +270,12 @@ export class KhypeCarryExecutor {
         if (liquidity === 0n) continue;
 
         const ammFeePct = (pool.fee / 10000) * 100;
-        const unstakeFeePct = 0.10; // Kinetiq unstake fee (verified)
-        const estimatedProfitPct = discountPct - ammFeePct - unstakeFeePct;
+        // EM-STRAT-016-WO-01-R1: the unstake fee has NO measured source —
+        // it is NOT substituted with a guess and NOT assumed zero. The
+        // figure below is a PRE-FEE reference only (discount minus AMM
+        // fee); it is unverified information, never a validated
+        // opportunity.
+        const estimatedProfitPct = discountPct - ammFeePct;
         if (estimatedProfitPct <= 0) continue;
 
         const estimatedProfitUsd = (estimatedProfitPct / 100) * this.opts.maxSizeUsd;
@@ -267,6 +309,16 @@ export class KhypeCarryExecutor {
    * Returns the withdrawal ID once queued.
    */
   async executeCycle(opp: KhypeCarryOpportunity): Promise<{ queued: boolean; withdrawalId?: string; txHash?: string; error?: string }> {
+    // ─── EM-STRAT-016-WO-01-R1 fail-closed gate ───
+    // BEFORE any transaction construction, wallet use, RPC call, or
+    // submission attempt. No env/strategy-config bypass exists; the shared
+    // execution-authorization checks below are preserved unchanged and
+    // remain defense-in-depth — this gate is the first, not the only,
+    // layer.
+    if (KHYPE_CARRY_EXECUTION_STOPPED) {
+      return { queued: false, error: KHYPE_CARRY_EXECUTION_SUPPRESSED };
+    }
+
     if (this.opts.dryRun) {
       console.log(`[dry-run] Would execute cycle: ${opp.estimatedProfitPct.toFixed(2)}% profit = $${opp.estimatedProfitUsd.toFixed(2)} on $${opp.maxSizeUsd}`);
       return { queued: false, error: 'dry-run mode' };
@@ -468,10 +520,10 @@ async function main() {
   }
 
   if (args.has('--scan')) {
-    console.log('\n── Scanning for Opportunity ──');
+    console.log('\n── Scanning (UNVERIFIED reference — execution suppressed, EM-STRAT-016-WO-01-R1) ──');
     const opp = await executor.scan();
     if (opp) {
-      console.log(`  ✓ DISCOUNT FOUND`);
+      console.log(`  ✓ DISCOUNT FOUND (unverified reference — NOT a validated executable opportunity)`);
       console.log(`    kHYPE price: ${opp.khypePriceInWhype.toFixed(6)} WHYPE`);
       console.log(`    Discount: ${opp.discountPct.toFixed(2)}%`);
       console.log(`    Pool: ${opp.poolAddress} (fee=${opp.feeTier})`);
@@ -483,14 +535,14 @@ async function main() {
   }
 
   if (args.has('--execute')) {
+    // EM-STRAT-016-WO-01-R1: --execute fails closed at the CLI route as
+    // well — the refusal prints BEFORE any scan or cycle execution. The
+    // executeCycle() entry gate is the authoritative stop; this route-level
+    // message exists so an operator sees the reason without triggering the
+    // scan path.
     console.log('\n── Executing Cycle ──');
-    const opp = await executor.scan();
-    if (!opp) {
-      console.log('  ✗ No opportunity to execute');
-    } else {
-      const result = await executor.executeCycle(opp);
-      console.log(`  Result:`, result);
-    }
+    console.log(`  ✗ ${KHYPE_CARRY_EXECUTION_SUPPRESSED}`);
+    console.log('  No scan was run and no cycle was attempted. Re-enabling requires a separate evidence-backed work order.');
   }
 
   if (args.has('--claim')) {

@@ -676,9 +676,14 @@ describe('EM-STRAT-016-WO-01 — HL LST unstake-fee suppression presenter contra
     it('still dispatches OTHER strategies with severity opportunity (unrelated behavior preserved)', () => {
       // VOOI price-spread alerts are an unrelated strategy: their dispatch
       // block must keep severity 'opportunity' — the suppression is scoped
-      // to hl_lst_arb ONLY.
-      const vooiMatch = src.match(/VOOI price scan failed[\s\S]*?(?=\n\s*\/\/ 2\.)/);
+      // to hl_lst_arb ONLY. EM-STRAT-016-WO-01-R1: assert the ACTUAL
+      // severity and strategyId of the VOOI dispatch, not merely the
+      // existence of its source block.
+      const vooiMatch = src.match(/\/\/ 1\. VOOI price spread arbs[\s\S]*?(?=\n\s*\/\/ 2\. kHYPE LST carry arb)/);
       expect(vooiMatch, 'VOOI block not found (check block boundary regex)').not.toBeNull();
+      const vooiBlock = vooiMatch![0];
+      expect(vooiBlock).toMatch(/severity:\s*['"]opportunity['"]/);
+      expect(vooiBlock).toMatch(/strategyId:\s*['"]vooi_price_spread['"]/);
     });
   });
 
