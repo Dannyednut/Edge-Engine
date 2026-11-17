@@ -120,9 +120,11 @@ async function main() {
   } catch (e: any) { lines.push(`Funding scan failed: ${e.message}`); lines.push(''); }
 
   // 3. kHYPE Carry Arb
-  // EM-STRAT-004: fail-closed — when no alerts, scanner returned [] (no
-  // actionable opportunity). When alerts exist, estimatedProfitUsd is a
-  // verified number (scanner requires net >= 0.30%).
+  // EM-STRAT-016-WO-01-R2 (correcting a stale EM-STRAT-004 comment): when
+  // alerts exist, estimatedProfitUsd is a PRE-UNSTAKE-FEE reference — the
+  // scanner's 0.30% "net" threshold excludes the unknown unstake fee
+  // (never assumed zero), so this figure is NOT verified net profit and
+  // the strategy remains suppressed and non-actionable.
   try {
     const hlLstArb = new HlLstArbScanner({
       minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100,
@@ -136,12 +138,12 @@ async function main() {
       lines.push(`Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'} | Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'} | Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
       lines.push('');
     } else {
-      lines.push('--- kHYPE CARRY ARB ---');
+      lines.push('--- kHYPE CARRY ARB (SUPPRESSED — unstake-fee evidence unavailable, EM-STRAT-016-WO-01; no alert right now) ---');
       lines.push('No actionable opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met)');
       lines.push('');
     }
   } catch (e: any) {
-    lines.push(`--- kHYPE CARRY ARB ---`);
+    lines.push(`--- kHYPE CARRY ARB (SUPPRESSED — unstake-fee evidence unavailable, EM-STRAT-016-WO-01) ---`);
     lines.push(`Scan failed: ${e.message}`);
     lines.push('');
   }
@@ -166,13 +168,23 @@ async function main() {
   }
 
   // Summary
+  // EM-STRAT-016-WO-01-R2: the prior aggregate figures — "Capital needed:
+  // $65k ($25k VOOI + $10k HYPE/USDC + $25k VOOI)" and "Expected: $1.48M/yr
+  // = 2,274% APR" — are WITHDRAWN. Neither can be demonstrated to be
+  // independent of the suppressed kHYPE strategy: the $10k HYPE/USDC
+  // tranche funds the HyperEVM agent wallet that kHYPE carry runs from
+  // (the execution prioritizer mapped that same $10k to the now-suppressed
+  // kHYPE LST carry entry), and the forecast had no in-file derivation
+  // while including kHYPE contributions. No replacement forecast or capital
+  // requirement is substituted without independently reconciled evidence;
+  // per-strategy figures above (VOOI/Euler) are untouched.
   lines.push('--- SUMMARY ---');
-  lines.push('Capital needed: $65k ($25k VOOI + $10k HYPE/USDC + $25k VOOI)');
-  lines.push('Expected: $1.48M/yr = 2,274% APR');
+  lines.push('Capital needed: WITHDRAWN — prior $65k aggregate included the suppressed kHYPE strategy ($10k HYPE/USDC agent-wallet tranche); no kHYPE-independent reconciled breakdown exists.');
+  lines.push('Expected: WITHDRAWN — prior $1.48M/yr = 2,274% APR forecast had no in-file derivation and included suppressed kHYPE contributions; no replacement forecast without independently reconciled evidence.');
   lines.push('');
   lines.push('BLOCKERS:');
   lines.push('1. VOOI capital deposit on ultra.vooi.io');
-  lines.push('2. Agent wallet ($10k HYPE+USDC on HyperEVM)');
+  lines.push('2. Agent wallet on HyperEVM (amount pending a reconciled capital plan — the prior $10k figure was withdrawn with the aggregate)');
   lines.push('3. Principal approval (text "approved")');
   lines.push('');
   lines.push('Commands: /vooi /pricespread /khype /euler /status');

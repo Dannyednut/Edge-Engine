@@ -344,14 +344,17 @@ async function handleOpportunities(): Promise<string> {
       const annualProfit = a.estimatedProfitUsd * (365 / 8);
       // EM-STRAT-016-WO-01-R1: suppressed reference information only. Its
       // pre-fee estimate is NOT added to Total verified profit below.
-      lines.push(`#1 kHYPE LST carry arb — SUPPRESSED reference (unstake-fee evidence unavailable; NOT counted in totals)`);
+      // EM-STRAT-016-WO-01-R2: UNRANKED — no `#N` prefix; a ranked prefix
+      // would place the suppressed strategy among numbered actionable
+      // opportunities.
+      lines.push(`kHYPE LST carry arb — SUPPRESSED reference (UNRANKED, not an actionable opportunity; unstake-fee evidence unavailable; NOT counted in totals)`);
       lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee, unverified): ${a.netProfitPct.toFixed(2)}%  Pre-fee APR reference: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
       lines.push(`  Pre-fee est. profit reference: $${annualProfit.toFixed(0)}/yr on $5k (excludes unstake fee — NOT verified profit)`);
       lines.push(`  Unstake fee: UNAVAILABLE (never assumed zero)`);
       lines.push(`  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`);
       lines.push('');
     } else {
-      lines.push('#1 kHYPE LST carry arb — NO ACTIONABLE OPPORTUNITY (fail-closed: anchor/delay/fees or 0.30% net threshold not met)');
+      lines.push('kHYPE LST carry arb — SUPPRESSED reference (UNRANKED, not an actionable opportunity; no alert right now: anchor/delay/fees or 0.30% net threshold not met)');
       lines.push('');
     }
 

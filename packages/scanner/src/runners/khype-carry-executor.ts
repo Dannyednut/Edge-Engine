@@ -475,8 +475,29 @@ export class KhypeCarryExecutor {
 
 // ─── CLI entry point ────────────────────────────────────────────────────
 // Usage: tsx khype-carry-executor.ts [--scan] [--claim] [--execute] [--status]
-async function main() {
+// Exported for offline ordering tests (no side effects at import; main()
+// runs only when the module is invoked directly).
+export async function main() {
   const args = new Set(process.argv.slice(2));
+
+  // ─── EM-STRAT-016-WO-01-R2: the --execute refusal is the FIRST CLI ───
+  // ─── operation. It must precede every wallet-environment read, the ───
+  // dryRun calculation, KhypeCarryExecutor construction (KinetiqClient
+  // creation, state load, and possible signer initialization), the
+  // --status branch (which invokes KinetiqClient.getStatus()), --scan,
+  // and --claim. Returning here means mixed arguments such as
+  // `--execute --status`, `--execute --scan`, or `--execute --claim`
+  // cannot reach any other branch. The executeCycle() entry gate and the
+  // shared execution-authorization checks remain unchanged below this
+  // layer (defense-in-depth, not the first gate).
+  if (args.has('--execute')) {
+    console.log('── Executing Cycle ──');
+    console.log(`  ✗ ${KHYPE_CARRY_EXECUTION_SUPPRESSED}`);
+    console.log('  Refused before executor construction: no status, scan, or claim was run and no cycle was attempted.');
+    console.log('  Re-enabling requires a separate evidence-backed work order.');
+    return;
+  }
+
   const dryRun = !process.env.AGENT_HYPE_PRIVKEY || args.has('--dry-run');
 
   const executor = new KhypeCarryExecutor({
@@ -532,17 +553,6 @@ async function main() {
     } else {
       console.log('  ✗ No discount above threshold right now');
     }
-  }
-
-  if (args.has('--execute')) {
-    // EM-STRAT-016-WO-01-R1: --execute fails closed at the CLI route as
-    // well — the refusal prints BEFORE any scan or cycle execution. The
-    // executeCycle() entry gate is the authoritative stop; this route-level
-    // message exists so an operator sees the reason without triggering the
-    // scan path.
-    console.log('\n── Executing Cycle ──');
-    console.log(`  ✗ ${KHYPE_CARRY_EXECUTION_SUPPRESSED}`);
-    console.log('  No scan was run and no cycle was attempted. Re-enabling requires a separate evidence-backed work order.');
   }
 
   if (args.has('--claim')) {

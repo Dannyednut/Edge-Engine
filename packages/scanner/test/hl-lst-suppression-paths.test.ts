@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  main,
   ENTRYPOINT_SCOPE as KHYPE_SCOPE,
   KHYPE_CARRY_EXECUTION_STOPPED,
   KHYPE_CARRY_EXECUTION_SUPPRESSED,
@@ -203,11 +204,15 @@ describe('EM-STRAT-016-WO-01-R1 — khype-carry-executor.ts: execution fails clo
   });
 
   it('CLI --execute route fails closed before scanning', () => {
-    const route = src.match(/if \(args\.has\('--execute'\)\)[\s\S]*?(?=\n  if \(args\.has\('--claim'\)\))/);
+    // EM-STRAT-016-WO-01-R2: the refusal is now the FIRST operation of
+    // main() and returns immediately (ordering is proven by the injected
+    // R2 tests below). Here: the route prints the suppression reason and
+    // no executeCycle call exists anywhere in the CLI.
+    const route = src.match(/if \(args\.has\('--execute'\)\)[\s\S]*?return;/);
     expect(route, '--execute route not found').not.toBeNull();
     expect(route![0]).toMatch(/KHYPE_CARRY_EXECUTION_SUPPRESSED/);
-    expect(route![0]).not.toMatch(/executor\.executeCycle/);
-    expect(route![0]).not.toMatch(/executor\.scan/);
+    expect(src).not.toMatch(/executor\.executeCycle/);
+    expect((src.match(/args\.has\('--execute'\)/g) || []).length).toBe(1);
   });
 });
 
@@ -268,5 +273,169 @@ describe('EM-STRAT-016-WO-01-R1 — unrelated strategy presentations unchanged',
     expect(src).toMatch(/strategy: 'LST yield switch'/);
     expect(src).toMatch(/strategy: 'PT yield arb'/);
     expect(src).toMatch(/strategy: 'VOOI perp funding arb'/);
+  });
+});
+
+// ─── EM-STRAT-016-WO-01-R2: final kHYPE suppression corrections ──────────
+
+describe('EM-STRAT-016-WO-01-R2 — --execute refusal is the FIRST CLI operation (injected)', () => {
+  // Synthetic key bytes for the ordering detector only — never real key
+  // material, never used for signing. The refusal path must not reach
+  // signer initialization; a broken ordering would attempt constructor-time
+  // assertExecutionAuthorized (EDGE_EXECUTION_AUTH is removed below) and
+  // throw, failing the test loudly.
+  const FAKE_KEY = `0x${'11'.repeat(32)}`;
+  let origArgv: string[];
+  let origAuth: string | undefined;
+  let logLines: string[];
+  let logSpy: any;
+
+  beforeEach(() => {
+    origArgv = process.argv;
+    origAuth = process.env.EDGE_EXECUTION_AUTH;
+    delete process.env.EDGE_EXECUTION_AUTH; // no authorization present: any executor construction throws
+    vi.stubEnv('AGENT_HYPE_PRIVKEY', FAKE_KEY);
+    logLines = [];
+    logSpy = vi.spyOn(console, 'log').mockImplementation((...parts: unknown[]) => {
+      logLines.push(parts.map(String).join(' '));
+    });
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    vi.unstubAllEnvs();
+    process.argv = origArgv;
+    if (origAuth === undefined) delete process.env.EDGE_EXECUTION_AUTH;
+    else process.env.EDGE_EXECUTION_AUTH = origAuth;
+  });
+
+  async function runWithArgs(...flagArgs: string[]): Promise<void> {
+    process.argv = ['node', 'khype-carry-executor.ts', ...flagArgs];
+    // A broken ordering would reach executor construction (authorization
+    // throw) or an async branch; a correct one resolves cleanly.
+    await expect(main()).resolves.toBeUndefined();
+    const out = logLines.join('\n');
+    // Refusal printed…
+    expect(out).toMatch(/Executing Cycle/);
+    expect(out).toMatch(/unstake fee unverified/);
+    expect(out).toMatch(/Refused before executor construction/);
+    // …and NOTHING else ran: no executor banner (construction happened),
+    // no status (KinetiqClient.getStatus), no scan, no claim.
+    expect(out).not.toMatch(/kHYPE Carry Arb Executor/);
+    expect(out).not.toMatch(/Mode:/);
+    expect(out).not.toMatch(/Kinetiq Status/);
+    expect(out).not.toMatch(/Carry State/);
+    expect(out).not.toMatch(/Scanning/);
+    expect(out).not.toMatch(/Claiming Ready Withdrawals/);
+  }
+
+  it('--execute alone returns before construction, wallet env use, status, scan, or claim', async () => {
+    await runWithArgs('--execute');
+  });
+
+  it('--execute --status cannot reach the status branch', async () => {
+    await runWithArgs('--execute', '--status');
+  });
+
+  it('--execute --scan cannot reach the scan branch', async () => {
+    await runWithArgs('--execute', '--scan');
+  });
+
+  it('--execute --claim cannot reach the claim branch', async () => {
+    await runWithArgs('--execute', '--claim');
+  });
+
+  it('all flags mixed: --status --execute --scan --claim still refuses immediately', async () => {
+    await runWithArgs('--status', '--execute', '--scan', '--claim');
+  });
+
+  it('source contract: the --execute check precedes env read, construction, status, scan, and claim in main()', () => {
+    const src = readRunner('khype-carry-executor.ts');
+    const mainSrc = src.match(/export async function main\(\)[\s\S]*?(?=\n\/\/ Only run main)/);
+    expect(mainSrc, 'main() not found').not.toBeNull();
+    const body = mainSrc![0];
+    const idxGate = body.indexOf("args.has('--execute')");
+    const idxEnv = body.indexOf('process.env.AGENT_HYPE_PRIVKEY');
+    const idxCtor = body.indexOf('new KhypeCarryExecutor');
+    const idxStatus = body.indexOf("args.has('--status')");
+    const idxScan = body.indexOf("args.has('--scan')");
+    const idxClaim = body.indexOf("args.has('--claim')");
+    expect(idxGate).toBeGreaterThan(-1);
+    const targets: Array<[string, number]> = [
+      ['wallet-env read', idxEnv],
+      ['executor construction', idxCtor],
+      ['status branch', idxStatus],
+      ['scan branch', idxScan],
+      ['claim branch', idxClaim],
+    ];
+    for (const [name, idx] of targets) {
+      expect(idx, `${name} must appear in main()`).toBeGreaterThan(-1);
+      expect(idxGate, `--execute gate must precede ${name}`).toBeLessThan(idx);
+    }
+    // The gate returns immediately; exactly one --execute branch exists.
+    expect(body.slice(idxGate, idxGate + 400)).toMatch(/return;/);
+    expect((src.match(/args\.has\('--execute'\)/g) || []).length).toBe(1);
+  });
+
+  it('R1 protections intact: executeCycle() entry gate and shared authorization checks unchanged', () => {
+    const src = readRunner('khype-carry-executor.ts');
+    expect(src).toMatch(/export const KHYPE_CARRY_EXECUTION_STOPPED = true;/);
+    const fn = src.match(/async executeCycle\([\s\S]*?(?=\n  \/\*\*)/)!;
+    expect(fn[0]).toMatch(/if \(KHYPE_CARRY_EXECUTION_STOPPED\) \{[\s\S]*?return \{ queued: false, error: KHYPE_CARRY_EXECUTION_SUPPRESSED \}/);
+    expect(src).toMatch(/assertExecutionAuthorized\(ENTRYPOINT_SCOPE\)/);
+    expect(src).toMatch(/assertExecutionAuthorized\('evm-executor:send-transaction'\)/);
+  });
+});
+
+describe('EM-STRAT-016-WO-01-R2 — telegram-summary.ts: withdrawn aggregates + corrected comment', () => {
+  const src = readRunner('telegram-summary.ts');
+
+  it('no longer presents the $65k capital requirement or the $1.48M/yr = 2,274% APR forecast as active claims', () => {
+    // The active-claim string literals are gone…
+    expect(src).not.toMatch(/'Capital needed: \$65k/);
+    expect(src).not.toMatch(/'Expected: \$1\.48M/);
+    expect(src).not.toMatch(/Agent wallet \(\$10k HYPE\+USDC/);
+    // …replaced by explicit withdrawals (the figures appear only as
+    // withdrawn references, never as a forward-looking claim).
+    expect(src).toMatch(/Capital needed: WITHDRAWN — prior \$65k aggregate included the suppressed kHYPE strategy/);
+    expect(src).toMatch(/Expected: WITHDRAWN — prior \$1\.48M\/yr = 2,274% APR forecast had no in-file derivation/);
+    expect(src).toMatch(/no replacement forecast without independently reconciled evidence/);
+  });
+
+  it('corrects the stale comment: estimatedProfitUsd is a pre-unstake-fee reference, not verified profit', () => {
+    expect(src).not.toMatch(/verified number \(scanner requires/);
+    expect(src).toMatch(/PRE-UNSTAKE-FEE reference/);
+    expect(src).toMatch(/NOT verified net profit/);
+  });
+
+  it('labels all three kHYPE section variants as suppressed (alerts / no-alert / failure)', () => {
+    expect((src.match(/kHYPE CARRY ARB \(SUPPRESSED/g) || []).length).toBe(3);
+    expect(src).not.toMatch(/'--- kHYPE CARRY ARB ---'/);
+    expect(src).not.toMatch(/`--- kHYPE CARRY ARB ---`/);
+  });
+
+  it('unrelated strategy forecasts untouched (VOOI price-spread/funding, Euler monitoring)', () => {
+    expect(src).toMatch(/Top 5: \$\$\{top5\.toFixed\(0\)\}\/cycle/);
+    expect(src).toMatch(/FUNDING RATE ARBS \(8-24h hold\)/);
+    expect(src).toMatch(/EULER LENDING \(MONITORING ONLY — not actionable\)/);
+  });
+});
+
+describe('EM-STRAT-016-WO-01-R2 — /opportunities: kHYPE is an UNRANKED suppressed reference', () => {
+  const src = readRunner('command-handler.ts');
+
+  it('the suppressed kHYPE reference carries no ranking prefix in either branch', () => {
+    expect(src).not.toMatch(/#\d+\s*kHYPE/);
+    const unranked = src.match(/SUPPRESSED reference \(UNRANKED, not an actionable opportunity/g) || [];
+    expect(unranked.length).toBe(2); // alerts-present and no-alert branches
+    expect(src).toMatch(/unstake-fee evidence unavailable; NOT counted in totals/);
+  });
+
+  it('numbered entries and the verified-profit exclusion are unchanged', () => {
+    // The ranked/numbered mechanism still applies to the remaining entries.
+    expect(src).toMatch(/#\$\{lines\.filter\(l => l\.startsWith\('#'\)\)\.length \+ 1\} Euler/);
+    // R1 exclusion preserved.
+    expect(src).toMatch(/kHYPE suppressed — pre-fee reference excluded/);
+    expect(src).not.toMatch(/khypeProfit\s*\*\s*\(365\s*\/\s*8\)/);
   });
 });
