@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { HlLstArbScanner } from '../strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, UNSTAKE_FEE_SUPPRESSED } from '../strategies/hl-lst-arb-scanner.js';
 import { LstYieldComparisonScanner } from '../strategies/lst-yield-comparison.js';
 import { PtYieldArbScanner } from '../strategies/pt-yield-arb-scanner.js';
 import { EulerLendingArbScanner } from '../strategies/euler-lending-arb-scanner.js';
@@ -105,7 +105,7 @@ async function main() {
   lines.push('| 8 | Tokenized Equity | tokenized_equity | ✅ Live |');
   lines.push('| 9 | CEX-like DEX Price Arb | cexlike_dex_price_arb | ✅ Live (filtered) |');
   lines.push('| 10 | HL AMM Arb | hl_amm_arb | ✅ Live |');
-  lines.push('| 11 | HL LST (kHYPE) Arb | hl_lst_arb | ✅ Live |');
+  lines.push('| 11 | HL LST (kHYPE) Arb | hl_lst_arb | 🚫 Suppressed (fail-closed, EM-STRAT-016-WO-01: unstake-fee evidence unavailable) |');
   lines.push('| 12 | Gold Arb (PAXG/XAUT) | gold_arb | ✅ Live |');
   lines.push('| 13 | Equity Perp Cross-Venue | equity_perp_cross_venue | ✅ Live |');
   lines.push('| 14 | LST Yield Comparison | lst_yield_comparison | ✅ Live |');
@@ -304,18 +304,24 @@ async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; mo
       minNetDiscountPct: 0.30,
     });
     const alerts = await hlLstArb.scan();
+    // EM-STRAT-016-WO-01: kHYPE entries are SUPPRESSED references — the
+    // unstake fee is unknown (never assumed zero), so every figure below
+    // is pre-fee and NOT a validated net opportunity. The strategy label
+    // carries the suppression marker; a future presenter-contract test in
+    // strategy-labeling.test.ts pins this row and the label prefix.
     for (const a of alerts) {
       const annualProfit = a.estimatedProfitUsd * (365 / 8);
       opportunities.push({
         rank: ++rank,
-        strategy: 'kHYPE LST carry arb',
+        strategy: 'kHYPE LST carry arb — SUPPRESSED (unstake-fee evidence unavailable; pre-fee figures)',
         asset: 'kHYPE/WHYPE',
         spreadPct: a.grossDiscountPct,
         annualizedReturnPct: (annualProfit / 5000) * 100,
         estimatedProfitUsd: annualProfit,
         capitalRequired: 5000,
         details: [
-          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
+          `SUPPRESSED (EM-STRAT-016-WO-01): ${UNSTAKE_FEE_SUPPRESSED}`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
           `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
           `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,

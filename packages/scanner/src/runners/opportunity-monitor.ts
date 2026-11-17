@@ -20,7 +20,7 @@ import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { VooiClient } from '@edge/vooi-client';
 import { TelegramAlerter } from '@edge/alerts';
-import { HlLstArbScanner } from '../strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, UNSTAKE_FEE_SUPPRESSED } from '../strategies/hl-lst-arb-scanner.js';
 import { EulerLendingArbScanner } from '../strategies/euler-lending-arb-scanner.js';
 import { getAliasInfo } from '../lib/alias-ticker-map.js';
 
@@ -138,12 +138,23 @@ async function main() {
     }
 
     // 2. kHYPE LST carry arb
-    // EM-STRAT-004: scanner is fail-closed. estimatedProfitUsd is a verified
-    // number when alerts exist (scanner requires net >= 0.30%). Anchor
-    // freshness and block timestamp are surfaced for diagnostic visibility.
+    // ─── EM-STRAT-016-WO-01: SUPPRESSED (fail-closed). ────────────────────
+    // The Kinetiq unstake fee is a required cost of the carry and no
+    // verified source is wired; netProfitPct silently treats it as zero.
+    // The scanner's alerts are NEVER economically validated opportunities:
+    // every alert carries `unstakeFeeUnverified: true` and this presenter
+    // must not dispatch it as 'opportunity'. Hard guard only — there is
+    // deliberately NO env/config bypass for this suppression.
+    // Regression: strategy-labeling.test.ts asserts this block never
+    // assigns severity 'opportunity' to hl_lst_arb alerts.
     try {
       const alerts = await hlLstArb.scan();
       for (const a of alerts) {
+        // Hard guard: only suppressed (unverified-fee) alerts may be
+        // presented, as reference info. A future edit that re-enables
+        // dispatch without re-validating the fee source cannot leak an
+        // alert through this presenter.
+        if (a.unstakeFeeUnverified !== true) continue;
         const key = `khype|${a.pair}`;
         if ((Date.now() - (seen.get(key) ?? 0)) < DEDUP_WINDOW) continue;
         seen.set(key, Date.now());
@@ -152,11 +163,14 @@ async function main() {
           await alerter.sendAlert({
             id: `khype_${Date.now()}`,
             ts: Date.now(),
-            severity: 'opportunity',
+            severity: 'info', // EM-STRAT-016-WO-01: never 'opportunity' while suppressed
             strategyId: 'hl_lst_arb',
-            title: `[kHYPE] ${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)})`,
+            title: `[kHYPE-REF] ${a.grossDiscountPct.toFixed(2)}% gross reference (anchor: ${a.redemptionAnchor.toFixed(4)}) — unstake-fee suppressed`,
             body: [
-              `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+              'SUPPRESSED — not an actionable opportunity. ' + UNSTAKE_FEE_SUPPRESSED,
+              'Net figure below EXCLUDES the unstake fee (pre-fee reference only):',
+              `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+              `Unstake fee: UNAVAILABLE (never assumed zero)`,
               `Anchor: ${a.redemptionAnchor.toFixed(6)}  Fresh: ${a.anchorFresh}  Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
               `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`,
             ].join('\n'),

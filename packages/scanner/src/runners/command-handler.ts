@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { TelegramAlerter } from '@edge/alerts';
-import { HlLstArbScanner } from '../strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, UNSTAKE_FEE_SUPPRESSED } from '../strategies/hl-lst-arb-scanner.js';
 import { EulerLendingArbScanner } from '../strategies/euler-lending-arb-scanner.js';
 import { KinetiqClient } from '@edge/executor';
 
@@ -342,8 +342,8 @@ async function handleOpportunities(): Promise<string> {
     if (khypeAlerts.length > 0) {
       const a = khypeAlerts[0];
       const annualProfit = a.estimatedProfitUsd * (365 / 8);
-      lines.push(`#1 kHYPE LST carry arb`);
-      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}%  APR: ${((annualProfit / 5000) * 100).toFixed(1)}%`);
+      lines.push(`#1 kHYPE LST carry arb — SUPPRESSED (unstake-fee evidence unavailable; net figures are pre-fee)`);
+      lines.push(`  Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}%  APR (pre-fee): ${((annualProfit / 5000) * 100).toFixed(1)}%`);
       lines.push(`  Est. profit: $${annualProfit.toFixed(0)}/yr on $5k`);
       lines.push(`  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`);
       lines.push('');
@@ -393,7 +393,10 @@ async function handleKhype(): Promise<string> {
     return [
       '═══ kHYPE LST Carry Arb ═══',
       '',
-      `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3`,
+      'SUPPRESSED — not an actionable opportunity (EM-STRAT-016-WO-01): ' + UNSTAKE_FEE_SUPPRESSED,
+      'All net/annual figures below EXCLUDE the unstake fee (pre-fee reference).',
+      '',
+      `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}% on HyperSwap V3`,
       `kHYPE price: ${a.marketPrice.toFixed(6)} WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
       `Pool liquidity: ${a.poolLiquidity.toString()}`,
       // EM-STRAT-004: fee tier 100 = 0.01% (corrected conversion). ammFeePct is the pct value.

@@ -131,8 +131,8 @@ async function main() {
     const alerts = await hlLstArb.scan();
     if (alerts.length > 0) {
       const a = alerts[0];
-      lines.push('--- kHYPE CARRY ARB ---');
-      lines.push(`Gross: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`);
+      lines.push('--- kHYPE CARRY ARB (SUPPRESSED — unstake-fee evidence unavailable, EM-STRAT-016-WO-01; figures are pre-fee references) ---');
+      lines.push(`Gross: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}% (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`);
       lines.push(`Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'} | Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'} | Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
       lines.push('');
     } else {
