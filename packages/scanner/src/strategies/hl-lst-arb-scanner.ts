@@ -51,6 +51,11 @@
  *   Queue native withdrawal -> burns kHYPE, returns HYPE after delay, less fee.
  *   This is a CARRY ARB, not atomic. Capital is locked for the withdrawal period.
  *
+ *   ⚠ The unstake fee (the "less fee" above) is a REQUIRED cost input that
+ *   this scanner has never read. EI-STRAT-016: until a separately-authorized
+ *   evidence-backed work order wires a verified unstake-fee source, this fee
+ *   is UNKNOWN — not zero, not estimated. See UNSTAKE_FEE_SUPPRESSED below.
+ *
  * RISKS:
  *   - Kinetiq smart contract risk (validator / slashing risk)
  *   - Capital locked during withdrawal delay
@@ -94,6 +99,29 @@ const ANCHOR_STALENESS_MS = 5 * 60 * 1000;
 // EM-STRAT-004: required minimum net discount after costs (0.30%).
 export const MIN_NET_DISCOUNT_PCT_DEFAULT = 0.30;
 
+/**
+ * EM-STRAT-016-WO-01 — fail-closed unstake-fee suppression.
+ *
+ * The Kinetiq unstake fee ("burns kHYPE, returns HYPE after delay, LESS
+ * FEE") is a required cost of the carry, but no verified source for it is
+ * wired: this scanner has never read it, and the net-profit line therefore
+ * silently treats it as zero. Until a separate, evidence-backed work order
+ * authorizes re-enabling dispatch (by wiring a verified fee source and
+ * updating this constant, the presenter contracts, and the regression
+ * tests), every `hl_lst_arb` alert MUST be presented as suppressed, never
+ * as an economically validated opportunity.
+ *
+ * Observable + testable: alerts carry `unstakeFeePct: null` (NEVER a
+ * zero substitute) and the literal `unstakeFeeUnverified: true`; presenters
+ * that dispatch downgrade to 'info' severity with a [HLLST-REF] label and
+ * the suppression-reason constant below. There is deliberately NO
+ * environment-variable or config bypass: an undocumented default must not
+ * be able to re-present an unverified-fee opportunity as actionable.
+ */
+export const UNSTAKE_FEE_SUPPRESSED =
+  'unstake-fee evidence unavailable (Kinetiq unstake fee never read; ' +
+  'netProfitPct excludes a required cost) — EM-STRAT-016-WO-01 suppression';
+
 export interface HlLstArbParams {
   /** Min gross discount % to consider (default 0.5%). Below this is not interesting. */
   minDiscountPct: number;
@@ -134,8 +162,30 @@ export interface HlLstArbAlert {
   redemptionAnchor: number;
   /** Gross discount: (anchor - marketPrice) / anchor * 100. Positive = kHYPE below fair value. */
   grossDiscountPct: number;
-  /** Net-of-cost threshold: gross discount - AMM fee - flashloan fee. */
+  /**
+   * Net-of-cost threshold: gross discount - AMM fee - flashloan fee.
+   *
+   * ⚠ EM-STRAT-016-WO-01: this figure EXCLUDES the Kinetiq unstake fee —
+   * a required cost of the carry for which no verified source is wired.
+   * It is a pre-unstake-fee reference, NOT a validated net opportunity;
+   * `unstakeFeeUnverified` below must stay `true` while that is so.
+   */
   netProfitPct: number;
+  /**
+   * EM-STRAT-016-WO-01: the Kinetiq unstake fee as a percentage. ALWAYS
+   * `null` while no verified source is wired — never a zero substitute
+   * and never an estimate. Removing the suppression requires a separate
+   * evidence-backed work order.
+   */
+  unstakeFeePct: null;
+  /**
+   * EM-STRAT-016-WO-01: literal type — every alert is suppressed while the
+   * unstake-fee evidence is unavailable. Presenters MUST NOT dispatch with
+   * `severity: 'opportunity'`; they dispatch 'info' with a [HLLST-REF]
+   * label, or suppress entirely. A future edit cannot emit `false` without
+   * editing this interface, which is the intended review checkpoint.
+   */
+  unstakeFeeUnverified: true;
   /** Estimated profit in USD on max position size. */
   estimatedProfitUsd: number;
   /** AMM swap fee as a percentage (e.g., 0.01 for tier-100 pool). */
@@ -381,6 +431,11 @@ export class HlLstArbScanner implements Strategy {
           redemptionAnchor: anchor.rate,
           grossDiscountPct,
           netProfitPct,
+          // EM-STRAT-016-WO-01: literal fail-closed suppression fields. The
+          // unstake fee is unknown — null, never zero — so every alert is
+          // born suppressed; see UNSTAKE_FEE_SUPPRESSED above.
+          unstakeFeePct: null,
+          unstakeFeeUnverified: true,
           estimatedProfitUsd,
           ammFeePct,
           flashloanFeePct,

@@ -46,17 +46,24 @@ async function main() {
       action: 'Run VooiPriceSpreadExecutor --live',
       prerequisites: ['$25k USDC in agent EVM wallet', 'VOOI API token (set)'],
     },
+    // EM-STRAT-016-WO-01-R1: kHYPE strategies are SUPPRESSED (unstake-fee
+    // evidence unavailable; the previous 0.10% 'verified' claim is
+    // withdrawn). This entry is retained as an explicit NOT-DEPLOYABLE
+    // marker only: it must not be ranked as a deployment priority, must
+    // not recommend running the scanner/executor, and carries no
+    // expected-APR or profit claim. Renumbered entries below keep their
+    // original relative order.
     {
-      rank: 3,
-      name: 'kHYPE AMM Discount Arb',
-      capital: 5000,
-      expectedApr: 1042,
-      riskLevel: 'MEDIUM (atomic, flashloan)',
-      timeToProfit: 'Instant (per cycle)',
-      riskAdjustedScore: 90,
-      notes: '2.49% discount verified on-chain. $72 profit per cycle on $5k.',
-      action: 'Run HlLstArbScanner + flashloan executor',
-      prerequisites: ['$5k USDC in agent EVM wallet', 'HyperLend flashloan available'],
+      rank: 0,
+      name: 'kHYPE AMM Discount Arb — SUPPRESSED',
+      capital: 0,
+      expectedApr: null,
+      riskLevel: 'N/A — suppressed',
+      timeToProfit: 'N/A',
+      riskAdjustedScore: 0,
+      notes: 'SUPPRESSED (EM-STRAT-016-WO-01): unstake-fee evidence unavailable; not deployable. Figures removed — no expected-APR or profit claim is made while economics are unverified.',
+      action: 'NONE — do not deploy; a separate evidence-backed work order is required before reconsideration',
+      prerequisites: ['Unstake-fee evidence (separate authorized research task)'],
     },
     {
       rank: 4,
@@ -94,17 +101,19 @@ async function main() {
       action: 'Run CexLikeDexExecutor',
       prerequisites: ['$5k USDC in agent EVM wallet', 'CEX accounts configured'],
     },
+    // EM-STRAT-016-WO-01-R1: same suppression as above — retained as a
+    // NOT-DEPLOYABLE marker, no execution recommendation, no figures.
     {
-      rank: 7,
-      name: 'kHYPE LST Carry (3x lev)',
-      capital: 10000,
-      expectedApr: 5.1,
-      riskLevel: 'MEDIUM (liquidation if HYPE drops 33%)',
-      timeToProfit: 'Daily (passive yield)',
-      riskAdjustedScore: 60,
-      notes: 'Low yield but passive. Use for HYPE holdings.',
-      action: 'Stake HYPE → kHYPE, borrow on HyperLend, re-stake',
-      prerequisites: ['$10k HYPE in agent EVM wallet'],
+      rank: 0,
+      name: 'kHYPE LST Carry (3x lev) — SUPPRESSED',
+      capital: 0,
+      expectedApr: null,
+      riskLevel: 'N/A — suppressed',
+      timeToProfit: 'N/A',
+      riskAdjustedScore: 0,
+      notes: 'SUPPRESSED (EM-STRAT-016-WO-01): unstake-fee evidence unavailable; not deployable.',
+      action: 'NONE — do not deploy; a separate evidence-backed work order is required before reconsideration',
+      prerequisites: ['Unstake-fee evidence (separate authorized research task)'],
     },
     {
       rank: 8,
@@ -151,12 +160,13 @@ async function main() {
   console.log('Rank | Score | Strategy                     | Capital  | APR     | Risk     | Time to Profit');
   console.log('─────|───────|──────────────────────────────|──────────|─────────|──────────|───────────────');
   for (const s of strategies) {
-    console.log(`  ${s.rank}  | ${s.riskAdjustedScore.toString().padStart(5)} | ${s.name.padEnd(28)}| $${s.capital.toLocaleString().padStart(8)} | ${s.expectedApr.toString().padStart(7)}% | ${s.riskLevel.substring(0, 8).padEnd(8)}| ${s.timeToProfit}`);
+    const aprCell = s.expectedApr === null ? '     N/A' : s.expectedApr.toString().padStart(7) + '%';
+    console.log(`  ${s.rank}  | ${s.riskAdjustedScore.toString().padStart(5)} | ${s.name.padEnd(28)}| $${s.capital.toLocaleString().padStart(8)} | ${aprCell} | ${s.riskLevel.substring(0, 8).padEnd(8)}| ${s.timeToProfit}`);
   }
 
-  // Total capital needed
+  // Total capital needed (suppressed entries contribute $0 and are excluded)
   const totalCapital = strategies.reduce((s, x) => s + x.capital, 0);
-  console.log(`\n  Total capital needed: $${totalCapital.toLocaleString()}`);
+  console.log(`\n  Total capital needed (suppressed entries excluded): $${totalCapital.toLocaleString()}`);
 
   // Deployment phases
   console.log('\n── Deployment Phases ──\n');
@@ -164,22 +174,22 @@ async function main() {
   console.log('  → Register builder code');
   console.log('  → Revenue starts: $36/day = $13k/yr');
   console.log('');
-  console.log('Phase 2 (Day 1 — $35k):');
+  console.log('Phase 2 (Day 1 — $30k):');
   console.log('  → VOOI Price Spread ($25k)');
-  console.log('  → kHYPE AMM Discount ($5k)');
   console.log('  → HLP Vault ($5k)');
-  console.log('  → Revenue: $380/day = $139k/yr');
+  console.log('  → (kHYPE AMM Discount SUPPRESSED — not deployed, EM-STRAT-016-WO-01)');
+  console.log('  → Revenue: recalculated after suppression; prior $380/day figure included suppressed kHYPE');
   console.log('');
   console.log('Phase 3 (Day 7 — $65k):');
   console.log('  → Add BTC Funding ($25k)');
   console.log('  → Add CexLikeDex ($5k)');
   console.log('  → Revenue: $390/day = $143k/yr');
   console.log('');
-  console.log('Phase 4 (Day 14 — $100k):');
-  console.log('  → Add kHYPE Carry ($10k)');
+  console.log('Phase 4 (Day 14 — $30k additional):');
   console.log('  → Add VOOI Funding ($25k)');
   console.log('  → Add Euler ($5k)');
-  console.log('  → Revenue: $400/day = $146k/yr');
+  console.log('  → (kHYPE Carry SUPPRESSED — not deployed, EM-STRAT-016-WO-01)');
+  console.log('  → Revenue: recalculated after suppression; prior $400/day figure included suppressed kHYPE');
   console.log('');
   console.log('Phase 5 (Day 30 — $100.2k):');
   console.log('  → Activate pump.fun (0.5 SOL = $80)');
@@ -189,10 +199,12 @@ async function main() {
   console.log('═══════════════════════════════════════════════════');
   console.log('  Summary');
   console.log('═══════════════════════════════════════════════════\n');
-  console.log(`  Total capital: $${totalCapital.toLocaleString()}`);
-  console.log(`  Expected daily profit: ~$430-630/day`);
-  console.log(`  Expected annual profit: ~$157-230k/yr (conservative)`);
-  console.log(`  Blended APR: ~157-230%`);
+  console.log(`  Deployable total capital (suppressed entries excluded): $${totalCapital.toLocaleString()}`);
+  // EM-STRAT-016-WO-01-R1: the prior ~$430-630/day / ~$157-230k/yr summary
+  // figures included suppressed kHYPE entries and are withdrawn; no
+  // replacement estimate is offered while that strategy's economics are
+  // unverified.
+  console.log('  Expected daily/annual profit: prior aggregate figures WITHDRAWN (they included suppressed kHYPE entries); no replacement estimate while economics are unverified');
   console.log('');
   console.log('  KEY: Deploy in ORDER. Don\'t skip steps.');
   console.log('  Each phase builds on the previous.');

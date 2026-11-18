@@ -146,9 +146,12 @@ async function main() {
     if (alerts.length === 0) {
       console.log('  No actionable kHYPE opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met).\n');
     }
+    // EM-STRAT-016-WO-01: unstake-fee suppressed — every figure below is a
+    // pre-fee reference, not a validated net opportunity.
+    console.log('  SUPPRESSED (unstake-fee evidence unavailable — figures are pre-fee references, EM-STRAT-016-WO-01)');
     for (const a of alerts) {
-      console.log(`  kHYPE/WHYPE: ${a.grossDiscountPct.toFixed(2)}% gross  ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)})`);
-      console.log(`    Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
+      console.log(`  kHYPE/WHYPE: ${a.grossDiscountPct.toFixed(2)}% gross  ${a.netProfitPct.toFixed(2)}% net (pre-unstake-fee, anchor: ${a.redemptionAnchor.toFixed(4)})`);
+      console.log(`    Net (pre-fee): ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}  Fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%`);
       console.log(`    Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}\n`);
     }
   } catch (e: any) { console.log(`  Error: ${e.message}\n`); }

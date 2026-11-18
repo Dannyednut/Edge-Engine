@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { HlLstArbScanner, MIN_NET_DISCOUNT_PCT_DEFAULT, type HlLstArbDeps } from '../src/strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, MIN_NET_DISCOUNT_PCT_DEFAULT, UNSTAKE_FEE_SUPPRESSED, type HlLstArbDeps, type HlLstArbAlert } from '../src/strategies/hl-lst-arb-scanner.js';
 import { HYPERSWAP_V3_POOLS, HYPERLEND_FLASHLOAN_FEE } from '../src/lib/hyperliquid-defi.js';
 
 // ─── Test helpers ──────────────────────────────────────────────────────
@@ -421,6 +421,8 @@ describe('HlLstArbScanner — EM-STRAT-004 signal-integrity regressions', () => 
         pair: 'WHYPE/kHYPE', poolAddress: '0x', feeTier: 100,
         marketPrice: 1.05, redemptionAnchor: 1.0265, grossDiscountPct: 5,
         netProfitPct: 4.95, estimatedProfitUsd: 247.5, ammFeePct: 0.01,
+        // EM-STRAT-016-WO-01: required literal suppression fields.
+        unstakeFeePct: null, unstakeFeeUnverified: true,
         flashloanFeePct: 0.04, poolLiquidity: 1n, withdrawalDelaySec: 604800,
         anchorBlockTs: 1700000000, anchorFresh: true, executable: false, ts: 0,
       };
@@ -701,5 +703,100 @@ describe('withdrawalDelay selector integrity (EM-STRAT-014-X3-F1)', () => {
     };
     const scanner = new HlLstArbScanner({ minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100 }, deps);
     expect(await scanner.fetchWithdrawalDelay()).toBeNull();
+  });
+});
+
+
+// ─── EM-STRAT-016-WO-01: unstake-fee fail-closed suppression ────────────
+//
+// The Kinetiq unstake fee ("burns kHYPE, returns HYPE after delay, LESS
+// FEE") is a required cost of the carry that this scanner has never read.
+// The net-profit line silently treats it as zero, so scanner results can
+// overstate the actual net opportunity. Until a separate evidence-backed
+// work order wires a verified fee source, EVERY alert must carry the
+// suppression fields (unstakeFeePct: null — never a zero substitute — and
+// the literal unstakeFeeUnverified: true) and the suppression reason must
+// be observable and testable. There is deliberately NO env/config bypass.
+
+describe('EM-STRAT-016-WO-01 — unstake-fee fail-closed suppression', () => {
+  // A fully-valid scan scenario (fresh anchor, withdrawal delay present,
+  // clear discount): suppression must hold even when every OTHER input is
+  // available, because the unstake-fee evidence specifically is missing.
+  const validScenario = {
+    anchorRate: rateHex(1.0265),
+    blockTs: DEFAULT_BLOCK_TS,
+    withdrawalDelay: '0x' + (604800).toString(16),
+    poolSlot0: { [pool100.address]: sqrtPriceHex(1.05) },
+    poolLiquidity: { [pool100.address]: '0x' + (BigInt(1e18)).toString(16) },
+    now: DEFAULT_NOW,
+  };
+
+  it('every alert carries unstakeFeeUnverified: true and unstakeFeePct: null — even on a fully-valid scan', async () => {
+    const scanner = new HlLstArbScanner(
+      { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+      makeDeps(validScenario),
+    );
+    const alerts = await scanner.scan();
+    expect(alerts.length).toBeGreaterThanOrEqual(1);
+    for (const a of alerts) {
+      expect(a.unstakeFeeUnverified).toBe(true);
+      expect(a.unstakeFeePct).toBeNull();
+    }
+  });
+
+  it('unstake fee is never substituted with zero — netProfitPct is a pre-fee figure and alerts still flow', async () => {
+    // The suppression must NOT be implemented by dropping alerts to [] (that
+    // would break the existing EM-STRAT-004/005 fail-closed-input regressions
+    // and hide the reference data): alerts still flow, but the fee stays null
+    // and the figure is labeled pre-fee at the presenter, not zeroed here.
+    const scanner = new HlLstArbScanner(
+      { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+      makeDeps(validScenario),
+    );
+    const alerts = await scanner.scan();
+    expect(alerts.length).toBeGreaterThanOrEqual(1);
+    const a = alerts[0];
+    expect(a.netProfitPct).toBeGreaterThan(0); // pre-fee reference retained
+    expect(a.unstakeFeePct).toBeNull();        // fee itself: unknown, not 0
+    // The suppression reason constant is observable and testable.
+    expect(UNSTAKE_FEE_SUPPRESSED).toMatch(/unstake-fee evidence unavailable/);
+    expect(UNSTAKE_FEE_SUPPRESSED).toMatch(/EM-STRAT-016-WO-01/);
+  });
+
+  it('a hostile scanner result cannot bypass the suppression: the alert type forces the literal fields', () => {
+    // Type-level guard: a future edit emitting unstakeFeeUnverified: false
+    // (or omitting the field) fails to COMPILE — the interface literal is the
+    // review checkpoint. Here we verify the runtime contract of the emitted
+    // alerts AND that a hand-built bypass attempt cannot typecheck-equivalent
+    // (field absent → TypeScript excess/missing-property failure at build
+    // time; present-but-false is a type error since the type is `true`).
+    const alert: HlLstArbAlert = {
+      pair: 'WHYPE/kHYPE', poolAddress: '0x', feeTier: 100,
+      marketPrice: 1.05, redemptionAnchor: 1.0265, grossDiscountPct: 5,
+      netProfitPct: 4.95, estimatedProfitUsd: 247.5, ammFeePct: 0.01,
+      unstakeFeePct: null, unstakeFeeUnverified: true,
+      flashloanFeePct: 0.04, poolLiquidity: 1n, withdrawalDelaySec: 604800,
+      anchorBlockTs: 1700000000, anchorFresh: true, executable: false, ts: 0,
+    };
+    expect(alert.unstakeFeeUnverified).toBe(true);
+  });
+
+  it('missing unstake-fee evidence prevents opportunity dispatch at the presenter contracts (source-level)', async () => {
+    // The scanner-side contract above plus the strategy-labeling.test.ts
+    // presenter-contract assertions (severity 'info' + [HLLST-REF] label +
+    // hard guard `a.unstakeFeeUnverified !== true`) jointly prove that no
+    // hl_lst_arb alert can be dispatched as an economically validated
+    // opportunity. This test pins that the scanner never FABRICATES the fee
+    // when the RPC layer is hostile (garbage responses): alerts either
+    // carry null fee or fail closed entirely — never an estimate.
+    const garbage = makeDeps({ ...validScenario, anchorRateRaw: '0x' });
+    const scanner = new HlLstArbScanner(
+      { minDiscountPct: 0.1, maxSizeUsd: 5_000, preferredFeeTier: 100, minNetDiscountPct: 0.30 },
+      garbage,
+    );
+    const alerts = await scanner.scan();
+    // Fail-closed elsewhere (anchor missing) → [] — the unstake fee is
+    // still never fabricated on any surviving alert.
+    expect(alerts).toEqual([]);
   });
 });

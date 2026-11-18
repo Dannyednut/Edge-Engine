@@ -134,9 +134,12 @@ async function main() {
     const a = alerts[0];
     checks.push({
       name: 'kHYPE Carry Arb',
-      status: a ? 'pass' : 'warn',
+      // EM-STRAT-016-WO-01: the unstake fee is unknown (never assumed
+      // zero); an existing alert is NOT an economically validated
+      // opportunity, so the check reports 'warn', never 'pass'.
+      status: a ? 'warn' : 'warn',
       detail: a
-        ? `${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`
+        ? `SUPPRESSED (unstake-fee evidence unavailable — net figure is pre-fee): ${a.grossDiscountPct.toFixed(2)}% gross / ${a.netProfitPct.toFixed(2)}% net (anchor: ${a.redemptionAnchor.toFixed(4)}, fresh: ${a.anchorFresh}) = $${a.estimatedProfitUsd.toFixed(0)}`
         : 'No actionable opportunity (fail-closed: anchor/delay/fees or 0.30% net threshold not met)',
     });
   } catch (e: any) {

@@ -28,7 +28,7 @@ import { PendleBorosScanner, type BorosArbAlert } from '../strategies/pendle-bor
 import { TokenizedEquityScanner, type TokenizedEquityAlert } from '../strategies/tokenized-equity-scanner.js';
 import { CexLikeDexPriceArbStrategy, type PriceArbAlert } from '../strategies/cexlike-dex-price-arb.js';
 import { HlAmmArbScanner, type HlAmmArbAlert } from '../strategies/hl-amm-arb-scanner.js';
-import { HlLstArbScanner, type HlLstArbAlert } from '../strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, UNSTAKE_FEE_SUPPRESSED, type HlLstArbAlert } from '../strategies/hl-lst-arb-scanner.js';
 import { GoldArbScanner, type GoldArbAlert } from '../strategies/gold-arb-scanner.js';
 import { EquityPerpCrossVenueScanner, formatEquityPerpDegradation, type EquityPerpArbAlert } from '../strategies/equity-perp-cross-venue.js';
 import { LstYieldComparisonScanner, type LstYieldAlert } from '../strategies/lst-yield-comparison.js';
@@ -511,20 +511,34 @@ async function main() {
       }
 
       // Process HL LST arb alerts
+      // ─── EM-STRAT-016-WO-01: HL LST alerts are SUPPRESSED (fail-closed). ───
+      // The Kinetiq unstake fee is a required cost of the carry and no
+      // verified source for it is wired: the scanner's netProfitPct
+      // excludes it (silently treating it as zero), so no hl_lst_arb
+      // result is an economically validated opportunity. Defense-in-depth:
+      // even if a scanner result were injected here, the loop guards on
+      // `a.unstakeFeeUnverified !== true` and suppresses rather than risk
+      // an actionable presentation. Hard guard only — there is
+      // deliberately NO env/config bypass for this suppression.
+      // Regression: strategy-labeling.test.ts asserts this block never
+      // assigns severity 'opportunity' to hl_lst_arb alerts.
       for (const a of hlLstAlerts.slice(0, 2)) {
+        if (a.unstakeFeeUnverified !== true) continue;
         const key = `hllst|${a.pair}|${a.feeTier}`;
         if ((Date.now() - (seenOpps.get(key) ?? 0)) < DEDUP_WINDOW_MS) continue;
         seenOpps.set(key, Date.now());
         await alerter.sendAlert({
           id: `hllst_${a.pair}_${Date.now()}`,
           ts: Date.now(),
-          severity: 'opportunity',
+          severity: 'info', // EM-STRAT-016-WO-01: never 'opportunity' while suppressed
           strategyId: 'hl_lst_arb',
-          title: `[HLLST] ${a.pair} ${a.grossDiscountPct.toFixed(2)}% discount (anchor: ${a.redemptionAnchor.toFixed(4)})`,
+          title: `[HLLST-REF] ${a.pair} ${a.grossDiscountPct.toFixed(2)}% gross reference (anchor: ${a.redemptionAnchor.toFixed(4)}) — unstake-fee suppressed`,
           body: [
+            'SUPPRESSED — not an actionable opportunity. ' + UNSTAKE_FEE_SUPPRESSED,
+            'Net figure below EXCLUDES the unstake fee (pre-fee reference only):',
             `Market price: ${a.marketPrice.toFixed(6)} kHYPE/WHYPE  Anchor: ${a.redemptionAnchor.toFixed(6)}`,
-            `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net profit: ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
-            `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
+            `Gross discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee): ${a.netProfitPct.toFixed(2)}% = $${a.estimatedProfitUsd.toFixed(2)}`,
+            `Unstake fee: UNAVAILABLE (never assumed zero)  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}  Anchor block ts: ${a.anchorBlockTs !== null ? a.anchorBlockTs : 'UNAVAILABLE'}`,
             // EM-STRAT-004: fee tier is in hundredths of a bip (e.g., 100 → 0.01%).
             // Display as pct directly using the corrected conversion (fee/10000).
             `Fee tier: ${a.feeTier} (${a.ammFeePct.toFixed(4)}%)  Flashloan: ${a.flashloanFeePct.toFixed(2)}%`,

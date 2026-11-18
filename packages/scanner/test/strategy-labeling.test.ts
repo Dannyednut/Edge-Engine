@@ -449,6 +449,8 @@ describe('EM-STRAT-004 — alert-shape invariants', () => {
       pair: 'WHYPE/kHYPE', poolAddress: '0x', feeTier: 100,
       marketPrice: 1.05, redemptionAnchor: 1.0265, grossDiscountPct: 5,
       netProfitPct: 4.95, estimatedProfitUsd: 247.5, ammFeePct: 0.01,
+      // EM-STRAT-016-WO-01: required literal suppression fields.
+      unstakeFeePct: null, unstakeFeeUnverified: true,
       flashloanFeePct: 0.04, poolLiquidity: 1n, withdrawalDelaySec: 604800,
       anchorBlockTs: 1700000000, anchorFresh: true, executable: false, ts: 0,
     };
@@ -461,6 +463,8 @@ describe('EM-STRAT-004 — alert-shape invariants', () => {
       pair: 'WHYPE/kHYPE', poolAddress: '0x', feeTier: 100,
       marketPrice: 1.05, redemptionAnchor: 1.0265, grossDiscountPct: 5,
       netProfitPct: 4.95, estimatedProfitUsd: 247.5, ammFeePct: 0.01,
+      // EM-STRAT-016-WO-01: required literal suppression fields.
+      unstakeFeePct: null, unstakeFeeUnverified: true,
       flashloanFeePct: 0.04, poolLiquidity: 1n, withdrawalDelaySec: 604800,
       anchorBlockTs: 1700000000, anchorFresh: true, executable: false, ts: 0,
     };
@@ -584,5 +588,163 @@ describe('EM-STRAT-005 §2 — CEX-HL documentation accuracy', () => {
     expect(provenanceSection).toMatch(/independently[\s-]corroborated/i);
     // Must explicitly say Sharpe /funding/rates is the SAME provider.
     expect(provenanceSection).toMatch(/SAME provider/i);
+  });
+});
+
+
+// ─── EM-STRAT-016-WO-01: HL LST unstake-fee suppression — presenter ─────
+// ─── source contracts (fail-closed, no env/config bypass) ──────────────
+//
+// The Kinetiq unstake fee is a required cost of the kHYPE carry that no
+// verified source provides; the scanner's netProfitPct silently treats it
+// as zero. These static contracts pin the suppression at EVERY presenter
+// that can dispatch hl_lst_arb: no severity 'opportunity' anywhere, hard
+// `unstakeFeeUnverified !== true` guards, [HLLST-REF]/[kHYPE-REF] labels,
+// pre-fee wording, the suppression-reason constant in the body, and NO
+// environment-variable or config bypass. Unrelated strategy alert blocks
+// in the same files must remain untouched (severity 'opportunity' is still
+// allowed for OTHER strategies — the assertions are scoped to the
+// hl_lst_arb blocks only).
+
+describe('EM-STRAT-016-WO-01 — HL LST unstake-fee suppression presenter contracts', () => {
+  describe('all-runner.ts: hl_lst_arb block', () => {
+    const src = readRunner('all-runner.ts');
+
+    it('imports the suppression-reason constant', () => {
+      expect(src).toMatch(
+        /import\s*\{[^}]*UNSTAKE_FEE_SUPPRESSED[^}]*\}\s*from\s*'\.\.\/strategies\/hl-lst-arb-scanner\.js'/,
+      );
+    });
+
+    it('dispatches hl_lst_arb alerts with severity info, NEVER opportunity', () => {
+      const blockMatch = src.match(/Process HL LST arb alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
+      expect(blockMatch, 'HL LST alert block not found').not.toBeNull();
+      const block = blockMatch![0];
+      // Must use 'info' severity and must NOT use 'opportunity'.
+      expect(block).toMatch(/severity:\s*['"]info['"]/);
+      expect(block).not.toMatch(/severity:\s*['"]opportunity['"]/);
+    });
+
+    it('hard-guards on unstakeFeeUnverified === true before dispatching (scanner result cannot bypass)', () => {
+      const blockMatch = src.match(/Process HL LST arb alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
+      const block = blockMatch![0];
+      expect(block).toMatch(/a\.unstakeFeeUnverified\s*!==\s*true/);
+    });
+
+    it('labels suppressed alerts [HLLST-REF] (not the old actionable [HLLST])', () => {
+      const blockMatch = src.match(/Process HL LST arb alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
+      const block = blockMatch![0];
+      expect(block).toMatch(/\[HLLST-REF\]/);
+      expect(block).not.toMatch(/\[HLLST\](?!-REF)/);
+    });
+
+    it('carries the suppression reason and pre-fee wording in the alert body', () => {
+      const blockMatch = src.match(/Process HL LST arb alerts[\s\S]*?(?=\n\s*\/\/ Process)/);
+      const block = blockMatch![0];
+      expect(block).toContain('UNSTAKE_FEE_SUPPRESSED');
+      expect(block).toMatch(/SUPPRESSED/);
+      expect(block).toMatch(/pre-unstake-fee|pre-fee/i);
+      expect(block).toMatch(/Unstake fee: UNAVAILABLE/);
+    });
+  });
+
+  describe('opportunity-monitor.ts: hl_lst_arb block', () => {
+    const src = readRunner('opportunity-monitor.ts');
+
+    it('dispatches hl_lst_arb alerts with severity info, NEVER opportunity', () => {
+      const blockMatch = src.match(/\/\/ 2\. kHYPE LST carry arb[\s\S]*?(?=\n\s*\/\/ 3\.)/);
+      expect(blockMatch, 'kHYPE block not found').not.toBeNull();
+      const block = blockMatch![0];
+      expect(block).toMatch(/severity:\s*['"]info['"]/);
+      expect(block).not.toMatch(/severity:\s*['"]opportunity['"]/);
+      // Hard guard: only suppressed alerts pass; a scanner result that is
+      // not marked unverified cannot bypass into this presenter's dispatch.
+      expect(block).toMatch(/a\.unstakeFeeUnverified\s*!==\s*true/);
+    });
+
+    it('imports the suppression-reason constant and labels alerts [kHYPE-REF]', () => {
+      expect(src).toMatch(
+        /import\s*\{[^}]*UNSTAKE_FEE_SUPPRESSED[^}]*\}\s*from\s*'\.\.\/strategies\/hl-lst-arb-scanner\.js'/,
+      );
+      const blockMatch = src.match(/\/\/ 2\. kHYPE LST carry arb[\s\S]*?(?=\n\s*\/\/ 3\.)/);
+      const block = blockMatch![0];
+      expect(block).toMatch(/\[kHYPE-REF\]/);
+      expect(block).not.toMatch(/\[kHYPE\](?!-REF)/);
+      expect(block).toContain('UNSTAKE_FEE_SUPPRESSED');
+    });
+
+    it('still dispatches OTHER strategies with severity opportunity (unrelated behavior preserved)', () => {
+      // VOOI price-spread alerts are an unrelated strategy: their dispatch
+      // block must keep severity 'opportunity' — the suppression is scoped
+      // to hl_lst_arb ONLY. EM-STRAT-016-WO-01-R1: assert the ACTUAL
+      // severity and strategyId of the VOOI dispatch, not merely the
+      // existence of its source block.
+      const vooiMatch = src.match(/\/\/ 1\. VOOI price spread arbs[\s\S]*?(?=\n\s*\/\/ 2\. kHYPE LST carry arb)/);
+      expect(vooiMatch, 'VOOI block not found (check block boundary regex)').not.toBeNull();
+      const vooiBlock = vooiMatch![0];
+      expect(vooiBlock).toMatch(/severity:\s*['"]opportunity['"]/);
+      expect(vooiBlock).toMatch(/strategyId:\s*['"]vooi_price_spread['"]/);
+    });
+  });
+
+  describe('no environment-variable or config bypass exists', () => {
+    it('scanner source has no env/config gate that can disable the suppression', () => {
+      const scannerSrc = readFileSync(
+        resolve(SCANNER_RUNNERS_DIR, '..', 'strategies', 'hl-lst-arb-scanner.ts'),
+        'utf8',
+      );
+      // No env read anywhere in the scanner (it had none before either —
+      // pin that the suppression adds none).
+      expect(scannerSrc).not.toMatch(/process\.env/);
+      // No config field can flip the suppression: the flag is a literal
+      // type (`unstakeFeeUnverified: true`), not a parameter.
+      expect(scannerSrc).toMatch(/unstakeFeeUnverified:\s*true/);
+      // Code occurrences only (interface declaration + emission site,
+      // each followed by ';' or ','); prose in doc comments uses backticks
+      // and is excluded by the terminator.
+      const occurrences = scannerSrc.match(/unstakeFeeUnverified:\s*true\s*[;,]/g) || [];
+      expect(occurrences.length).toBe(2);
+      expect(scannerSrc).not.toMatch(/unstakeFeeUnverified:\s*(?!true\b)[A-Za-z_]/);
+      expect(scannerSrc).not.toMatch(/unstakeFeeUnverified\s*\?\?/);
+    });
+
+    it('no runner reads a bypass env variable for hl_lst_arb suppression', () => {
+      for (const runner of ['all-runner.ts', 'opportunity-monitor.ts', 'command-handler.ts',
+                            'master-view.ts', 'telegram-summary.ts', 'daily-report.ts', 'readiness-check.ts']) {
+        const src = readRunner(runner);
+        expect(src, runner).not.toMatch(
+          /HLLST[_A-Z]*(SUPPRESS|ENABLE|BYPASS|FEE)[A-Z_]*|UNSTAKE_FEE_[A-Z_]*(ENABLE|BYPASS)/i,
+        );
+      }
+    });
+
+    it('the strategy-configs.ts hlLstArb mapping adds no suppression bypass key', () => {
+      const src = readRunner('strategy-configs.ts');
+      const blockMatch = src.match(/── 11\. HL LST arb[\s\S]*?(?=── 12\.)/);
+      expect(blockMatch, 'hlLstArb config block not found').not.toBeNull();
+      const block = blockMatch![0];
+      expect(block).not.toMatch(/suppress|bypass|enable|unstake/i);
+    });
+  });
+
+  describe('daily-report.ts: status row marks hl_lst_arb as suppressed', () => {
+    const src = readRunner('daily-report.ts');
+
+    it('status table row 11 must NOT claim ✅ Live', () => {
+      const rowMatch = src.match(/\|\s*11\s*\|\s*HL LST \(kHYPE\) Arb\s*\|\s*hl_lst_arb\s*\|\s*([^\n|]+)\s*\|/);
+      expect(rowMatch, 'HL LST status row not found').not.toBeNull();
+      const status = rowMatch![1];
+      expect(status).not.toMatch(/✅\s*Live/);
+      expect(status).toMatch(/Suppressed|fail-closed|EM-STRAT-016-WO-01/i);
+    });
+
+    it('opportunity entries carry the suppression marker and pre-fee wording', () => {
+      const oppMatch = src.match(/1\. kHYPE LST carry arb[\s\S]*?(?=\/\/ 2\.)/);
+      expect(oppMatch, 'kHYPE opportunity block not found').not.toBeNull();
+      const block = oppMatch![0];
+      expect(block).toMatch(/SUPPRESSED/);
+      expect(block).toMatch(/pre-unstake-fee|pre-fee/i);
+      expect(block).toContain('UNSTAKE_FEE_SUPPRESSED');
+    });
   });
 });

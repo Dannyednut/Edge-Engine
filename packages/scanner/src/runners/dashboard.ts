@@ -61,8 +61,16 @@ async function main() {
 
   const opportunities: Opportunity[] = [];
 
-  // 1. kHYPE LST carry arb
-  console.log('Scanning kHYPE LST carry arb...');
+  // ─── EM-STRAT-016-WO-01-R1: kHYPE is SUPPRESSED, not an actionable ───
+  // ─── opportunity. It must NOT enter the ranked `opportunities` array ──
+  // ─── (no top-10 rank, no top-5 aggregate, no combined-APR credit) and
+  // its pre-fee figures must not be presented as verified net economics.
+  // It is collected into a separate suppressed-reference section below,
+  // the same pattern the dashboard already uses for Euler monitoring-only
+  // entries. The suppression stays until a separate evidence-backed work
+  // order authorizes removal.
+  const suppressedRefs: Array<{ asset: string; details: string[]; ts: number }> = [];
+  console.log('Scanning kHYPE LST carry arb (suppressed reference)...');
   try {
     const hlLstArb = new HlLstArbScanner({
       minDiscountPct: 0.1,
@@ -72,24 +80,14 @@ async function main() {
     });
     const alerts = await hlLstArb.scan();
     for (const a of alerts) {
-      // Carry arb: profit per 8-day cycle × 365/8 = annualized
-      const profitPerCycle = a.estimatedProfitUsd;
-      const annualProfit = profitPerCycle * (365 / 8);  // 8-day cycles
-      const annualizedReturnPct = (annualProfit / 5_000) * 100;
-      opportunities.push({
-        strategy: 'kHYPE LST carry arb',
+      suppressedRefs.push({
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.grossDiscountPct,
-        annualizedReturnPct,
-        estimatedProfitUsd: annualProfit,
-        capitalRequired: 5_000,
         details: [
-          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
-          `Net profit per 8-day cycle: $${profitPerCycle.toFixed(2)}`,
-          `Annualized: $${annualProfit.toFixed(0)} (${annualizedReturnPct.toFixed(1)}% APR)`,
-          `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
+          `SUPPRESSED — unstake-fee evidence unavailable (EM-STRAT-016-WO-01); NOT an actionable opportunity, NOT included in totals. Every figure below is a PRE-UNSTAKE-FEE reference, not verified net economics.`,
+          `Unstake fee: UNAVAILABLE (never assumed zero)  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee, unverified): ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
+          `Pre-fee profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)} (pre-fee reference only — NOT an expected strategy return)`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
-          `Execution: buy kHYPE → queue Kinetiq withdrawal → claim HYPE`,
         ],
         ts: a.ts,
       });
@@ -292,6 +290,20 @@ async function main() {
     for (const m of monitoringOnly) {
       console.log(`  ${m.asset}`);
       for (const d of m.details) console.log(`    ${d}`);
+      console.log('');
+    }
+  }
+
+  // ─── Suppressed-Reference Section (EM-STRAT-016-WO-01-R1) ───────────
+  // kHYPE entries appear here ONLY as unverified pre-fee references. They
+  // are NOT in the ranked opportunities above and are NOT included in
+  // the top-5 totals or combined APR.
+  if (suppressedRefs.length > 0) {
+    console.log('');
+    console.log('── SUPPRESSED REFERENCE — not actionable (unstake-fee evidence unavailable) ──');
+    for (const s of suppressedRefs) {
+      console.log(`  ${s.asset}`);
+      for (const d of s.details) console.log(`    ${d}`);
       console.log('');
     }
   }

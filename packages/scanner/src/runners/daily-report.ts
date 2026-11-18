@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { HlLstArbScanner } from '../strategies/hl-lst-arb-scanner.js';
+import { HlLstArbScanner, UNSTAKE_FEE_SUPPRESSED } from '../strategies/hl-lst-arb-scanner.js';
 import { LstYieldComparisonScanner } from '../strategies/lst-yield-comparison.js';
 import { PtYieldArbScanner } from '../strategies/pt-yield-arb-scanner.js';
 import { EulerLendingArbScanner } from '../strategies/euler-lending-arb-scanner.js';
@@ -70,7 +70,7 @@ async function main() {
   lines.push('## Executive Summary');
   lines.push('');
 
-  const { opportunities, monitoring: monitoringOnly } = await gatherOpportunities();
+  const { opportunities, monitoring: monitoringOnly, suppressedRefs } = await gatherOpportunities();
 
   if (opportunities.length === 0) {
     lines.push('No actionable opportunities found at this time.');
@@ -105,7 +105,7 @@ async function main() {
   lines.push('| 8 | Tokenized Equity | tokenized_equity | ✅ Live |');
   lines.push('| 9 | CEX-like DEX Price Arb | cexlike_dex_price_arb | ✅ Live (filtered) |');
   lines.push('| 10 | HL AMM Arb | hl_amm_arb | ✅ Live |');
-  lines.push('| 11 | HL LST (kHYPE) Arb | hl_lst_arb | ✅ Live |');
+  lines.push('| 11 | HL LST (kHYPE) Arb | hl_lst_arb | 🚫 Suppressed (fail-closed, EM-STRAT-016-WO-01: unstake-fee evidence unavailable) |');
   lines.push('| 12 | Gold Arb (PAXG/XAUT) | gold_arb | ✅ Live |');
   lines.push('| 13 | Equity Perp Cross-Venue | equity_perp_cross_venue | ✅ Live |');
   lines.push('| 14 | LST Yield Comparison | lst_yield_comparison | ✅ Live |');
@@ -282,6 +282,27 @@ async function main() {
     }
   }
 
+  // ── Suppressed-Reference Section (EM-STRAT-016-WO-01-R1) ──────────
+  // kHYPE LST carry entries are reported here ONLY as unverified pre-fee
+  // references. They are NOT in the actionable opportunities table, NOT in
+  // the top-5 totals, and NOT in the combined-APR aggregate above. The
+  // suppression stays until a separate evidence-backed work order
+  // authorizes removal.
+  if (suppressedRefs.length > 0) {
+    lines.push('## Suppressed Reference — not actionable (unstake-fee evidence unavailable)');
+    lines.push('');
+    lines.push('> The Kinetiq unstake fee is unknown (never assumed zero). Every figure below');
+    lines.push('> is a PRE-UNSTAKE-FEE reference, not verified net economics. These entries are');
+    lines.push('> NOT included in any actionable-opportunity total or ranking.');
+    lines.push('');
+    for (const s of suppressedRefs) {
+      lines.push(`### ${s.asset} (suppressed)`);
+      lines.push('');
+      for (const d of s.details) lines.push(`- ${d}`);
+      lines.push('');
+    }
+  }
+
   // Write report
   const dataDir = resolve(REPO_ROOT, 'data');
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
@@ -290,11 +311,13 @@ async function main() {
   console.log(`\n✓ Daily report written to: ${reportPath}`);
   console.log(`  Total actionable opportunities: ${opportunities.length}`);
   console.log(`  Monitoring-only entries: ${monitoringOnly.length}`);
+  console.log(`  Suppressed-reference entries (kHYPE): ${suppressedRefs.length}`);
   console.log(`  Top 5 est. profit: $${opportunities.slice(0, 5).reduce((s, o) => s + o.estimatedProfitUsd, 0).toFixed(0)}/yr`);
 }
 
-async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; monitoring: Array<{ asset: string; deposit: string; borrow: string; supplyApy: string; spread: string; profit: string; tvl: string; borrowable: boolean }> }> {
+async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; monitoring: Array<{ asset: string; deposit: string; borrow: string; supplyApy: string; spread: string; profit: string; tvl: string; borrowable: boolean }>; suppressedRefs: Array<{ asset: string; details: string[] }> }> {
   const opportunities: Opportunity[] = [];
+  const suppressedRefs: Array<{ asset: string; details: string[] }> = [];
   let rank = 0;
 
   // 1. kHYPE LST carry arb
@@ -304,22 +327,22 @@ async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; mo
       minNetDiscountPct: 0.30,
     });
     const alerts = await hlLstArb.scan();
+    // EM-STRAT-016-WO-01-R1: kHYPE is SUPPRESSED — the unstake fee is
+    // unknown (never assumed zero), so its pre-fee figures are NOT
+    // validated net economics. It must NOT enter the ranked `opportunities`
+    // collection (no rank, no Top-N table row, no aggregate/combined-APR
+    // credit); it is collected into a separate suppressed-reference list
+    // rendered in its own monitoring-style section below. The suppression
+    // stays until a separate evidence-backed work order authorizes removal.
     for (const a of alerts) {
-      const annualProfit = a.estimatedProfitUsd * (365 / 8);
-      opportunities.push({
-        rank: ++rank,
-        strategy: 'kHYPE LST carry arb',
+      suppressedRefs.push({
         asset: 'kHYPE/WHYPE',
-        spreadPct: a.grossDiscountPct,
-        annualizedReturnPct: (annualProfit / 5000) * 100,
-        estimatedProfitUsd: annualProfit,
-        capitalRequired: 5000,
         details: [
-          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net: ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
-          `Profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)}`,
-          `Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
+          `SUPPRESSED (EM-STRAT-016-WO-01): ${UNSTAKE_FEE_SUPPRESSED}`,
+          `Unstake fee: UNAVAILABLE (never assumed zero)  Withdrawal delay: ${a.withdrawalDelaySec !== null ? a.withdrawalDelaySec + 's' : 'UNAVAILABLE'}  Anchor fresh: ${a.anchorFresh}`,
+          `Discount: ${a.grossDiscountPct.toFixed(2)}%  Net (pre-unstake-fee, unverified): ${a.netProfitPct.toFixed(2)}% on HyperSwap V3 (fee tier ${a.feeTier} = ${a.ammFeePct.toFixed(4)}%)`,
+          `Pre-fee profit per 8-day cycle: $${a.estimatedProfitUsd.toFixed(2)} (pre-fee reference only — NOT verified profit, NOT an expected strategy return)`,
           `Pool liquidity: ${a.poolLiquidity.toString()}`,
-          `Execution: buy kHYPE → queue Kinetiq withdrawal → claim HYPE`,
         ],
       });
     }
@@ -482,7 +505,7 @@ async function gatherOpportunities(): Promise<{ opportunities: Opportunity[]; mo
   // Re-rank
   opportunities.forEach((o, i) => o.rank = i + 1);
 
-  return { opportunities, monitoring: eulerMonitoring };
+  return { opportunities, monitoring: eulerMonitoring, suppressedRefs };
 }
 
 main().catch(err => {
